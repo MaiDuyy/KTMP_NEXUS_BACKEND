@@ -1,0 +1,33 @@
+{
+  "name": "ktmp_nexus_backend",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "dev": "tsx watch src/app.ts",
+    "start": "tsx src/app.ts"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/MaiDuyy/KTMP_NEXUS_BACKEND.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "module",
+  "bugs": {
+    "url": "https://github.com/MaiDuyy/KTMP_NEXUS_BACKEND/issues"
+  },
+  "homepage": "https://github.com/MaiDuyy/KTMP_NEXUS_BACKEND#readme",
+  "dependencies": {
+    "express": "^5.2.1",
+    "tsx": "^4.21.0"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.6",
+    "@types/node": "^25.0.10",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.9.3"
+  }
+}
