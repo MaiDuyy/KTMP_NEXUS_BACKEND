@@ -1,0 +1,25 @@
+{
+    "name": "@ott/shared",
+    "version": "1.0.0",
+    "description": "Shared types, schemas, and utilities for OTT Chat microservices",
+    "main": "dist/index.js",
+    "types": "dist/index.d.ts",
+    "type": "module",
+    "scripts": {
+        "build": "tsc",
+        "dev": "tsc --watch",
+        "test": "jest",
+        "clean": "rimraf dist"
+    },
+    "exports": {
+        ".": "./dist/index.js"
+    },
+    "dependencies": {
+        "zod": "^3.23.8"
+    },
+    "devDependencies": {
+        "@types/node": "^22.0.0",
+        "rimraf": "^6.0.0",
+        "typescript": "^5.6.0"
+    }
+}
