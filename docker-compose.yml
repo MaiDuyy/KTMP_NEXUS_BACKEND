@@ -1,0 +1,45 @@
+version: "3.8"
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: ott-postgres
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-ott_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-ott_password}
+      POSTGRES_DB: ${POSTGRES_DB:-ott_chat}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - ott-network
+
+  redis:
+    image: redis:7-alpine
+    container_name: ott-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - ott-network
+
+  nats:
+    image: nats:2.10-alpine
+    container_name: ott-nats
+    ports:
+      - "4222:4222"
+      - "8222:8222"
+    command: ["-js", "-m", "8222"]
+    networks:
+      - ott-network
+
+
+networks:
+  ott-network:
+    driver: bridge
+
+volumes:
+  postgres_data:
+  redis_data:
