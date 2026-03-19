@@ -95,6 +95,124 @@ function subscribeToNatsEvents() {
       });
     }
   })();
+   // Message Read
+  const msgReadSub = natsConnection.subscribe(EventSubjects.MESSAGE_READ);
+  (async () => {
+    for await (const msg of msgReadSub) {
+      const event = jsonCodec.decode(msg.data) as any;
+      const { chatId, userId, readAt, messageId } = event.payload;
+      io.to(`chat:${chatId}`).emit('message:read', { chatId, userId, readAt, messageId });
+    }
+  })();
+
+  // Message Reaction
+  const msgReactSub = natsConnection.subscribe(EventSubjects.MESSAGE_REACTION);
+  (async () => {
+    for await (const msg of msgReactSub) {
+      const event = jsonCodec.decode(msg.data) as any;
+      const { chatId, ...reactionData } = event.payload;
+      io.to(`chat:${chatId}`).emit('message:reacted', reactionData);
+    }
+  })();
+
+  // Message Deleted
+  const msgDeletedSub = natsConnection.subscribe(EventSubjects.MESSAGE_DELETED);
+  (async () => {
+    for await (const msg of msgDeletedSub) {
+      const event = jsonCodec.decode(msg.data) as any;
+      const { chatId, ...deleteData } = event.payload;
+      io.to(`chat:${chatId}`).emit('message:recalled', { chatId, ...deleteData });
+    }
+  })();
+
+  // ============= NEW: Thread Reply Created =============
+  const threadReplySub = natsConnection.subscribe('thread.reply.created');
+  (async () => {
+    for await (const msg of threadReplySub) {
+      const event = jsonCodec.decode(msg.data) as any;
+      const { chatId, parentId, ...replyData } = event.payload;
+      // Broadcast to chat room
+      io.to(`chat:${chatId}`).emit('thread:reply', {
+        chatId,
+        parentId,
+        reply: replyData,
+      });
+      // Also broadcast to thread-specific room
+      io.to(`thread:${parentId}`).emit('thread:reply', {
+        parentId,
+        reply: replyData,
+      });
+    }
+  })();
+
+  // ============= NEW: User Mentioned =============
+  const userMentionedSub = natsConnection.subscribe('user.mentioned');
+  (async () => {
+    for await (const msg of userMentionedSub) {
+      const event = jsonCodec.decode(msg.data) as any;
+      const { userId, chatId, messageId, mentionedBy } = event.payload;
+      // Send notification to specific user
+      io.to(`user:${userId}`).emit('mention:new', {
+        chatId,
+        messageId,
+        mentionedBy,
+        timestamp: event.timestamp,
+      });
+    }
+  })();
+
+  // ============= NEW: Mention Broadcast (@here, @channel) =============
+  const mentionBroadcastSub = natsConnection.subscribe('mention.broadcast');
+  (async () => {
+    for await (const msg of mentionBroadcastSub) {
+      const event = jsonCodec.decode(msg.data) as any;
+      const { chatId, messageId, mentionedBy, types } = event.payload;
+      // Broadcast to the whole chat room (client handles filtering)
+      io.to(`chat:${chatId}`).emit('mention:broadcast', {
+        chatId,
+        messageId,
+        mentionedBy,
+        types, // ['HERE', 'CHANNEL']
+      });
+    }
+  })();
+
+  // ============= NEW: Message Edited =============
+  const msgEditedSub = natsConnection.subscribe('message.edited');
+  (async () => {
+    for await (const msg of msgEditedSub) {
+      const event = jsonCodec.decode(msg.data) as any;
+      const { chatId, messageId, content, editedAt } = event.payload;
+      io.to(`chat:${chatId}`).emit('message:edited', {
+        chatId,
+        messageId,
+        content,
+        editedAt,
+      });
+    }
+  })();
+
+  // User Online
+  const userOnlineSub = natsConnection.subscribe(EventSubjects.USER_ONLINE);
+  (async () => {
+    for await (const msg of userOnlineSub) {
+      const event = jsonCodec.decode(msg.data) as any;
+      const { userId } = event.payload;
+      io.emit('user:online', { userId });
+    }
+  })();
+
+  // User Offline
+  const userOfflineSub = natsConnection.subscribe(EventSubjects.USER_OFFLINE);
+  (async () => {
+    for await (const msg of userOfflineSub) {
+      const event = jsonCodec.decode(msg.data) as any;
+      const { userId, lastSeen } = event.payload;
+      io.emit('user:offline', { userId, lastSeen });
+    }
+  })();
+
+  console.log('[WS Gateway] Subscribed to NATS events (including threads, mentions)');
 }
 
 // Authentication middleware
