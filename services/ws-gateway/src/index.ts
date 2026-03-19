@@ -278,6 +278,15 @@ io.on('connection', (socket: AuthenticatedSocket) => {
     socket.leave(`chat:${chatId}`);
   });
 
+  socket.on('thread:join', ({ messageId }) => {
+  socket.join(`thread:${messageId}`);
+});
+
+socket.on('thread:leave', ({ messageId }) => {
+  socket.leave(`thread:${messageId}`);
+});
+  
+
   socket.on('typing:start', ({ chatId }) => {
     socket.to(`chat:${chatId}`).emit('typing:start', {
       chatId,
