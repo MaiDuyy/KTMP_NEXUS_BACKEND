@@ -1,3 +1,17 @@
 node_modules
 # Keep environment variables out of version control
 .env
+
+dist
+.github
+docs
+src
+.env
+# Prisma
+/services/**/prisma/migrations/*
+!services/**/prisma/migrations/README.md
+
+/services/**/node_modules
+/services/**/dist
+/packages/**/node_modules
+/packages/**/dist
