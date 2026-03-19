@@ -94,6 +94,34 @@ io.on('connection', (socket: AuthenticatedSocket) => {
     socket.leave(`chat:${chatId}`);
   });
 
+  io.on('connection', (socket: AuthenticatedSocket) => {
+  const userId = socket.userId!;
+  const userName = socket.userName!;
+
+  socket.on('chat:join', ({ chatId }) => {
+    socket.join(`chat:${chatId}`);
+  });
+
+  socket.on('chat:leave', ({ chatId }) => {
+    socket.leave(`chat:${chatId}`);
+  });
+
+  socket.on('typing:start', ({ chatId }) => {
+    socket.to(`chat:${chatId}`).emit('typing:start', {
+      chatId,
+      userId,
+      userName,
+    });
+  });
+
+  socket.on('typing:stop', ({ chatId }) => {
+    socket.to(`chat:${chatId}`).emit('typing:stop', {
+      chatId,
+      userId,
+    });
+  });
+});
+
   // Disconnect
   socket.on('disconnect', () => {
     console.log(`[WS] User disconnected: ${userName} (${userId})`);
