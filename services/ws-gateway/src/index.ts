@@ -3,6 +3,7 @@ import http from 'http';
 import express from 'express';
 import { Server as SocketIOServer, Socket } from 'socket.io';
 import jwt from 'jsonwebtoken';
+import { connect, NatsConnection, JSONCodec } from 'nats';
 
 const app = express();
 const httpServer = http.createServer(app);
@@ -11,6 +12,7 @@ const httpServer = http.createServer(app);
 const PORT = process.env.PORT || 3001;
 const JWT_SECRET = process.env.JWT_SECRET || 'dev-secret';
 const CORS_ORIGIN = process.env.CORS_ORIGIN || 'http://localhost:3000';
+const NATS_URL = process.env.NATS_URL || 'nats://localhost:4222';
 
 // Types
 interface AuthenticatedSocket extends Socket {
@@ -20,6 +22,21 @@ interface AuthenticatedSocket extends Socket {
 
 // Online users: userId -> Set of socket ids
 const onlineUsers = new Map<string, Set<string>>();
+
+// NATS
+let natsConnection: NatsConnection | null = null;
+const jsonCodec = JSONCodec();
+
+const EventSubjects = {
+  MESSAGE_CREATED: 'message.created',
+  MESSAGE_READ: 'message.read',
+  MESSAGE_REACTION: 'message.reaction',
+  MESSAGE_DELETED: 'message.deleted',
+  USER_ONLINE: 'user.online',
+  USER_OFFLINE: 'user.offline',
+  TYPING_START: 'typing.start',
+  TYPING_STOP: 'typing.stop',
+};
 
 // Health check
 app.get('/healthz', (_req, res) => {
@@ -42,6 +59,43 @@ const io = new SocketIOServer(httpServer, {
   pingTimeout: 60000,
   pingInterval: 25000,
 });
+
+// ============= NATS SETUP =============
+
+async function setupNats() {
+  try {
+    natsConnection = await connect({
+      servers: NATS_URL,
+      name: 'ws-gateway',
+      reconnect: true,
+      maxReconnectAttempts: 10,
+    });
+
+    console.log('[WS Gateway] NATS connected');
+
+    // Subscribe to events for realtime broadcast
+    subscribeToNatsEvents();
+  } catch (error) {
+    console.warn('[WS Gateway] NATS not available');
+  }
+}
+
+function subscribeToNatsEvents() {
+  if (!natsConnection) return;
+
+  // Message Created -> Broadcast to chat room
+  const msgCreatedSub = natsConnection.subscribe(EventSubjects.MESSAGE_CREATED);
+  (async () => {
+    for await (const msg of msgCreatedSub) {
+      const event = jsonCodec.decode(msg.data) as any;
+      const { chatId, ...messageData } = event.payload;
+      io.to(`chat:${chatId}`).emit('message:new', {
+        message: messageData,
+        chatId,
+      });
+    }
+  })();
+}
 
 // Authentication middleware
 io.use(async (socket: AuthenticatedSocket, next) => {
@@ -156,9 +210,12 @@ socket.on('message:pin', ({ chatId, messageId, pin }) => {
 });
 
 // Start server
-httpServer.listen(PORT, () => {
-  console.log('='.repeat(50));
-  console.log(`🔌 WS Gateway running on port ${PORT}`);
-  console.log(`📡 Socket.IO ready for connections`);
-  console.log('='.repeat(50));
-});
+async function start() {
+  await setupNats();
+
+  httpServer.listen(PORT, () => {
+    console.log(`WS Gateway running on ${PORT}`);
+  });
+}
+
+start();
