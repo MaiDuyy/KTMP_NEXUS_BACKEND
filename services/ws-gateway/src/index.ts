@@ -121,6 +121,25 @@ io.on('connection', (socket: AuthenticatedSocket) => {
     });
   });
 });
+socket.on('message:read', ({ chatId }) => {
+  socket.to(`chat:${chatId}`).emit('message:read', { chatId, userId });
+});
+
+socket.on('message:react', ({ chatId, messageId, emoji }) => {
+  io.to(`chat:${chatId}`).emit('message:reacted', {
+    messageId,
+    userId,
+    emoji,
+  });
+});
+
+socket.on('message:pin', ({ chatId, messageId, pin }) => {
+  io.to(`chat:${chatId}`).emit('message:pinned', {
+    chatId,
+    messageId,
+    pin,
+  });
+});
 
   // Disconnect
   socket.on('disconnect', () => {
