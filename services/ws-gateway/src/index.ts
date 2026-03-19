@@ -3,6 +3,7 @@ import http from 'http';
 import express from 'express';
 import { Server as SocketIOServer, Socket } from 'socket.io';
 import jwt from 'jsonwebtoken';
+import { connect, NatsConnection, JSONCodec } from 'nats';
 
 const app = express();
 const httpServer = http.createServer(app);
@@ -11,6 +12,7 @@ const httpServer = http.createServer(app);
 const PORT = process.env.PORT || 3001;
 const JWT_SECRET = process.env.JWT_SECRET || 'dev-secret';
 const CORS_ORIGIN = process.env.CORS_ORIGIN || 'http://localhost:3000';
+const NATS_URL = process.env.NATS_URL || 'nats://localhost:4222';
 
 // Types
 interface AuthenticatedSocket extends Socket {
@@ -20,6 +22,21 @@ interface AuthenticatedSocket extends Socket {
 
 // Online users: userId -> Set of socket ids
 const onlineUsers = new Map<string, Set<string>>();
+
+// NATS
+let natsConnection: NatsConnection | null = null;
+const jsonCodec = JSONCodec();
+
+const EventSubjects = {
+  MESSAGE_CREATED: 'message.created',
+  MESSAGE_READ: 'message.read',
+  MESSAGE_REACTION: 'message.reaction',
+  MESSAGE_DELETED: 'message.deleted',
+  USER_ONLINE: 'user.online',
+  USER_OFFLINE: 'user.offline',
+  TYPING_START: 'typing.start',
+  TYPING_STOP: 'typing.stop',
+};
 
 // Health check
 app.get('/healthz', (_req, res) => {
@@ -42,6 +59,161 @@ const io = new SocketIOServer(httpServer, {
   pingTimeout: 60000,
   pingInterval: 25000,
 });
+
+// ============= NATS SETUP =============
+
+async function setupNats() {
+  try {
+    natsConnection = await connect({
+      servers: NATS_URL,
+      name: 'ws-gateway',
+      reconnect: true,
+      maxReconnectAttempts: 10,
+    });
+
+    console.log('[WS Gateway] NATS connected');
+
+    // Subscribe to events for realtime broadcast
+    subscribeToNatsEvents();
+  } catch (error) {
+    console.warn('[WS Gateway] NATS not available');
+  }
+}
+
+function subscribeToNatsEvents() {
+  if (!natsConnection) return;
+
+  // Message Created -> Broadcast to chat room
+  const msgCreatedSub = natsConnection.subscribe(EventSubjects.MESSAGE_CREATED);
+  (async () => {
+    for await (const msg of msgCreatedSub) {
+      const event = jsonCodec.decode(msg.data) as any;
+      const { chatId, ...messageData } = event.payload;
+      io.to(`chat:${chatId}`).emit('message:new', {
+        message: messageData,
+        chatId,
+      });
+    }
+  })();
+   // Message Read
+  const msgReadSub = natsConnection.subscribe(EventSubjects.MESSAGE_READ);
+  (async () => {
+    for await (const msg of msgReadSub) {
+      const event = jsonCodec.decode(msg.data) as any;
+      const { chatId, userId, readAt, messageId } = event.payload;
+      io.to(`chat:${chatId}`).emit('message:read', { chatId, userId, readAt, messageId });
+    }
+  })();
+
+  // Message Reaction
+  const msgReactSub = natsConnection.subscribe(EventSubjects.MESSAGE_REACTION);
+  (async () => {
+    for await (const msg of msgReactSub) {
+      const event = jsonCodec.decode(msg.data) as any;
+      const { chatId, ...reactionData } = event.payload;
+      io.to(`chat:${chatId}`).emit('message:reacted', reactionData);
+    }
+  })();
+
+  // Message Deleted
+  const msgDeletedSub = natsConnection.subscribe(EventSubjects.MESSAGE_DELETED);
+  (async () => {
+    for await (const msg of msgDeletedSub) {
+      const event = jsonCodec.decode(msg.data) as any;
+      const { chatId, ...deleteData } = event.payload;
+      io.to(`chat:${chatId}`).emit('message:recalled', { chatId, ...deleteData });
+    }
+  })();
+
+  // ============= NEW: Thread Reply Created =============
+  const threadReplySub = natsConnection.subscribe('thread.reply.created');
+  (async () => {
+    for await (const msg of threadReplySub) {
+      const event = jsonCodec.decode(msg.data) as any;
+      const { chatId, parentId, ...replyData } = event.payload;
+      // Broadcast to chat room
+      io.to(`chat:${chatId}`).emit('thread:reply', {
+        chatId,
+        parentId,
+        reply: replyData,
+      });
+      // Also broadcast to thread-specific room
+      io.to(`thread:${parentId}`).emit('thread:reply', {
+        parentId,
+        reply: replyData,
+      });
+    }
+  })();
+
+  // ============= NEW: User Mentioned =============
+  const userMentionedSub = natsConnection.subscribe('user.mentioned');
+  (async () => {
+    for await (const msg of userMentionedSub) {
+      const event = jsonCodec.decode(msg.data) as any;
+      const { userId, chatId, messageId, mentionedBy } = event.payload;
+      // Send notification to specific user
+      io.to(`user:${userId}`).emit('mention:new', {
+        chatId,
+        messageId,
+        mentionedBy,
+        timestamp: event.timestamp,
+      });
+    }
+  })();
+
+  // ============= NEW: Mention Broadcast (@here, @channel) =============
+  const mentionBroadcastSub = natsConnection.subscribe('mention.broadcast');
+  (async () => {
+    for await (const msg of mentionBroadcastSub) {
+      const event = jsonCodec.decode(msg.data) as any;
+      const { chatId, messageId, mentionedBy, types } = event.payload;
+      // Broadcast to the whole chat room (client handles filtering)
+      io.to(`chat:${chatId}`).emit('mention:broadcast', {
+        chatId,
+        messageId,
+        mentionedBy,
+        types, // ['HERE', 'CHANNEL']
+      });
+    }
+  })();
+
+  // ============= NEW: Message Edited =============
+  const msgEditedSub = natsConnection.subscribe('message.edited');
+  (async () => {
+    for await (const msg of msgEditedSub) {
+      const event = jsonCodec.decode(msg.data) as any;
+      const { chatId, messageId, content, editedAt } = event.payload;
+      io.to(`chat:${chatId}`).emit('message:edited', {
+        chatId,
+        messageId,
+        content,
+        editedAt,
+      });
+    }
+  })();
+
+  // User Online
+  const userOnlineSub = natsConnection.subscribe(EventSubjects.USER_ONLINE);
+  (async () => {
+    for await (const msg of userOnlineSub) {
+      const event = jsonCodec.decode(msg.data) as any;
+      const { userId } = event.payload;
+      io.emit('user:online', { userId });
+    }
+  })();
+
+  // User Offline
+  const userOfflineSub = natsConnection.subscribe(EventSubjects.USER_OFFLINE);
+  (async () => {
+    for await (const msg of userOfflineSub) {
+      const event = jsonCodec.decode(msg.data) as any;
+      const { userId, lastSeen } = event.payload;
+      io.emit('user:offline', { userId, lastSeen });
+    }
+  })();
+
+  console.log('[WS Gateway] Subscribed to NATS events (including threads, mentions)');
+}
 
 // Authentication middleware
 io.use(async (socket: AuthenticatedSocket, next) => {
@@ -106,6 +278,15 @@ io.on('connection', (socket: AuthenticatedSocket) => {
     socket.leave(`chat:${chatId}`);
   });
 
+  socket.on('thread:join', ({ messageId }) => {
+  socket.join(`thread:${messageId}`);
+});
+
+socket.on('thread:leave', ({ messageId }) => {
+  socket.leave(`thread:${messageId}`);
+});
+  
+
   socket.on('typing:start', ({ chatId }) => {
     socket.to(`chat:${chatId}`).emit('typing:start', {
       chatId,
@@ -156,9 +337,12 @@ socket.on('message:pin', ({ chatId, messageId, pin }) => {
 });
 
 // Start server
-httpServer.listen(PORT, () => {
-  console.log('='.repeat(50));
-  console.log(`🔌 WS Gateway running on port ${PORT}`);
-  console.log(`📡 Socket.IO ready for connections`);
-  console.log('='.repeat(50));
-});
+async function start() {
+  await setupNats();
+
+  httpServer.listen(PORT, () => {
+    console.log(`WS Gateway running on ${PORT}`);
+  });
+}
+
+start();
