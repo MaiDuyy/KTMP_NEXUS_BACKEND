@@ -18,11 +18,16 @@ interface AuthenticatedSocket extends Socket {
   userName?: string;
 }
 
+// Online users: userId -> Set of socket ids
+const onlineUsers = new Map<string, Set<string>>();
+
 // Health check
 app.get('/healthz', (_req, res) => {
   res.json({
     status: 'ok',
     service: 'ws-gateway',
+    connections: io?.engine?.clientsCount || 0,
+    onlineUsers: onlineUsers.size,
     timestamp: new Date().toISOString(),
   });
 });
@@ -65,8 +70,41 @@ io.on('connection', (socket: AuthenticatedSocket) => {
 
   console.log(`[WS] User connected: ${userName} (${userId}) - Socket: ${socket.id}`);
 
+  // Add to online users
+  if (!onlineUsers.has(userId)) {
+    onlineUsers.set(userId, new Set());
+  }
+  onlineUsers.get(userId)!.add(socket.id);
+
+  // Join personal room
+  socket.join(`user:${userId}`);
+
+  // Send online users list to this client
+  socket.emit('users:online', { userIds: Array.from(onlineUsers.keys()) });
+
+  // Event handlers
+  socket.on('chat:join', (data: { chatId: string }) => {
+    const { chatId } = data;
+    socket.join(`chat:${chatId}`);
+    console.log(`[WS] ${userName} joined chat:${chatId}`);
+  });
+
+  socket.on('chat:leave', (data: { chatId: string }) => {
+    const { chatId } = data;
+    socket.leave(`chat:${chatId}`);
+  });
+
+  // Disconnect
   socket.on('disconnect', () => {
     console.log(`[WS] User disconnected: ${userName} (${userId})`);
+
+    const userSockets = onlineUsers.get(userId);
+    if (userSockets) {
+      userSockets.delete(socket.id);
+      if (userSockets.size === 0) {
+        onlineUsers.delete(userId);
+      }
+    }
   });
 });
 
@@ -74,5 +112,6 @@ io.on('connection', (socket: AuthenticatedSocket) => {
 httpServer.listen(PORT, () => {
   console.log('='.repeat(50));
   console.log(`🔌 WS Gateway running on port ${PORT}`);
+  console.log(`📡 Socket.IO ready for connections`);
   console.log('='.repeat(50));
 });
