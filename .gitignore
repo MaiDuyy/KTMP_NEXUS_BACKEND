@@ -5,7 +5,9 @@ node_modules
 dist
 .github
 docs
-src
+/src
+!packages/shared/src
+!packages/shared/src/**
 .env
 # Prisma
 /services/**/prisma/migrations/*
