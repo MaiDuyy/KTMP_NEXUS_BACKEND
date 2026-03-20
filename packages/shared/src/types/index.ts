@@ -1,4 +1,7 @@
 
+export * from "./auth.types.js";
+export * from "./permission.types.js";
+
 export interface RefreshToken {
   id: string;
   userId: string;
