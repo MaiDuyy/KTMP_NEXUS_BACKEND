@@ -1,7 +1,12 @@
+// services/ws-gateway/src/index.ts
+// WebSocket Gateway - Migrate từ src/services/socket.service.ts
+
 import 'dotenv/config';
 import http from 'http';
 import express from 'express';
 import { Server as SocketIOServer, Socket } from 'socket.io';
+import { createAdapter } from '@socket.io/redis-adapter';
+import { Redis } from 'ioredis';
 import jwt from 'jsonwebtoken';
 import { connect, NatsConnection, JSONCodec } from 'nats';
 
@@ -12,15 +17,17 @@ const httpServer = http.createServer(app);
 const PORT = process.env.PORT || 3001;
 const JWT_SECRET = process.env.JWT_SECRET || 'dev-secret';
 const CORS_ORIGIN = process.env.CORS_ORIGIN || 'http://localhost:3000';
+const REDIS_URL = process.env.REDIS_URL || 'redis://localhost:6379';
 const NATS_URL = process.env.NATS_URL || 'nats://localhost:4222';
 
-// Types
+// ============= TYPES =============
+
 interface AuthenticatedSocket extends Socket {
   userId?: string;
   userName?: string;
 }
 
-// Online users: userId -> Set of socket ids
+// Map lưu trữ users đang online
 const onlineUsers = new Map<string, Set<string>>();
 
 // NATS
@@ -38,7 +45,8 @@ const EventSubjects = {
   TYPING_STOP: 'typing.stop',
 };
 
-// Health check
+// ============= HEALTH CHECK =============
+
 app.get('/healthz', (_req, res) => {
   res.json({
     status: 'ok',
@@ -49,7 +57,8 @@ app.get('/healthz', (_req, res) => {
   });
 });
 
-// Socket.IO setup
+// ============= SOCKET.IO SETUP =============
+
 const io = new SocketIOServer(httpServer, {
   cors: {
     origin: CORS_ORIGIN.split(',').map((o) => o.trim()),
@@ -58,7 +67,24 @@ const io = new SocketIOServer(httpServer, {
   },
   pingTimeout: 60000,
   pingInterval: 25000,
+  transports: ['websocket', 'polling'],
 });
+
+// ============= REDIS ADAPTER (Optional) =============
+
+async function setupRedisAdapter() {
+  try {
+    const pubClient = new Redis(REDIS_URL);
+    const subClient = pubClient.duplicate();
+
+    await Promise.all([pubClient.connect(), subClient.connect()]);
+
+    io.adapter(createAdapter(pubClient, subClient ) as any);
+    console.log('[WS Gateway] Redis adapter connected');
+  } catch (error) {
+    console.warn('[WS Gateway] Redis adapter not available, using memory adapter');
+  }
+}
 
 // ============= NATS SETUP =============
 
@@ -95,7 +121,8 @@ function subscribeToNatsEvents() {
       });
     }
   })();
-   // Message Read
+
+  // Message Read
   const msgReadSub = natsConnection.subscribe(EventSubjects.MESSAGE_READ);
   (async () => {
     for await (const msg of msgReadSub) {
@@ -215,7 +242,22 @@ function subscribeToNatsEvents() {
   console.log('[WS Gateway] Subscribed to NATS events (including threads, mentions)');
 }
 
-// Authentication middleware
+// ============= PUBLISH EVENTS =============
+
+function publishEvent(subject: string, payload: any) {
+  if (!natsConnection) return;
+  natsConnection.publish(
+    subject,
+    jsonCodec.encode({
+      subject,
+      payload,
+      timestamp: new Date().toISOString(),
+    })
+  );
+}
+
+// ============= SOCKET.IO MIDDLEWARE =============
+
 io.use(async (socket: AuthenticatedSocket, next) => {
   try {
     const token =
@@ -235,8 +277,9 @@ io.use(async (socket: AuthenticatedSocket, next) => {
   }
 });
 
-// Connection handler
-io.on('connection', (socket: AuthenticatedSocket) => {
+// ============= CONNECTION HANDLER =============
+
+io.on('connection', async (socket: AuthenticatedSocket) => {
   const userId = socket.userId!;
   const userName = socket.userName!;
 
@@ -251,98 +294,141 @@ io.on('connection', (socket: AuthenticatedSocket) => {
   // Join personal room
   socket.join(`user:${userId}`);
 
-  // Send online users list to this client
+  // Notify others that user is online
+  publishEvent(EventSubjects.USER_ONLINE, { userId, userName });
+
+  // Send online users list to new connection
   socket.emit('users:online', { userIds: Array.from(onlineUsers.keys()) });
 
-  // Event handlers
-  socket.on('chat:join', (data: { chatId: string }) => {
+  // ============= EVENT HANDLERS =============
+
+  // Join chat room
+  socket.on('chat:join', (data) => {
     const { chatId } = data;
     socket.join(`chat:${chatId}`);
     console.log(`[WS] ${userName} joined chat:${chatId}`);
   });
 
-  socket.on('chat:leave', (data: { chatId: string }) => {
+  // Leave chat room
+  socket.on('chat:leave', (data) => {
     const { chatId } = data;
     socket.leave(`chat:${chatId}`);
   });
 
-  io.on('connection', (socket: AuthenticatedSocket) => {
-  const userId = socket.userId!;
-  const userName = socket.userName!;
-
-  socket.on('chat:join', ({ chatId }) => {
-    socket.join(`chat:${chatId}`);
-  });
-
-  socket.on('chat:leave', ({ chatId }) => {
-    socket.leave(`chat:${chatId}`);
-  });
-
-  socket.on('thread:join', ({ messageId }) => {
-  socket.join(`thread:${messageId}`);
-});
-
-socket.on('thread:leave', ({ messageId }) => {
-  socket.leave(`thread:${messageId}`);
-});
+  // ============= NEW: Thread Room Events =============
   
+  // Join thread room (for thread-specific updates)
+  socket.on('thread:join', (data) => {
+    const { messageId } = data;
+    socket.join(`thread:${messageId}`);
+    console.log(`[WS] ${userName} joined thread:${messageId}`);
+  });
 
-  socket.on('typing:start', ({ chatId }) => {
-    socket.to(`chat:${chatId}`).emit('typing:start', {
+  // Leave thread room
+  socket.on('thread:leave', (data) => {
+    const { messageId } = data;
+    socket.leave(`thread:${messageId}`);
+  });
+
+  // Typing start
+  socket.on('typing:start', (data) => {
+    const { chatId } = data;
+    socket.to(`chat:${chatId}`).emit('typing:start', { chatId, userId, userName });
+    publishEvent(EventSubjects.TYPING_START, { chatId, userId, userName });
+  });
+
+  // Typing stop
+  socket.on('typing:stop', (data) => {
+    const { chatId } = data;
+    socket.to(`chat:${chatId}`).emit('typing:stop', { chatId, userId });
+    publishEvent(EventSubjects.TYPING_STOP, { chatId, userId });
+  });
+
+  // Mark message as read (emit via socket for immediate feedback)
+  socket.on('message:read', (data) => {
+    const { chatId } = data;
+    socket.to(`chat:${chatId}`).emit('message:read', { chatId, userId });
+  });
+
+  // React to message (client-side quick feedback)
+  socket.on('message:react', async (data) => {
+    const { messageId, chatId, emoji } = data;
+    // Emit to all in chat
+    io.to(`chat:${chatId}`).emit('message:reacted', {
+      messageId,
+      userId,
+      userName,
+      emoji,
+      action: 'added',
+    });
+  });
+
+  // Pin message
+  socket.on('message:pin', (data) => {
+    const { messageId, chatId, pin } = data;
+    io.to(`chat:${chatId}`).emit('message:pinned', {
+      messageId,
       chatId,
+      pin,
       userId,
       userName,
     });
   });
 
-  socket.on('typing:stop', ({ chatId }) => {
-    socket.to(`chat:${chatId}`).emit('typing:stop', {
-      chatId,
-      userId,
-    });
-  });
-});
-socket.on('message:read', ({ chatId }) => {
-  socket.to(`chat:${chatId}`).emit('message:read', { chatId, userId });
-});
+  // ============= DISCONNECT =============
 
-socket.on('message:react', ({ chatId, messageId, emoji }) => {
-  io.to(`chat:${chatId}`).emit('message:reacted', {
-    messageId,
-    userId,
-    emoji,
-  });
-});
-
-socket.on('message:pin', ({ chatId, messageId, pin }) => {
-  io.to(`chat:${chatId}`).emit('message:pinned', {
-    chatId,
-    messageId,
-    pin,
-  });
-});
-
-  // Disconnect
-  socket.on('disconnect', () => {
+  socket.on('disconnect', async () => {
     console.log(`[WS] User disconnected: ${userName} (${userId})`);
 
+    // Remove from online users
     const userSockets = onlineUsers.get(userId);
     if (userSockets) {
       userSockets.delete(socket.id);
+
+      // If no more sockets, mark as offline
       if (userSockets.size === 0) {
         onlineUsers.delete(userId);
+        
+        const lastSeen = new Date().toISOString();
+        publishEvent(EventSubjects.USER_OFFLINE, { userId, lastSeen });
       }
     }
   });
 });
 
-// Start server
+// ============= GRACEFUL SHUTDOWN =============
+
+async function shutdown() {
+  console.log('\n[WS Gateway] Shutting down...');
+  
+  io.close();
+  
+  if (natsConnection) {
+    await natsConnection.drain();
+  }
+  
+  process.exit(0);
+}
+
+process.on('SIGTERM', shutdown);
+process.on('SIGINT', shutdown);
+
+// ============= START SERVER =============
+
 async function start() {
+  await setupRedisAdapter();
   await setupNats();
 
   httpServer.listen(PORT, () => {
-    console.log(`WS Gateway running on ${PORT}`);
+    console.log('='.repeat(50));
+    console.log(`🔌 WS Gateway running on port ${PORT}`);
+    console.log(`📡 Socket.IO ready for connections`);
+    console.log(`🔄 Redis adapter: ${REDIS_URL}`);
+    console.log(`📨 NATS: ${NATS_URL}`);
+    console.log('='.repeat(50));
   });
 }
 
 start();
+
+export { io };
