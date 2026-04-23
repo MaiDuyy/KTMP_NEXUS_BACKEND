@@ -1,6 +1,8 @@
 version: "3.8"
 
 services:
+  # ============= Infrastructure =============
+  
   postgres:
     image: postgres:16-alpine
     container_name: ott-postgres
@@ -14,6 +16,11 @@ services:
       - postgres_data:/var/lib/postgresql/data
     networks:
       - ott-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-ott_user} -d ${POSTGRES_DB:-ott_chat}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
   redis:
     image: redis:7-alpine
@@ -24,17 +31,333 @@ services:
       - redis_data:/data
     networks:
       - ott-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    command: redis-server --appendonly yes
 
   nats:
     image: nats:2.10-alpine
     container_name: ott-nats
     ports:
-      - "4222:4222"
-      - "8222:8222"
-    command: ["-js", "-m", "8222"]
+      - "4222:4222"   # Client connections
+      - "8222:8222"   # HTTP monitoring
+    networks:
+      - ott-network
+    command: ["-js", "-m", "8222"]  # Enable JetStream + monitoring
+
+  # ============= Gateway Services =============
+
+  api-gateway:
+    build:
+      context: .
+      dockerfile: services/api-gateway/Dockerfile
+    container_name: ott-api-gateway
+    ports:
+      - "${API_GATEWAY_PORT:-3000}:3000"
+    environment:
+      - NODE_ENV=${NODE_ENV:-development}
+      - PORT=${API_GATEWAY_PORT:-3000}
+      - JWT_SECRET=${JWT_SECRET}
+      - CORS_ORIGIN=${CORS_ORIGIN:-http://localhost:3002}
+      - REDIS_URL=${REDIS_URL:-redis://redis:6379}
+      - NATS_URL=${NATS_URL:-nats://nats:4222}
+      # CONSOLIDATED: auth + user + rbac → identity-service
+      - IDENTITY_SERVICE_URL=${IDENTITY_SERVICE_URL:-http://identity-service:3010}
+      - MESSAGING_SERVICE_URL=${MESSAGING_SERVICE_URL:-http://messaging-service:3020}
+      - FILE_SERVICE_URL=${FILE_SERVICE_URL:-http://file-service:3014}
+      - STATS_SERVICE_URL=${STATS_SERVICE_URL:-http://stats-service:3015}
+      - AUDIT_SERVICE_URL=${AUDIT_SERVICE_URL:-http://audit-service:3017}
+      - NOTIFICATION_SERVICE_URL=${NOTIFICATION_SERVICE_URL:-http://notification-service:3019}
+      - SPRING_AI_URL=${SPRING_AI_URL:-http://host.docker.internal:8080}
+    depends_on:
+      redis:
+        condition: service_healthy
+      nats:
+        condition: service_started
     networks:
       - ott-network
 
+  ws-gateway:
+    build:
+      context: .
+      dockerfile: services/ws-gateway/Dockerfile
+    container_name: ott-ws-gateway
+    ports:
+      - "${WS_GATEWAY_PORT:-3001}:3001"
+    environment:
+      - NODE_ENV=${NODE_ENV:-development}
+      - PORT=${WS_GATEWAY_PORT:-3001}
+      - JWT_SECRET=${JWT_SECRET}
+      - REDIS_URL=${REDIS_URL:-redis://redis:6379}
+      - NATS_URL=${NATS_URL:-nats://nats:4222}
+      - CORS_ORIGIN=${CORS_ORIGIN:-http://localhost:3002}
+      # DEPRECATED: GROUP and CHAT now unified into MESSAGING
+      # - CHAT_SERVICE_URL=${CHAT_SERVICE_URL:-http://chat-service:3013}
+      # - GROUP_SERVICE_URL=${GROUP_SERVICE_URL:-http://group-service:3012}
+      - MESSAGING_SERVICE_URL=${MESSAGING_SERVICE_URL:-http://messaging-service:3020}
+      # - INTERNAL_SERVICE_SECRET=${INTERNAL_SERVICE_SECRET:-dev-internal-secret-change-in-production}
+      - LIVEKIT_API_KEY=${LIVEKIT_API_KEY}
+      - LIVEKIT_API_SECRET=${LIVEKIT_API_SECRET}
+      - LIVEKIT_URL=${LIVEKIT_URL:-ws://localhost:7880}
+    depends_on:
+      redis:
+        condition: service_healthy
+      nats:
+        condition: service_started
+    networks:
+      - ott-network
+
+  # ============= Core Services =============
+
+  # CONSOLIDATED: auth + userorg + rbac → identity-service
+  identity-service:
+    build:
+      context: .
+      dockerfile: services/identity-service/Dockerfile
+    container_name: ott-identity-service
+    ports:
+      - "${IDENTITY_SERVICE_PORT:-3010}:3010"
+      - "${IDENTITY_GRPC_PORT:-50051}:50051"
+    environment:
+      - NODE_ENV=${NODE_ENV:-development}
+      - PORT=${IDENTITY_SERVICE_PORT:-3010}
+      - IDENTITY_GRPC_PORT=${IDENTITY_GRPC_PORT:-50051}
+      - AUTH_DATABASE_URL=${AUTH_DATABASE_URL:-postgresql://ott_user:ott_password@postgres:5432/ott_chat?schema=auth}
+      - USERORG_DATABASE_URL=${USERORG_DATABASE_URL:-postgresql://ott_user:ott_password@postgres:5432/ott_chat?schema=userorg}
+      - RBAC_DATABASE_URL=${RBAC_DATABASE_URL:-postgresql://ott_user:ott_password@postgres:5432/ott_chat?schema=rbac}
+      - JWT_SECRET=${JWT_SECRET}
+      - JWT_EXPIRES_IN=${JWT_EXPIRES_IN:-15m}
+      - REFRESH_TOKEN_EXPIRES_IN=${REFRESH_TOKEN_EXPIRES_IN:-7d}
+      - NATS_URL=${NATS_URL:-nats://nats:4222}
+      - SMTP_HOST=${SMTP_HOST:-smtp.gmail.com}
+      - SMTP_PORT=${SMTP_PORT:-587}
+      - SMTP_USER=${SMTP_USER}
+      - SMTP_PASS=${SMTP_PASS}
+      - SMTP_FROM=${SMTP_FROM:-noreply@example.com}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      nats:
+        condition: service_started
+    networks:
+      - ott-network
+    command: sh -c "npx prisma db push --schema=prisma/auth.prisma --accept-data-loss && npx prisma db push --schema=prisma/userorg.prisma --accept-data-loss && npx prisma db push --schema=prisma/rbac.prisma --accept-data-loss && npm run prisma:seed && node dist/index.js"
+
+  # DEPRECATED: auth-service, userorg-service (replaced by identity-service above)
+
+  # ============= DEPRECATED: Replaced by messaging-service =============
+  # group-service:
+  #   build:
+  #     context: .
+  #     dockerfile: services/group-service/Dockerfile
+  #   container_name: ott-group-service
+  #   ports:
+  #     - "${GROUP_SERVICE_PORT:-3012}:3012"
+  #   environment:
+  #     - NODE_ENV=${NODE_ENV:-development}
+  #     - PORT=${GROUP_SERVICE_PORT:-3012}
+  #     - DATABASE_URL=${GROUP_DATABASE_URL:-postgresql://ott_user:ott_password@postgres:5432/ott_chat?schema=groups}
+  #     - NATS_URL=${NATS_URL:-nats://nats:4222}
+  #     - USERORG_SERVICE_URL=${USERORG_SERVICE_URL:-http://userorg-service:3011}
+  #     - LIVEKIT_API_KEY=${LIVEKIT_API_KEY}
+  #     - LIVEKIT_API_SECRET=${LIVEKIT_API_SECRET}
+  #   depends_on:
+  #     postgres:
+  #       condition: service_healthy
+  #     nats:
+  #       condition: service_started
+  #     userorg-service:
+  #       condition: service_started
+  #   networks:
+  #     - ott-network
+  #   command: sh -c "npx prisma migrate deploy && node dist/index.js"
+
+  # chat-service:
+  #   build:
+  #     context: .
+  #     dockerfile: services/chat-service/Dockerfile
+  #   container_name: ott-chat-service
+  #   ports:
+  #     - "${CHAT_SERVICE_PORT:-3013}:3013"
+  #   environment:
+  #     - NODE_ENV=${NODE_ENV:-development}
+  #     - PORT=${CHAT_SERVICE_PORT:-3013}
+  #     - DATABASE_URL=${CHAT_DATABASE_URL:-postgresql://ott_user:ott_password@postgres:5432/ott_chat?schema=chat}
+  #     - REDIS_URL=${REDIS_URL:-redis://redis:6379}
+  #     - NATS_URL=${NATS_URL:-nats://nats:4222}
+  #     - USERORG_SERVICE_URL=${USERORG_SERVICE_URL:-http://userorg-service:3011}
+  #   depends_on:
+  #     postgres:
+  #       condition: service_healthy
+  #     redis:
+  #       condition: service_healthy
+  #     nats:
+  #       condition: service_started
+  #   networks:
+  #     - ott-network
+  #   command: sh -c "npx prisma migrate deploy && node dist/index.js"
+
+  # ============= UNIFIED: messaging-service (chat + group) =============
+
+  messaging-service:
+    build:
+      context: .
+      dockerfile: services/messaging-service/Dockerfile
+    container_name: ott-messaging-service
+    ports:
+      - "${MESSAGING_SERVICE_PORT:-3020}:3020"
+    environment:
+      - NODE_ENV=${NODE_ENV:-development}
+      - PORT=${MESSAGING_SERVICE_PORT:-3020}
+      - DATABASE_URL=${MESSAGING_DATABASE_URL:-postgresql://ott_user:ott_password@postgres:5432/ott_chat?schema=public}
+      - REDIS_URL=${REDIS_URL:-redis://redis:6379}
+      - NATS_URL=${NATS_URL:-nats://nats:4222}
+      - IDENTITY_SERVICE_URL=${IDENTITY_SERVICE_URL:-http://identity-service:3010}
+      - LIVEKIT_API_KEY=${LIVEKIT_API_KEY}
+      - LIVEKIT_API_SECRET=${LIVEKIT_API_SECRET}
+      - IDENTITY_GRPC_HOST=${IDENTITY_GRPC_HOST:-identity-service:50051}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      nats:
+        condition: service_started
+      identity-service:
+        condition: service_started
+    networks:
+      - ott-network
+    command: sh -c "npx prisma migrate deploy && node dist/index.js"
+
+  file-service:
+    build:
+      context: .
+      dockerfile: services/file-service/Dockerfile
+    container_name: ott-file-service
+    ports:
+      - "${FILE_SERVICE_PORT:-3014}:3014"
+    environment:
+      - NODE_ENV=${NODE_ENV:-development}
+      - PORT=${FILE_SERVICE_PORT:-3014}
+      - DATABASE_URL=${FILES_DATABASE_URL:-postgresql://ott_user:ott_password@postgres:5432/ott_chat?schema=files}
+      - NATS_URL=${NATS_URL:-nats://nats:4222}
+      # - CLOUDINARY_CLOUD_NAME=${CLOUDINARY_CLOUD_NAME}
+      # - CLOUDINARY_API_KEY=${CLOUDINARY_API_KEY}
+      # - CLOUDINARY_API_SECRET=${CLOUDINARY_API_SECRET}
+      - CLOUDFRONT_DOMAIN=${CLOUDFRONT_DOMAIN}
+      - STORAGE_PROVIDER=${STORAGE_PROVIDER}
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
+      - AWS_REGION=${AWS_REGION}
+      - AWS_S3_BUCKET=${AWS_S3_BUCKET}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      nats:
+        condition: service_started
+    networks:
+      - ott-network
+    command: sh -c "npx prisma migrate deploy && node dist/index.js"
+
+  # stats-service:
+  #   build:
+  #     context: .
+  #     dockerfile: services/stats-service/Dockerfile
+  #   container_name: ott-stats-service
+  #   ports:
+  #     - "3015:3015"
+  #   environment:
+  #     - NODE_ENV=${NODE_ENV:-development}
+  #     - PORT=3015
+  #     - DATABASE_URL=${DATABASE_URL:-postgresql://ott_user:ott_password@postgres:5432/ott_chat?schema=stats}
+  #     - REDIS_URL=redis://redis:6379
+  #     - NATS_URL=nats://nats:4222
+  #   depends_on:
+  #     postgres:
+  #       condition: service_healthy
+  #     redis:
+  #       condition: service_healthy
+  #     nats:
+  #       condition: service_started
+  #   networks:
+  #     - ott-network
+
+  # ============= Enterprise Services (Audit, etc.) =============
+  # DEPRECATED: rbac-service (replaced by identity-service)
+
+  # audit-service:
+  #   build:
+  #     context: .
+  #     dockerfile: services/audit-service/Dockerfile
+  #   container_name: ott-audit-service
+  #   ports:
+  #     - "3017:3017"
+  #   environment:
+  #     - NODE_ENV=${NODE_ENV:-development}
+  #     - PORT=3017
+  #     - DATABASE_URL=${DATABASE_URL:-postgresql://ott_user:ott_password@postgres:5432/ott_chat?schema=audit}
+  #     - NATS_URL=nats://nats:4222
+  #   depends_on:
+  #     postgres:
+  #       condition: service_healthy
+  #     nats:
+  #       condition: service_started
+  #   networks:
+  #     - ott-network
+
+
+
+  # ai-knowledge:
+  #   build:
+  #     context: ../ai-knowledge
+  #     dockerfile: Dockerfile
+  #   container_name: ott-ai-knowledge
+  #   ports:
+  #     - "8080:8080"
+  #   environment:
+  #     - DB_HOST=postgres
+  #     - DB_PORT=5432
+  #     - DB_NAME=ott_chat
+  #     - DB_USER=ott_user
+  #     - DB_PASSWORD=ott_password
+  #     - OPENAI_API_KEY=${OPENAI_API_KEY}
+  #   depends_on:
+  #     postgres:
+  #       condition: service_healthy
+  #   networks:
+  #     - ott-network
+
+  notification-service:
+    build:
+      context: .
+      dockerfile: services/notification-service/Dockerfile
+    container_name: ott-notification-service
+    ports:
+      - "${NOTIFICATION_SERVICE_PORT:-3019}:3019"
+    environment:
+      - NODE_ENV=${NODE_ENV:-development}
+      - PORT=${NOTIFICATION_SERVICE_PORT:-3019}
+      - DATABASE_URL=${NOTIFICATION_DATABASE_URL:-postgresql://ott_user:ott_password@postgres:5432/ott_chat?schema=notification}
+      - REDIS_URL=${REDIS_URL:-redis://redis:6379}
+      - NATS_URL=${NATS_URL:-nats://nats:4222}
+      - SMTP_HOST=${SMTP_HOST:-smtp.gmail.com}
+      - SMTP_PORT=${SMTP_PORT:-587}
+      - SMTP_USER=${SMTP_USER}
+      - SMTP_PASS=${SMTP_PASS}
+      - SMTP_FROM=${SMTP_FROM:-noreply@example.com}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      nats:
+        condition: service_started
+    networks:
+      - ott-network
+    command: sh -c "npx prisma migrate deploy && node dist/index.js"
 
 networks:
   ott-network:
@@ -43,3 +366,5 @@ networks:
 volumes:
   postgres_data:
   redis_data:
+  knowledge_uploads:
+
