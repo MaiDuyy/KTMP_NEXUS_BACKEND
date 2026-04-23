@@ -17,3 +17,5 @@ docs
 /services/**/dist
 /packages/**/node_modules
 /packages/**/dist
+# Planning files
+PLAN-*.md
