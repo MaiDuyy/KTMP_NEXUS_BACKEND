@@ -1,0 +1,429 @@
+syntax = "proto3";
+
+package group;
+
+// ---------- Common ----------
+message Empty {}
+
+// ---------- Chat (Group/Private) ----------
+message ChatParticipant {
+  string participant_id = 1;
+  string account_id = 2;
+  string role = 3;
+  optional string name = 4;
+  optional string avatar = 5;
+  optional bool is_online = 6;
+}
+
+message ChatItem {
+  string id = 1;
+  optional string name = 2;
+  optional string avatar = 3;
+  bool is_group = 4;
+  bool pin = 5;
+  bool notify = 6;
+  bool readed = 7;
+  repeated string participant_ids = 8;
+  repeated ChatParticipant participants = 9;
+  int32 participant_count = 10;
+  string updated_at = 11;
+  string created_at = 12;
+}
+
+message GetChatsRequest {
+  optional string type = 1; // all | private | group
+}
+
+message GetChatsResponse {
+  repeated ChatItem chats = 1;
+}
+
+message GetChatRequest {
+  string chat_id = 1;
+}
+
+message GetChatResponse {
+  ChatItem chat = 1;
+}
+
+message CreateGroupChatRequest {
+  string name = 1;
+  repeated string member_ids = 2;
+  optional string avatar = 3;
+}
+
+message CreateGroupChatResponse {
+  ChatItem chat = 1;
+}
+
+message GetOrCreatePrivateChatRequest {
+  string partner_id = 1;
+}
+
+message GetOrCreatePrivateChatResponse {
+  string chat_id = 2;
+  bool is_group = 3;
+  string partner_id = 4;
+  bool created = 5;
+}
+
+message UpdateChatRequest {
+  string chat_id = 1;
+  optional string name = 2;
+  optional string avatar = 3;
+}
+
+message UpdateChatResponse {
+  string id = 1;
+  optional string name = 2;
+  optional string avatar = 3;
+}
+
+message AddMembersRequest {
+  string chat_id = 1;
+  repeated string member_ids = 2;
+}
+
+message AddMembersResponse {
+  int32 added_count = 1;
+}
+
+message RemoveMemberRequest {
+  string chat_id = 1;
+  string member_id = 2;
+}
+
+message RemoveMemberResponse {
+  bool is_self_leave = 1;
+}
+
+message TogglePinRequest {
+  string chat_id = 1;
+  optional bool pin = 2;
+}
+
+message TogglePinResponse {
+  bool pin = 1;
+}
+
+message ToggleNotifyRequest {
+  string chat_id = 1;
+  optional bool notify = 2;
+}
+
+message ToggleNotifyResponse {
+  bool notify = 1;
+}
+
+message MarkChatAsReadRequest {
+  string chat_id = 1;
+}
+
+message DeleteChatRequest {
+  string chat_id = 1;
+}
+
+message DeleteChatResponse {
+  string type = 1; // soft_delete | hard_delete
+}
+
+// ---------- Workspace ----------
+message WorkspaceItem {
+  string id = 1;
+  string name = 2;
+  optional string description = 3;
+  optional string icon = 4;
+  string slug = 5;
+  bool is_public = 6;
+  optional string my_role = 7;
+  int32 member_count = 8;
+  int32 channel_count = 9;
+  string updated_at = 10;
+}
+
+message CreateWorkspaceRequest {
+  string name = 1;
+  optional string description = 2;
+  optional string icon = 3;
+  optional string slug = 4;
+  optional bool is_public = 5;
+  optional bool allow_guest_access = 6;
+}
+
+message CreateWorkspaceResponse {
+  WorkspaceItem workspace = 1;
+}
+
+message GetWorkspaceRequest {
+  string id_or_slug = 1;
+}
+
+message GetWorkspaceResponse {
+  WorkspaceItem workspace = 1;
+}
+
+message GetUserWorkspacesResponse {
+  repeated WorkspaceItem workspaces = 1;
+}
+
+message UpdateWorkspaceRequest {
+  string id = 1;
+  optional string name = 2;
+  optional string description = 3;
+  optional string icon = 4;
+  optional bool is_public = 5;
+  optional bool allow_guest_access = 6;
+}
+
+message UpdateWorkspaceResponse {
+  WorkspaceItem workspace = 1;
+}
+
+message DeleteWorkspaceRequest {
+  string id = 1;
+}
+
+message AddWorkspaceMemberRequest {
+  string workspace_id = 1;
+  string target_user_id = 2;
+  string role = 3; // GUEST | MEMBER | ADMIN | OWNER
+}
+
+message RemoveWorkspaceMemberRequest {
+  string workspace_id = 1;
+  string target_user_id = 2;
+}
+
+message UpdateMemberRoleRequest {
+  string workspace_id = 1;
+  string target_user_id = 2;
+  string new_role = 3;
+}
+
+message WorkspaceMemberItem {
+  string id = 1;
+  string user_id = 2;
+  string role = 3;
+  string joined_at = 4;
+}
+
+message GetWorkspaceMembersRequest {
+  string workspace_id = 1;
+  optional int32 page = 2;
+  optional int32 limit = 3;
+}
+
+message GetWorkspaceMembersResponse {
+  repeated WorkspaceMemberItem members = 1;
+  int32 total = 2;
+  int32 page = 3;
+  int32 total_pages = 4;
+}
+
+// ---------- Channel ----------
+message ChannelItem {
+  string id = 1;
+  string workspace_id = 2;
+  string name = 3;
+  optional string description = 4;
+  optional string topic = 5;
+  string type = 6; // PUBLIC | PRIVATE | GUEST
+  bool is_default = 7;
+  bool is_archived = 8;
+  optional string category_id = 9;
+  int32 member_count = 10;
+  bool is_member = 11;
+}
+
+message CreateChannelRequest {
+  string workspace_id = 1;
+  string name = 2;
+  optional string description = 3;
+  optional string topic = 4;
+  optional string type = 5;
+  optional string category_id = 6;
+  optional bool is_default = 7;
+}
+
+message CreateChannelResponse {
+  ChannelItem channel = 1;
+}
+
+message GetChannelRequest {
+  string channel_id = 1;
+}
+
+message GetChannelResponse {
+  ChannelItem channel = 1;
+}
+
+message ListChannelsRequest {
+  string workspace_id = 1;
+  optional bool include_archived = 2;
+}
+
+message ListChannelsResponse {
+  repeated ChannelItem channels = 1;
+}
+
+message UpdateChannelRequest {
+  string channel_id = 1;
+  optional string name = 2;
+  optional string description = 3;
+  optional string topic = 4;
+  optional string category_id = 5;
+}
+
+message ArchiveChannelRequest {
+  string channel_id = 1;
+}
+
+message DeleteChannelRequest {
+  string channel_id = 1;
+}
+
+message AddChannelMemberRequest {
+  string channel_id = 1;
+  string target_user_id = 2;
+}
+
+message RemoveChannelMemberRequest {
+  string channel_id = 1;
+  string target_user_id = 2;
+}
+
+message UpdateChannelPermissionRequest {
+  string channel_id = 1;
+  string target_user_id = 2;
+  bool can_post = 3;
+}
+
+message JoinChannelRequest {
+  string channel_id = 1;
+}
+
+message BrowseChannelsRequest {
+  string workspace_id = 1;
+  optional int32 page = 2;
+  optional int32 limit = 3;
+  optional string search = 4;
+}
+
+message BrowseChannelItem {
+  string id = 1;
+  string name = 2;
+  optional string description = 3;
+  int32 member_count = 4;
+  bool is_joined = 5;
+}
+
+message BrowseChannelsResponse {
+  repeated BrowseChannelItem items = 1;
+  int32 total = 2;
+  int32 page = 3;
+  int32 total_pages = 4;
+}
+
+message CanUserPostRequest {
+  string channel_id = 1;
+  string user_id = 2;
+}
+
+message CanUserPostResponse {
+  bool can_post = 1;
+}
+
+// ---------- Channel Category ----------
+message CategoryItem {
+  string id = 1;
+  string workspace_id = 2;
+  string name = 3;
+  int32 position = 4;
+}
+
+message CreateCategoryRequest {
+  string workspace_id = 1;
+  string name = 2;
+  optional int32 position = 3;
+}
+
+message CreateCategoryResponse {
+  CategoryItem category = 1;
+}
+
+message ListCategoriesRequest {
+  string workspace_id = 1;
+}
+
+message ListCategoriesResponse {
+  repeated CategoryItem categories = 1;
+}
+
+message UpdateCategoryRequest {
+  string category_id = 1;
+  optional string name = 2;
+  optional int32 position = 3;
+}
+
+message DeleteCategoryRequest {
+  string category_id = 1;
+}
+
+message ReorderCategoriesRequest {
+  string workspace_id = 1;
+  repeated string category_ids = 2;
+}
+
+message MoveChannelToCategoryRequest {
+  string channel_id = 1;
+  optional string category_id = 2;
+}
+
+// ---------- Service ----------
+service GroupService {
+  // Chat
+  rpc GetChats(GetChatsRequest) returns (GetChatsResponse);
+  rpc GetChat(GetChatRequest) returns (GetChatResponse);
+  rpc CreateGroupChat(CreateGroupChatRequest) returns (CreateGroupChatResponse);
+  rpc GetOrCreatePrivateChat(GetOrCreatePrivateChatRequest) returns (GetOrCreatePrivateChatResponse);
+  rpc UpdateChat(UpdateChatRequest) returns (UpdateChatResponse);
+  rpc AddMembers(AddMembersRequest) returns (AddMembersResponse);
+  rpc RemoveMember(RemoveMemberRequest) returns (RemoveMemberResponse);
+  rpc TogglePin(TogglePinRequest) returns (TogglePinResponse);
+  rpc ToggleNotify(ToggleNotifyRequest) returns (ToggleNotifyResponse);
+  rpc MarkChatAsRead(MarkChatAsReadRequest) returns (Empty);
+  rpc DeleteChat(DeleteChatRequest) returns (DeleteChatResponse);
+
+  // Workspace
+  rpc CreateWorkspace(CreateWorkspaceRequest) returns (CreateWorkspaceResponse);
+  rpc GetWorkspace(GetWorkspaceRequest) returns (GetWorkspaceResponse);
+  rpc GetUserWorkspaces(Empty) returns (GetUserWorkspacesResponse);
+  rpc UpdateWorkspace(UpdateWorkspaceRequest) returns (UpdateWorkspaceResponse);
+  rpc DeleteWorkspace(DeleteWorkspaceRequest) returns (Empty);
+  rpc AddWorkspaceMember(AddWorkspaceMemberRequest) returns (WorkspaceMemberItem);
+  rpc RemoveWorkspaceMember(RemoveWorkspaceMemberRequest) returns (Empty);
+  rpc UpdateMemberRole(UpdateMemberRoleRequest) returns (WorkspaceMemberItem);
+  rpc GetWorkspaceMembers(GetWorkspaceMembersRequest) returns (GetWorkspaceMembersResponse);
+
+  // Channel
+  rpc CreateChannel(CreateChannelRequest) returns (CreateChannelResponse);
+  rpc GetChannel(GetChannelRequest) returns (GetChannelResponse);
+  rpc ListChannels(ListChannelsRequest) returns (ListChannelsResponse);
+  rpc UpdateChannel(UpdateChannelRequest) returns (Empty);
+  rpc ArchiveChannel(ArchiveChannelRequest) returns (Empty);
+  rpc DeleteChannel(DeleteChannelRequest) returns (Empty);
+  rpc AddChannelMember(AddChannelMemberRequest) returns (Empty);
+  rpc RemoveChannelMember(RemoveChannelMemberRequest) returns (Empty);
+  rpc UpdateChannelPermission(UpdateChannelPermissionRequest) returns (Empty);
+  rpc JoinChannel(JoinChannelRequest) returns (Empty);
+  rpc BrowseChannels(BrowseChannelsRequest) returns (BrowseChannelsResponse);
+  rpc CanUserPost(CanUserPostRequest) returns (CanUserPostResponse);
+
+  // Channel Category
+  rpc CreateCategory(CreateCategoryRequest) returns (CreateCategoryResponse);
+  rpc ListCategories(ListCategoriesRequest) returns (ListCategoriesResponse);
+  rpc UpdateCategory(UpdateCategoryRequest) returns (Empty);
+  rpc DeleteCategory(DeleteCategoryRequest) returns (Empty);
+  rpc ReorderCategories(ReorderCategoriesRequest) returns (Empty);
+  rpc MoveChannelToCategory(MoveChannelToCategoryRequest) returns (Empty);
+}

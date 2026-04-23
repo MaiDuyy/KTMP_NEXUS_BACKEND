@@ -1,0 +1,140 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ================= CHAT SERVICE MODELS =================
+// Copy từ monolith - chỉ giữ models liên quan đến Messages
+
+model Message {
+  id        String   @id @default(uuid())
+  chatId    String
+  senderId  String
+  content   String?
+  type      String   @db.VarChar(20)
+  time      DateTime @default(now())
+  deletedBy String?  @db.Text
+  destroy   Boolean  @default(false)
+  pin       Boolean  @default(false)
+  
+  fileName  String?
+  fileSize  String?
+  fileType  String?
+  
+  replyToId String?
+  
+  // Thread support (NEW)
+  parentId     String?        // Parent message ID for thread replies
+  rootThreadId String?        // Root of thread chain (for faster queries)
+  replyCount   Int            @default(0)  // Cached reply count
+  
+  // Edit tracking (NEW)
+  editedAt     DateTime?      // When message was last edited
+
+  // Relations
+  replyTo       Message?  @relation("ReplyRelation", fields: [replyToId], references: [id])
+  replies       Message[] @relation("ReplyRelation")
+  parent        Message?  @relation("ThreadRelation", fields: [parentId], references: [id])
+  threadReplies Message[] @relation("ThreadRelation")
+  reactions     Reaction[]
+  mentions      Mention[]
+
+  @@index([chatId])
+  @@index([replyToId])
+  @@index([senderId])
+  @@index([parentId])
+  @@index([rootThreadId])
+  @@map("message")
+}
+
+model Reaction {
+  id        String   @id @default(uuid())
+  messageId String
+  userId    String
+  reaction  String   @db.VarChar(10)
+  
+  message   Message  @relation(fields: [messageId], references: [id], onDelete: Cascade)
+
+  @@index([messageId])
+  @@index([userId])
+  @@map("reaction")
+}
+
+// ================= MENTION FEATURE (NEW) =================
+
+model Mention {
+  id          String   @id @default(uuid())
+  messageId   String
+  targetType  String   @db.VarChar(20)  // USER, HERE, CHANNEL
+  targetId    String?                    // userId or null for @here/@channel
+  createdAt   DateTime @default(now())
+  
+  message     Message  @relation(fields: [messageId], references: [id], onDelete: Cascade)
+
+  @@index([messageId])
+  @@index([targetId])
+  @@map("mention")
+}
+
+// ================= READ RECEIPTS (NEW) =================
+
+model ReadReceipt {
+  id        String   @id @default(uuid())
+  chatId    String
+  userId    String
+  messageId String                       // Last read message ID
+  readAt    DateTime @default(now())
+  
+  @@unique([chatId, userId])
+  @@index([chatId])
+  @@index([userId])
+  @@map("read_receipt")
+}
+
+// ================= POLL FEATURE =================
+
+model Poll {
+  id        String   @id @default(uuid())
+  chatId    String
+  creatorId String
+  title     String   @db.VarChar(255)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  endsAt    DateTime?
+  
+  options   PollOption[]
+
+  @@index([chatId])
+  @@index([creatorId])
+  @@map("poll")
+}
+
+model PollOption {
+  id        String   @id @default(uuid())
+  pollId    String
+  text      String   @db.VarChar(255)
+  createdAt DateTime @default(now())
+  
+  poll      Poll     @relation(fields: [pollId], references: [id], onDelete: Cascade)
+  votes     PollVote[]
+
+  @@index([pollId])
+  @@map("poll_option")
+}
+
+model PollVote {
+  id           String   @id @default(uuid())
+  pollOptionId String
+  voterId      String
+  createdAt    DateTime @default(now())
+  
+  option       PollOption @relation(fields: [pollOptionId], references: [id], onDelete: Cascade)
+
+  @@unique([pollOptionId, voterId])
+  @@index([voterId])
+  @@map("poll_vote")
+}
