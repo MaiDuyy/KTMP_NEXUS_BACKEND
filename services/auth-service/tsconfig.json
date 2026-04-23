@@ -16,7 +16,7 @@
     },
     "include": [
         "src/**/*"
-    ],
+, "../userorg-service/src/subscribers"    ],
     "exclude": [
         "node_modules",
         "dist",
