@@ -7,8 +7,10 @@
     "target": "ES2023",
     "strict": true,
     "esModuleInterop": true,
-    // "ignoreDeprecations": "6.0",
-    "types": ["node"],
+    "ignoreDeprecations": "5.0",
+    "types": [
+      "node"
+    ],
     "sourceMap": true,
     "declaration": true,
     "declarationMap": true,
@@ -21,6 +23,12 @@
     "moduleDetection": "force",
     "skipLibCheck": true
   },
-  "include": ["./src", "src/index.ts"],
-  "exclude": ["dist", "node_modules"]
+  "include": [
+    "./src",
+    "src/index.ts"
+  ],
+  "exclude": [
+    "dist",
+    "node_modules"
+  ]
 }
