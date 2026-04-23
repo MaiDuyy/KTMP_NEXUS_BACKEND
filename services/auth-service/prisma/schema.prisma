@@ -36,6 +36,7 @@ model Account {
   devices        LoggedInDevice[]
   otps           Otp[]
   auditLogs      AuditLog[]
+  refreshTokens  RefreshToken[]
 
   @@map("account")
 }
@@ -87,6 +88,23 @@ model AuditLog {
 
   @@index([userId, createdAt])
   @@map("audit_log")
+}
+
+model RefreshToken {
+  id        String   @id @default(uuid())
+  jti       String   @unique             // JWT ID — unique per token, used for lookup
+  userId    String
+  familyId  String                        // Token family: all rotated tokens share this
+  isRevoked Boolean  @default(false)
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+
+  account   Account  @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([familyId])
+  @@index([jti])
+  @@map("refresh_token")
 }
 
 // ================= ENUMS =================
