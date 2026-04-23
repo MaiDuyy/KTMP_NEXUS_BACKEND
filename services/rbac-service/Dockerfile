@@ -9,6 +9,7 @@ RUN mkdir -p packages/shared services/rbac-service
 
 COPY packages/shared/package.json ./packages/shared/
 COPY packages/shared/dist ./packages/shared/dist
+RUN cd packages/shared && npm install --production --legacy-peer-deps
 
 COPY services/rbac-service/package*.json ./services/rbac-service/
 
