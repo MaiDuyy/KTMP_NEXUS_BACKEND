@@ -1,0 +1,338 @@
+syntax = "proto3";
+
+package chat;
+
+// ---------- Common messages ----------
+message Empty {}
+
+message UserId {
+  string user_id = 1;
+}
+
+message PaginationRequest {
+  string cursor = 1;
+  int32 limit = 2;
+}
+
+// ---------- Message types ----------
+message Message {
+  string id = 1;
+  string chat_id = 2;
+  string sender_id = 3;
+  string content = 4;
+  string type = 5;
+  string time = 6; // ISO string
+  bool pin = 7;
+  optional ReplyInfo reply_to = 8;
+  optional FileInfo file = 9;
+  repeated ReactionGroup reactions = 10;
+  bool is_me = 11;
+}
+
+message ReplyInfo {
+  string id = 1;
+  string content = 2;
+  string type = 3;
+  string sender_id = 4;
+}
+
+message FileInfo {
+  string name = 1;
+  string size = 2;
+  string type = 3;
+}
+
+message ReactionGroup {
+  string emoji = 1;
+  int32 count = 2;
+  repeated string user_ids = 3;
+}
+
+// ---------- Mention ----------
+message GetMentionsResponse {
+  repeated MentionItem mentions = 1;
+  optional string next_cursor = 2;
+}
+
+message MentionItem {
+  string id = 1;
+  string message_id = 2;
+  string chat_id = 3;
+  string sender_id = 4;
+  string content = 5;
+  string time = 6;
+  string mentioned_at = 7;
+}
+
+message UnreadMentionCountResponse {
+  int32 unread_count = 1;
+}
+
+message UnreadMentionRequest {
+  optional string since = 1; // ISO date
+}
+
+// ---------- Message CRUD ----------
+message GetMessagesRequest {
+  string chat_id = 1;
+  string cursor = 2;
+  int32 limit = 3;
+}
+
+message GetMessagesResponse {
+  repeated Message messages = 1;
+  optional string next_cursor = 2;
+}
+
+message SendMessageRequest {
+  string chat_id = 1;
+  optional string content = 2;
+  optional string type = 3;
+  optional string reply_to_id = 4;
+  optional string file_name = 5;
+  optional string file_size = 6;
+  optional string file_type = 7;
+}
+
+message SendMessageResponse {
+  Message message = 1;
+}
+
+message DeleteMessageRequest {
+  string message_id = 1;
+}
+
+message RecallMessageRequest {
+  string message_id = 1;
+}
+
+message ReactMessageRequest {
+  string message_id = 1;
+  string emoji = 2;
+}
+
+message ReactMessageResponse {
+  string action = 1; // added, changed, removed
+  string emoji = 2;
+}
+
+message TogglePinRequest {
+  string message_id = 1;
+}
+
+message TogglePinResponse {
+  bool pin = 1;
+}
+
+message GetPinnedMessagesRequest {
+  string chat_id = 1;
+}
+
+message GetPinnedMessagesResponse {
+  repeated PinnedMessage pinned_messages = 1;
+}
+
+message PinnedMessage {
+  string id = 1;
+  string content = 2;
+  string type = 3;
+  string time = 4;
+  string sender_id = 5;
+}
+
+message SearchMessagesRequest {
+  string chat_id = 1;
+  string query = 2;
+}
+
+message SearchMessagesResponse {
+  repeated SearchResult messages = 1;
+}
+
+message SearchResult {
+  string id = 1;
+  string content = 2;
+  string time = 3;
+  string sender_id = 4;
+}
+
+message GetMediaMessagesRequest {
+  string chat_id = 1;
+  optional string type = 2; // image, video, file
+}
+
+message GetMediaMessagesResponse {
+  repeated MediaItem media = 1;
+}
+
+message MediaItem {
+  string id = 1;
+  string content = 2;
+  string type = 3;
+  optional string file_name = 4;
+  optional string file_size = 5;
+  optional string file_type = 6;
+  string time = 7;
+  string sender_id = 8;
+}
+
+// ---------- Read Receipt ----------
+message MarkAsReadRequest {
+  string chat_id = 1;
+  string message_id = 2;
+}
+
+message MarkAsReadResponse {
+  ReadReceipt receipt = 1;
+}
+
+message ReadReceipt {
+  string chat_id = 1;
+  string message_id = 2;
+  string read_at = 3;
+}
+
+message GetReadReceiptsRequest {
+  string chat_id = 1;
+}
+
+message GetReadReceiptsResponse {
+  repeated ReceiptItem receipts = 1;
+}
+
+message ReceiptItem {
+  string user_id = 1;
+  string message_id = 2;
+  string read_at = 3;
+}
+
+message GetUnreadCountRequest {
+  string chat_id = 1;
+}
+
+message UnreadCountResponse {
+  int32 unread_count = 1;
+}
+
+message BatchUnreadRequest {
+  repeated string chat_ids = 1;
+}
+
+message BatchUnreadResponse {
+  map<string, int32> unread_counts = 1;
+}
+
+// ---------- Thread ----------
+message CreateThreadReplyRequest {
+  string parent_id = 1;
+  string content = 2;
+  optional string type = 3;
+  optional string file_name = 4;
+  optional string file_size = 5;
+  optional string file_type = 6;
+}
+
+message CreateThreadReplyResponse {
+  ThreadReply reply = 1;
+}
+
+message ThreadReply {
+  string id = 1;
+  string parent_id = 2;
+  string content = 3;
+  string type = 4;
+  string time = 5;
+  string sender_id = 6;
+  optional FileInfo file = 7;
+}
+
+message GetThreadRepliesRequest {
+  string parent_id = 1;
+  string cursor = 2;
+  int32 limit = 3;
+}
+
+message GetThreadRepliesResponse {
+  string parent_id = 1;
+  string chat_id = 2;
+  int32 total_replies = 3;
+  repeated ThreadReply replies = 4;
+  optional string next_cursor = 5;
+}
+
+message GetThreadPreviewRequest {
+  string parent_id = 1;
+}
+
+message GetThreadPreviewResponse {
+  optional ThreadPreview preview = 1;
+}
+
+message ThreadPreview {
+  string parent_id = 1;
+  int32 reply_count = 2;
+  repeated ReplyPreview latest_replies = 3;
+}
+
+message ReplyPreview {
+  string id = 1;
+  string sender_id = 2;
+  string content = 3;
+  string time = 4;
+}
+
+message GetThreadParticipantsRequest {
+  string parent_id = 1;
+}
+
+message GetThreadParticipantsResponse {
+  repeated string participants = 1;
+}
+
+message GetActiveThreadsRequest {
+  string chat_id = 1;
+  int32 limit = 2;
+}
+
+message GetActiveThreadsResponse {
+  repeated ActiveThread threads = 1;
+}
+
+message ActiveThread {
+  string id = 1;
+  string content = 2;
+  string sender_id = 3;
+  string time = 4;
+  int32 reply_count = 5;
+}
+
+// ---------- Service definition ----------
+service ChatService {
+  // Mention
+  rpc GetMentions(PaginationRequest) returns (GetMentionsResponse);
+  rpc GetUnreadMentionCount(UnreadMentionRequest) returns (UnreadMentionCountResponse);
+
+  // Message
+  rpc GetMessages(GetMessagesRequest) returns (GetMessagesResponse);
+  rpc SendMessage(SendMessageRequest) returns (SendMessageResponse);
+  rpc DeleteMessageForMe(DeleteMessageRequest) returns (Empty);
+  rpc RecallMessage(RecallMessageRequest) returns (Empty);
+  rpc ReactMessage(ReactMessageRequest) returns (ReactMessageResponse);
+  rpc TogglePinMessage(TogglePinRequest) returns (TogglePinResponse);
+  rpc GetPinnedMessages(GetPinnedMessagesRequest) returns (GetPinnedMessagesResponse);
+  rpc SearchMessages(SearchMessagesRequest) returns (SearchMessagesResponse);
+  rpc GetMediaMessages(GetMediaMessagesRequest) returns (GetMediaMessagesResponse);
+
+  // Read Receipt
+  rpc MarkAsRead(MarkAsReadRequest) returns (MarkAsReadResponse);
+  rpc GetReadReceipts(GetReadReceiptsRequest) returns (GetReadReceiptsResponse);
+  rpc GetUnreadCount(GetUnreadCountRequest) returns (UnreadCountResponse);
+  rpc GetBatchUnreadCounts(BatchUnreadRequest) returns (BatchUnreadResponse);
+
+  // Thread
+  rpc CreateThreadReply(CreateThreadReplyRequest) returns (CreateThreadReplyResponse);
+  rpc GetThreadReplies(GetThreadRepliesRequest) returns (GetThreadRepliesResponse);
+  rpc GetThreadPreview(GetThreadPreviewRequest) returns (GetThreadPreviewResponse);
+  rpc GetThreadParticipants(GetThreadParticipantsRequest) returns (GetThreadParticipantsResponse);
+  rpc GetActiveThreads(GetActiveThreadsRequest) returns (GetActiveThreadsResponse);
+}

@@ -1,0 +1,221 @@
+generator client {
+  provider = "prisma-client-js"
+  output   = "../node_modules/.prisma/client-userorg"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("USERORG_DATABASE_URL")
+}
+
+// ================= USERORG SERVICE MODELS =================
+
+model Account {
+  id             String    @id @default(uuid())
+  name           String    @db.VarChar(255)
+  number         String    @unique
+  email          String    @unique
+  password       String
+  avatar         String?
+  status         String?
+  birthDate      DateTime?
+  location       String?
+  gender         String    @db.VarChar(10)
+  currentAvatars String?   @db.Text
+  pushToken      String?   @db.VarChar(255)
+  
+  userStatus     UserStatus @default(ONLINE)
+  isOnline       Boolean   @default(false)
+  
+  customStatus       String?    @db.VarChar(100)
+  customStatusEmoji  String?    @db.VarChar(10)
+  customStatusExpiry DateTime?
+  
+  isVerified     Boolean   @default(false)
+  lastSeen       DateTime?
+  role           AccountRole @default(WORKSPACE_MEMBER)
+  
+  isSuspended    Boolean   @default(false)
+  suspendedAt    DateTime?
+  suspendedBy    String?
+  suspendReason  String?   @db.VarChar(500)
+  
+  isAnonymized   Boolean   @default(false)
+  anonymizedAt   DateTime?
+
+  orgId          String?
+  org            Organization? @relation(fields: [orgId], references: [id])
+
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  maxWorkspaces  Int?      // Null means use org default or system default
+
+  devices        LoggedInDevice[]
+  
+  blockedUsers   BlockedUser[] @relation("Blocker")
+  blockedBy      BlockedUser[] @relation("Blocked")
+  friends1       Friend[]      @relation("User1")
+  friends2       Friend[]      @relation("User2")
+  sentRequests     FriendRequest[] @relation("Sender")
+  receivedRequests FriendRequest[] @relation("Receiver")
+
+  @@index([userStatus])
+  @@index([isSuspended])
+  @@index([orgId])
+  @@map("account")
+}
+
+model Organization {
+  id            String    @id @default(uuid())
+  name          String    @db.VarChar(200)
+  slug          String    @unique @db.VarChar(100)
+  domain        String?   @db.VarChar(255)
+  logoUrl       String?   @db.VarChar(500)
+  superAdminId  String
+  plan          String    @default("free")
+  maxMembers    Int       @default(50)
+  maxWorkspaces Int       @default(10) // Default limit
+  isActive      Boolean   @default(true)
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  accounts      Account[]
+
+  @@index([domain])
+  @@map("organization")
+}
+
+model LoggedInDevice {
+  id         String   @id @default(uuid())
+  userId     String
+  deviceId   String
+  deviceName String
+  platform   String
+  accessToken String  @db.Text
+  ipAddress  String?
+  lastActive DateTime @default(now())
+  createdAt  DateTime @default(now())
+  
+  account    Account  @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("logged_in_device")
+}
+
+enum AccountRole {
+  SUPER_ADMIN
+  ADMIN
+  WORKSPACE_MANAGER
+  WORKSPACE_OWNER
+  WORKSPACE_ADMIN
+  EMPLOYEE
+  WORKSPACE_MEMBER
+  WORKSPACE_GUEST
+}
+
+enum UserStatus {
+  ONLINE
+  AWAY
+  DND
+  INVISIBLE
+}
+
+enum InvitationType {
+  USER
+  GUEST
+  MANAGER
+}
+
+// ================= USER RELATIONSHIPS =================
+
+model BlockedUser {
+  id               String   @id @default(uuid())
+  blockerAccountId String
+  blockedAccountId String
+  createdAt        DateTime @default(now())
+
+  blockedAccount   Account  @relation("Blocked", fields: [blockedAccountId], references: [id], onDelete: Cascade)
+  blockerAccount   Account  @relation("Blocker", fields: [blockerAccountId], references: [id], onDelete: Cascade)
+
+  @@unique([blockerAccountId, blockedAccountId])
+  @@map("blocked_user")
+}
+
+model Friend {
+  id        String   @id @default(uuid())
+  user1Id   String
+  user2Id   String
+  createdAt DateTime @default(now())
+
+  user1     Account  @relation("User1", fields: [user1Id], references: [id], onDelete: Cascade)
+  user2     Account  @relation("User2", fields: [user2Id], references: [id], onDelete: Cascade)
+
+  @@unique([user1Id, user2Id])
+  @@index([user2Id])
+  @@map("friend")
+}
+
+model FriendRequest {
+  id         String   @id @default(uuid())
+  senderId   String
+  receiverId String
+  block      Boolean  @default(false)
+  createdAt  DateTime @default(now())
+
+  receiver   Account  @relation("Receiver", fields: [receiverId], references: [id], onDelete: Cascade)
+  sender     Account  @relation("Sender", fields: [senderId], references: [id], onDelete: Cascade)
+
+  @@unique([senderId, receiverId])
+  @@index([receiverId])
+  @@map("friend_request")
+}
+
+// ================= INVITATION SYSTEM =================
+
+model Invitation {
+  id          String   @id @default(uuid())
+  email       String
+  token       String   @unique
+  type        InvitationType @default(USER)
+  role        String?        @default("WORKSPACE_MEMBER")
+  
+  channelIds  String[] @default([])
+  workspaceId String?
+  orgId       String?
+  
+  invitedBy   String
+  inviterName String?
+  expiresAt   DateTime
+  acceptedAt  DateTime?
+  revokedAt   DateTime?
+  
+  createdAt   DateTime @default(now())
+  
+  @@index([token])
+  @@index([email])
+  @@index([invitedBy])
+  @@map("invitation")
+}
+
+// ================= ORG SETTINGS =================
+
+model OrgSettings {
+  id          String   @id @default("main")
+  companyName String   @default("My Company")
+  logoUrl     String?
+  timezone    String   @default("UTC")
+  language    String   @default("en")
+  
+  allowGuestInvite   Boolean @default(true)
+  allowUserInvite    Boolean @default(true)
+  defaultUserRole    String  @default("WORKSPACE_MEMBER")
+  
+  messageRetentionDays Int @default(0)
+  fileRetentionDays    Int @default(0)
+  
+  updatedAt   DateTime @updatedAt
+  updatedBy   String?
+  
+  @@map("org_settings")
+}

@@ -1,0 +1,14 @@
+# =============================================================================
+# Terraform Variables Template
+# =============================================================================
+# Copy this file to terraform.tfvars and fill in your values
+# DO NOT commit terraform.tfvars to version control!
+# =============================================================================
+
+aws_region   = "ap-southeast-1"
+environment  = "dev"
+instance_type = "t2.micro"
+
+# Database credentials (use secrets manager in production!)
+db_username  = "ott_admin"
+db_password  = "your-secure-password-here"

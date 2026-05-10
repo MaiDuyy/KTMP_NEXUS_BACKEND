@@ -1,0 +1,202 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ================= USERORG SERVICE MODELS =================
+// Copy từ monolith - quản lý user/account
+
+model Account {
+  id             String    @id @default(uuid())
+  name           String    @db.VarChar(255)
+  number         String    @unique
+  email          String    @unique
+  password       String
+  avatar         String?
+  status         String?   // Legacy status text
+  birthDate      DateTime?
+  location       String?
+  gender         String    @db.VarChar(10)
+  currentAvatars String?   @db.Text
+  pushToken      String?   @db.VarChar(255)
+  
+  // USER-03: Enhanced user status
+  userStatus     UserStatus @default(ONLINE)
+  isOnline       Boolean   @default(false)
+  
+  // USER-04: Custom status with expiry
+  customStatus       String?    @db.VarChar(100)
+  customStatusEmoji  String?    @db.VarChar(10)
+  customStatusExpiry DateTime?
+  
+  isVerified     Boolean   @default(false)
+  lastSeen       DateTime?
+  role           AccountRole @default(USER)
+  
+  // USER-08: Suspension fields
+  isSuspended    Boolean   @default(false)
+  suspendedAt    DateTime?
+  suspendedBy    String?
+  suspendReason  String?   @db.VarChar(500)
+  
+  // USER-09: Anonymization for GDPR
+  isAnonymized   Boolean   @default(false)
+  anonymizedAt   DateTime?
+
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  devices        LoggedInDevice[]
+  
+  // User relationships
+  blockedUsers   BlockedUser[] @relation("Blocker")
+  blockedBy      BlockedUser[] @relation("Blocked")
+  friends1       Friend[]      @relation("User1")
+  friends2       Friend[]      @relation("User2")
+  sentRequests     FriendRequest[] @relation("Sender")
+  receivedRequests FriendRequest[] @relation("Receiver")
+
+  @@index([userStatus])
+  @@index([isSuspended])
+  @@map("account")
+}
+
+model LoggedInDevice {
+  id         String   @id @default(uuid())
+  userId     String
+  deviceId   String
+  deviceName String
+  platform   String
+  accessToken String  @db.Text
+  ipAddress  String?
+  lastActive DateTime @default(now())
+  createdAt  DateTime @default(now())
+  
+  account    Account  @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("logged_in_device")
+}
+
+enum AccountRole {
+  USER
+  ADMIN
+  MODERATOR
+  EMPLOYEE
+  SUPER_ADMIN
+  WORKSPACE_MANAGER
+}
+
+// USER-03: Enhanced user status
+enum UserStatus {
+  ONLINE
+  AWAY
+  DND        // Do Not Disturb
+  INVISIBLE
+}
+
+// USER-07, USER-10: Invitation types
+enum InvitationType {
+  USER   // Full user invitation
+  GUEST  // External guest (limited access)
+}
+
+// ================= USER RELATIONSHIPS =================
+
+model BlockedUser {
+  id               String   @id @default(uuid())
+  blockerAccountId String
+  blockedAccountId String
+  createdAt        DateTime @default(now())
+
+  blockedAccount   Account  @relation("Blocked", fields: [blockedAccountId], references: [id], onDelete: Cascade)
+  blockerAccount   Account  @relation("Blocker", fields: [blockerAccountId], references: [id], onDelete: Cascade)
+
+  @@unique([blockerAccountId, blockedAccountId])
+  @@map("blocked_user")
+}
+
+model Friend {
+  id        String   @id @default(uuid())
+  user1Id   String
+  user2Id   String
+  createdAt DateTime @default(now())
+
+  user1     Account  @relation("User1", fields: [user1Id], references: [id], onDelete: Cascade)
+  user2     Account  @relation("User2", fields: [user2Id], references: [id], onDelete: Cascade)
+
+  @@unique([user1Id, user2Id])
+  @@index([user2Id])
+  @@map("friend")
+}
+
+model FriendRequest {
+  id         String   @id @default(uuid())
+  senderId   String
+  receiverId String
+  block      Boolean  @default(false)
+  createdAt  DateTime @default(now())
+
+  receiver   Account  @relation("Receiver", fields: [receiverId], references: [id], onDelete: Cascade)
+  sender     Account  @relation("Sender", fields: [senderId], references: [id], onDelete: Cascade)
+
+  @@unique([senderId, receiverId])
+  @@index([receiverId])
+  @@map("friend_request")
+}
+
+// ================= INVITATION SYSTEM (USER-07, USER-10) =================
+
+model Invitation {
+  id          String   @id @default(uuid())
+  email       String
+  token       String   @unique
+  type        InvitationType @default(USER)
+  
+  // For guest invitations - list of channel IDs they can access
+  channelIds  String[] @default([])
+  workspaceId String?
+  
+  // Invitation metadata
+  invitedBy   String   // userId who sent the invite
+  inviterName String?  // Cached name for email
+  expiresAt   DateTime
+  acceptedAt  DateTime?
+  revokedAt   DateTime?
+  
+  createdAt   DateTime @default(now())
+  
+  @@index([token])
+  @@index([email])
+  @@index([invitedBy])
+  @@map("invitation")
+}
+
+// ================= ORG SETTINGS (USER-12) =================
+// Single-org configuration (singleton pattern)
+
+model OrgSettings {
+  id          String   @id @default("main")
+  companyName String   @default("My Company")
+  logoUrl     String?
+  timezone    String   @default("UTC")
+  language    String   @default("en")
+  
+  // Feature flags
+  allowGuestInvite   Boolean @default(true)
+  allowUserInvite    Boolean @default(true)
+  defaultUserRole    String  @default("EMPLOYEE")
+  
+  // Data retention (days, 0 = forever)
+  messageRetentionDays Int @default(0)
+  fileRetentionDays    Int @default(0)
+  
+  updatedAt   DateTime @updatedAt
+  updatedBy   String?
+  
+  @@map("org_settings")
+}

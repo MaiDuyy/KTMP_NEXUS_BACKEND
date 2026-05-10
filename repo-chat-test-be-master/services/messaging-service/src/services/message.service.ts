@@ -1,0 +1,421 @@
+// services/messaging-service/src/services/message.service.ts
+// KEY REFACTOR: Removed groupClient HTTP dependency — now queries Chat/ChatParticipant directly via Prisma
+
+import { v4 as uuidv4 } from 'uuid';
+import { prisma } from '../lib/prisma.js';
+import { publishEvent, EventSubjects } from '../lib/nats.js';
+import { logger } from '../lib/logger.js';
+import { userorgClient } from '../lib/userorgClient.js';
+import { mentionService } from './mention.service.js';
+
+
+const MESSAGE_TYPES = ['text', 'image', 'video', 'audio', 'file', 'sticker', 'gif', 'location', 'contact', 'system', 'call_started', 'call_participant_joined', 'call_participant_left', 'call_ended', 'call_missed', 'call_declined', 'call_cancelled'];
+
+export class MessageService {
+  async getMessages(
+    chatId: string,
+    userId: string,
+    options: { cursor?: string; limit?: number }
+  ) {
+    const { cursor, limit = 50 } = options;
+    const take = Math.min(limit, 100);
+
+    const whereCondition: any = {
+      chatId,
+      OR: [
+        { deletedBy: null },
+        { NOT: { deletedBy: { contains: userId } } },
+      ],
+    };
+
+    if (cursor) {
+      whereCondition.time = { lt: new Date(cursor) };
+    }
+
+    const messages = await prisma.message.findMany({
+      where: whereCondition,
+      include: {
+        replyTo: {
+          select: { id: true, content: true, type: true, senderId: true },
+        },
+        reactions: true,
+      },
+      orderBy: { time: 'desc' },
+      take,
+    });
+
+    const hydratedMessages = await this.populateSenderInfo(messages);
+
+    const formattedMessages = hydratedMessages.map((msg) => ({
+      id: msg.id,
+      content: msg.content,
+      type: msg.type,
+      time: msg.time,
+      pin: msg.pin,
+      senderId: msg.senderId,
+      sender: msg.sender,
+      replyTo: msg.replyTo
+        ? { id: msg.replyTo.id, content: msg.replyTo.content, type: msg.replyTo.type, senderId: msg.replyTo.senderId }
+        : null,
+      file: msg.fileName
+        ? { name: msg.fileName, size: msg.fileSize, type: msg.fileType }
+        : null,
+      reactions: this.groupReactions(msg.reactions),
+      destroy: msg.destroy,
+      isMe: msg.senderId === userId,
+    }));
+
+    const lastMessage = messages[messages.length - 1];
+
+    return {
+      messages: formattedMessages.reverse(),
+      nextCursor: messages.length === take && lastMessage ? lastMessage.time : null,
+    };
+  }
+
+  async sendMessage(
+    chatId: string,
+    senderId: string,
+    input: {
+      content?: string;
+      type?: string;
+      replyToId?: string;
+      fileName?: string;
+      fileSize?: string;
+      fileType?: string;
+    }
+  ) {
+    const { content, type = 'text', replyToId, fileName, fileSize, fileType } = input;
+
+    // REFACTORED: Direct Prisma query instead of HTTP to group-service
+    if (type !== 'system' && chatId) {
+      const chatMetadata = await prisma.chat.findUnique({
+        where: { id: chatId },
+        select: {
+          id: true,
+          isGroup: true,
+          participants: { select: { accountId: true } },
+        },
+      });
+
+      if (chatMetadata && !chatMetadata.isGroup) {
+        const partner = chatMetadata.participants.find((p) => p.accountId !== senderId);
+
+        if (partner) {
+          const blockInfo = await userorgClient.checkBlockedStatus(senderId, partner.accountId);
+          if (blockInfo.isBlocked) {
+            throw new Error('Bạn không thể gửi tin nhắn cho người này vì đã bị chặn hoặc bạn đã chặn người này!');
+          }
+        }
+      }
+    }
+
+    if (!MESSAGE_TYPES.includes(type)) {
+      throw new Error('Loại tin nhắn không hợp lệ!');
+    }
+
+    if (type === 'text' && (!content || content.trim().length === 0)) {
+      throw new Error('Nội dung tin nhắn không được trống!');
+    }
+
+    if (replyToId) {
+      const replyMessage = await prisma.message.findFirst({
+        where: { id: replyToId, chatId },
+      });
+      if (!replyMessage) {
+        throw new Error('Tin nhắn reply không tồn tại!');
+      }
+    }
+
+    const message = await prisma.message.create({
+      data: {
+        id: uuidv4(),
+        chatId,
+        senderId,
+        content: content?.trim() || null,
+        type,
+        replyToId: replyToId || null,
+        fileName: fileName || null,
+        fileSize: fileSize || null,
+        fileType: fileType || null,
+      },
+      include: {
+        replyTo: {
+          select: { id: true, content: true, type: true, senderId: true },
+        },
+      },
+    });
+
+    let senderProfile = null;
+    try {
+      const accountMap = await userorgClient.getUsers([senderId]);
+      senderProfile = accountMap.get(senderId);
+    } catch (err) {
+      logger.error({ err }, 'Failed to fetch user profile for new message');
+    }
+
+    const senderPayload = senderProfile ? {
+      id: senderProfile.id,
+      name: senderProfile.name,
+      avatar: senderProfile.avatar,
+    } : undefined;
+
+    const mentions = await mentionService.processMentions(
+      message.id,
+      message.content || '',
+      chatId,
+      senderId
+    );
+
+    const aiMentioned = mentions.some(m => m.targetType === 'AI');
+    if (aiMentioned) {
+      await publishEvent('ai.request', {
+        messageId: message.id,
+        chatId: message.chatId,
+        senderId: message.senderId,
+        content: message.content?.replace(/@AI/gi, '').trim(),
+      });
+    }
+
+    await publishEvent(EventSubjects.MESSAGE_CREATED, {
+      id: message.id,
+      chatId: message.chatId,
+      senderId: message.senderId,
+      sender: senderPayload,
+      content: message.content,
+      type: message.type,
+      time: message.time.toISOString(),
+      replyTo: message.replyTo,
+      file: fileName ? { name: fileName, size: fileSize, type: fileType } : null,
+      reactions: [],
+      pin: false,
+    });
+
+    logger.info({ messageId: message.id, chatId }, 'Message sent');
+
+    return { ...message, sender: senderPayload };
+  }
+
+  async deleteMessageForMe(messageId: string, userId: string) {
+    const message = await prisma.message.findUnique({ where: { id: messageId } });
+    if (!message) throw new Error('Không tìm thấy tin nhắn!');
+
+    let deletedBy: string[] = [];
+    try { deletedBy = message.deletedBy ? JSON.parse(message.deletedBy) : []; } catch { deletedBy = []; }
+    if (!deletedBy.includes(userId)) deletedBy.push(userId);
+
+    await prisma.message.update({
+      where: { id: messageId },
+      data: { deletedBy: JSON.stringify(deletedBy) },
+    });
+    logger.info({ messageId, userId }, 'Message deleted for user');
+  }
+
+  async recallMessage(messageId: string, userId: string) {
+    const message = await prisma.message.findUnique({ where: { id: messageId } });
+    if (!message) throw new Error('Không tìm thấy tin nhắn!');
+    if (message.senderId !== userId) throw new Error('Chỉ người gửi mới có thể thu hồi!');
+
+    const timeDiff = Date.now() - new Date(message.time).getTime();
+    if (timeDiff > 24 * 60 * 60 * 1000) throw new Error('Chỉ có thể thu hồi tin nhắn trong 24 giờ!');
+
+    await prisma.message.update({ 
+      where: { id: messageId }, 
+      data: { destroy: true, content: 'Tin nhắn đã bị thu hồi', pin: false } 
+    });
+    await publishEvent(EventSubjects.MESSAGE_DELETED, { 
+       id: messageId, 
+       chatId: message.chatId, 
+       recalledBy: userId,
+       content: 'Tin nhắn đã bị thu hồi'
+    });
+    logger.info({ messageId }, 'Message recalled');
+  }
+
+  async reactMessage(messageId: string, userId: string, emoji: string) {
+    const message = await prisma.message.findUnique({ where: { id: messageId } });
+    if (!message) throw new Error('Không tìm thấy tin nhắn!');
+
+    const existingReaction = await prisma.reaction.findFirst({ where: { messageId, userId } });
+    let action: 'added' | 'changed' | 'removed';
+
+    if (existingReaction) {
+      if (existingReaction.reaction === emoji) {
+        await prisma.reaction.delete({ where: { id: existingReaction.id } });
+        action = 'removed';
+      } else {
+        await prisma.reaction.update({ where: { id: existingReaction.id }, data: { reaction: emoji } });
+        action = 'changed';
+      }
+    } else {
+      await prisma.reaction.create({ data: { id: uuidv4(), messageId, userId, reaction: emoji } });
+      action = 'added';
+    }
+
+    await publishEvent(EventSubjects.MESSAGE_REACTION, { messageId, chatId: message.chatId, userId, emoji, action });
+    return { action, emoji };
+  }
+
+  async togglePinMessage(messageId: string, userId: string) {
+    const message = await prisma.message.findUnique({ where: { id: messageId } });
+    if (!message) throw new Error('Không tìm thấy tin nhắn!');
+    const newPinState = !message.pin;
+    const updated = await prisma.message.update({ where: { id: messageId }, data: { pin: newPinState } });
+    
+    // Publish NATS event for real-time update
+
+    publishEvent('message.pinned', {
+      chatId: updated.chatId,
+      messageId: updated.id,
+      pin: newPinState,
+      userId,
+    });
+
+    logger.info({ messageId, pin: newPinState }, 'Message pin toggled');
+    return { pin: newPinState };
+  }
+
+  async getPinnedMessages(chatId: string) {
+    const messages = await prisma.message.findMany({
+      where: { chatId, pin: true, destroy: false },
+      orderBy: { time: 'desc' },
+    });
+    return this.populateSenderInfo(messages);
+  }
+
+  async searchMessages(chatId: string, query: string) {
+    if (!query || query.trim().length < 1) throw new Error('Từ khóa phải có ít nhất 1 ký tự!');
+    const messages = await prisma.message.findMany({
+      where: { chatId, destroy: false, content: { contains: query, mode: 'insensitive' }, type: 'text' },
+      orderBy: { time: 'desc' },
+      take: 50,
+    });
+    return this.populateSenderInfo(messages);
+  }
+
+  async getMediaMessages(chatId: string, type?: string) {
+    let typeFilter: string[] = [];
+    if (type === 'image') typeFilter = ['image'];
+    else if (type === 'video') typeFilter = ['video'];
+    else if (type === 'file') typeFilter = ['file', 'audio'];
+    else typeFilter = ['image', 'video', 'file', 'audio'];
+
+    const messages = await prisma.message.findMany({
+      where: { chatId, destroy: false, type: { in: typeFilter } },
+      orderBy: { time: 'desc' },
+      take: 100,
+    });
+    return this.populateSenderInfo(messages);
+  }
+
+  private groupReactions(reactions: any[]) {
+    return reactions.reduce((acc: any[], r) => {
+      const existing = acc.find((a) => a.emoji === r.reaction);
+      if (existing) { existing.count += 1; existing.userIds.push(r.userId); }
+      else { acc.push({ emoji: r.reaction, count: 1, userIds: [r.userId] }); }
+      return acc;
+    }, []);
+  }
+
+  private async populateSenderInfo(messages: any[]) {
+    if (!messages || messages.length === 0) return messages;
+    
+    // Gom tất cả ID người gửi duy nhất
+    const uniqueAccountIds = [...new Set(messages.map((m) => m.senderId))];
+    
+    // Sử dụng userorgClient (đã tích hợp Redis Cache & Batching)
+    const accountMap = await userorgClient.getUsers(uniqueAccountIds);
+
+    return messages.map((msg) => {
+      const senderAcc = accountMap.get(msg.senderId);
+      return {
+        ...msg,
+        sender: senderAcc ? { id: senderAcc.id, name: senderAcc.name, avatar: senderAcc.avatar } : undefined,
+      };
+    });
+  }
+
+  async getChatSummary(userId: string, chatIds: string[]) {
+    // 1. Lấy dữ liệu cơ bản từ DB cho tất cả chat
+    const summariesRaw = await Promise.all(
+      chatIds.map(async (chatId) => {
+        const lastMessage = await prisma.message.findFirst({
+          where: { chatId },
+          orderBy: { time: 'desc' },
+        });
+
+        const readReceipt = await prisma.readReceipt.findUnique({
+          where: { chatId_userId: { chatId, userId } },
+        });
+
+        let unreadCount = 0;
+        if (readReceipt) {
+          const lastReadMsg = await prisma.message.findUnique({ where: { id: readReceipt.messageId } });
+          if (lastReadMsg) {
+            unreadCount = await prisma.message.count({
+              where: { chatId, destroy: false, senderId: { not: userId }, time: { gt: lastReadMsg.time } },
+            });
+          }
+        } else {
+          unreadCount = await prisma.message.count({
+            where: { chatId, destroy: false, senderId: { not: userId } },
+          });
+        }
+
+        return { chatId, lastMessage, unreadCount };
+      })
+    );
+
+    // 2. TỐI ƯU: Gom tất cả senderId của các lastMessage để hydrate 1 lần duy nhất
+    const allSenderIds = summariesRaw
+      .filter(s => s.lastMessage)
+      .map(s => s.lastMessage!.senderId);
+    
+    const accountMap = await userorgClient.getUsers(allSenderIds);
+
+    // 3. Format lại kết quả cuối cùng
+    return summariesRaw.map((s) => {
+      const lastMessage = s.lastMessage;
+      let sender = null;
+      let displayContent = null;
+
+      if (lastMessage) {
+        const acc = accountMap.get(lastMessage.senderId);
+        sender = acc ? { id: acc.id, name: acc.name, avatar: acc.avatar } : { id: lastMessage.senderId, name: 'Người dùng' };
+
+        displayContent = lastMessage.content;
+        if (!displayContent) {
+          switch (lastMessage.type) {
+            case 'image': displayContent = '[Hình ảnh]'; break;
+            case 'video': displayContent = '[Video]'; break;
+            case 'audio': displayContent = '[Âm thanh]'; break;
+            case 'file': displayContent = `[Tệp tin: ${lastMessage.fileName || 'Không tên'}]`; break;
+            case 'call_participant_joined': displayContent = '[Thành viên tham gia cuộc gọi]'; break;
+            case 'call_participant_left': displayContent = '[Thành viên rời cuộc gọi]'; break;
+            case 'call_started': displayContent = '[Cuộc gọi mới]'; break;
+            case 'call_ended': displayContent = '[Cuộc gọi đã kết thúc]'; break;
+            case 'call_missed': displayContent = '[Cuộc gọi nhỡ]'; break;
+            case 'call_declined': displayContent = '[Cuộc gọi bị từ chối]'; break;
+            case 'call_cancelled': displayContent = '[Cuộc gọi đã hủy]'; break;
+            case 'system': displayContent = '[Thông báo hệ thống]'; break;
+            default: displayContent = '[Tin nhắn mới]';
+          }
+        }
+      }
+
+      return {
+        chatId: s.chatId,
+        lastMessage: lastMessage ? {
+          id: lastMessage.id,
+          content: displayContent,
+          type: lastMessage.type,
+          time: lastMessage.time,
+          sender
+        } : null,
+        unreadCount: s.unreadCount,
+      };
+    });
+  }
+}
+
+export const messageService = new MessageService();
