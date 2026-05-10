@@ -26,10 +26,11 @@ const packageDefinition = protoLoader.loadSync(PROTO_PATH, {
 
 const groupProto = (grpc.loadPackageDefinition(packageDefinition) as any).group;
 
-const MESSAGING_GRPC_URL = process.env.MESSAGING_GRPC_URL || 'localhost:50052';
+const MESSAGING_GRPC_HOST = process.env.MESSAGING_GRPC_HOST || 'localhost';
+const MESSAGING_GRPC_PORT = process.env.MESSAGING_GRPC_PORT || '50052';
 
 const client = new groupProto.GroupService(
-  MESSAGING_GRPC_URL,
+  `${MESSAGING_GRPC_HOST}:${MESSAGING_GRPC_PORT}`,
   grpc.credentials.createInsecure()
 );
 

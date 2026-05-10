@@ -209,6 +209,7 @@ services:
     container_name: ott-messaging-service
     ports:
       - "${MESSAGING_SERVICE_PORT:-3020}:3020"
+      - "${MESSAGING_GRPC_PORT:-50052}:50052"
     environment:
       - NODE_ENV=${NODE_ENV:-development}
       - PORT=${MESSAGING_SERVICE_PORT:-3020}
@@ -218,7 +219,8 @@ services:
       - IDENTITY_SERVICE_URL=${IDENTITY_SERVICE_URL:-http://identity-service:3010}
       - LIVEKIT_API_KEY=${LIVEKIT_API_KEY}
       - LIVEKIT_API_SECRET=${LIVEKIT_API_SECRET}
-      - IDENTITY_GRPC_HOST=${IDENTITY_GRPC_HOST:-identity-service:50051}
+      - IDENTITY_GRPC_HOST=${IDENTITY_GRPC_HOST:-identity-service}
+      - IDENTITY_GRPC_PORT=${IDENTITY_GRPC_PORT:-50051}
     depends_on:
       postgres:
         condition: service_healthy
@@ -244,15 +246,13 @@ services:
       - PORT=${FILE_SERVICE_PORT:-3014}
       - DATABASE_URL=${FILES_DATABASE_URL:-postgresql://ott_user:ott_password@postgres:5432/ott_chat?schema=files}
       - NATS_URL=${NATS_URL:-nats://nats:4222}
-      # - CLOUDINARY_CLOUD_NAME=${CLOUDINARY_CLOUD_NAME}
-      # - CLOUDINARY_API_KEY=${CLOUDINARY_API_KEY}
-      # - CLOUDINARY_API_SECRET=${CLOUDINARY_API_SECRET}
       - CLOUDFRONT_DOMAIN=${CLOUDFRONT_DOMAIN}
       - STORAGE_PROVIDER=${STORAGE_PROVIDER}
       - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
       - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
       - AWS_REGION=${AWS_REGION}
       - AWS_S3_BUCKET=${AWS_S3_BUCKET}
+      - ENABLE_JOB_QUEUE=true
     depends_on:
       postgres:
         condition: service_healthy
@@ -261,74 +261,6 @@ services:
     networks:
       - ott-network
     command: sh -c "npx prisma migrate deploy && node dist/index.js"
-
-  # stats-service:
-  #   build:
-  #     context: .
-  #     dockerfile: services/stats-service/Dockerfile
-  #   container_name: ott-stats-service
-  #   ports:
-  #     - "3015:3015"
-  #   environment:
-  #     - NODE_ENV=${NODE_ENV:-development}
-  #     - PORT=3015
-  #     - DATABASE_URL=${DATABASE_URL:-postgresql://ott_user:ott_password@postgres:5432/ott_chat?schema=stats}
-  #     - REDIS_URL=redis://redis:6379
-  #     - NATS_URL=nats://nats:4222
-  #   depends_on:
-  #     postgres:
-  #       condition: service_healthy
-  #     redis:
-  #       condition: service_healthy
-  #     nats:
-  #       condition: service_started
-  #   networks:
-  #     - ott-network
-
-  # ============= Enterprise Services (Audit, etc.) =============
-  # DEPRECATED: rbac-service (replaced by identity-service)
-
-  # audit-service:
-  #   build:
-  #     context: .
-  #     dockerfile: services/audit-service/Dockerfile
-  #   container_name: ott-audit-service
-  #   ports:
-  #     - "3017:3017"
-  #   environment:
-  #     - NODE_ENV=${NODE_ENV:-development}
-  #     - PORT=3017
-  #     - DATABASE_URL=${DATABASE_URL:-postgresql://ott_user:ott_password@postgres:5432/ott_chat?schema=audit}
-  #     - NATS_URL=nats://nats:4222
-  #   depends_on:
-  #     postgres:
-  #       condition: service_healthy
-  #     nats:
-  #       condition: service_started
-  #   networks:
-  #     - ott-network
-
-
-
-  # ai-knowledge:
-  #   build:
-  #     context: ../ai-knowledge
-  #     dockerfile: Dockerfile
-  #   container_name: ott-ai-knowledge
-  #   ports:
-  #     - "8080:8080"
-  #   environment:
-  #     - DB_HOST=postgres
-  #     - DB_PORT=5432
-  #     - DB_NAME=ott_chat
-  #     - DB_USER=ott_user
-  #     - DB_PASSWORD=ott_password
-  #     - OPENAI_API_KEY=${OPENAI_API_KEY}
-  #   depends_on:
-  #     postgres:
-  #       condition: service_healthy
-  #   networks:
-  #     - ott-network
 
   notification-service:
     build:
