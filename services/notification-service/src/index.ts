@@ -59,7 +59,7 @@ app.get('/stats', async (_req, res) => {
       success: true,
       totalNotifications,
       unreadNotifications,
-      typeDistribution: typeDistribution.map(t => ({ type: t.type, count: t._count._all })),
+      typeDistribution: typeDistribution.map((t:any) => ({ type: t.type, count: t._count._all })),
       timestamp: new Date().toISOString()
     });
   } catch (error: any) {
