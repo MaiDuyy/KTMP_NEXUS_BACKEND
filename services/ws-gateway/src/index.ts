@@ -10,10 +10,7 @@ import { Redis } from 'ioredis';
 import jwt from 'jsonwebtoken';
 import { connect, NatsConnection, JSONCodec } from 'nats';
 import { AccessToken } from 'livekit-server-sdk';
-import { createInternalSignature } from '@ott/shared';
 import { messagingGrpcClient } from './messagingClient.js';
-
-const INTERNAL_SERVICE_SECRET = process.env.INTERNAL_SERVICE_SECRET || 'dev-internal-secret-change-in-production';
 
 const app = express();
 const httpServer = http.createServer(app);
@@ -35,6 +32,8 @@ const LIVEKIT_URL = process.env.LIVEKIT_URL || 'ws://localhost:7880';
 interface AuthenticatedSocket extends Socket {
   userId?: string;
   userName?: string;
+  role?: string;
+  orgId?: string;
 }
 
 // Map lưu trữ users đang online
@@ -45,20 +44,76 @@ const disconnectTimeouts = new Map<string, NodeJS.Timeout>();
 // NATS
 let natsConnection: NatsConnection | null = null;
 const jsonCodec = JSONCodec();
+let activeSubscriptions: any[] = [];
 
 const EventSubjects = {
+  // ===== Message events =====
   MESSAGE_CREATED: 'message.created',
+  MESSAGE_UPDATED: 'message.updated',
+  MESSAGE_DELETED: 'message.deleted',
   MESSAGE_READ: 'message.read',
   MESSAGE_REACTION: 'message.reaction',
-  MESSAGE_DELETED: 'message.deleted',
-  USER_ONLINE: 'user.online',
-  USER_OFFLINE: 'user.offline',
-  TYPING_START: 'typing.start',
-  TYPING_STOP: 'typing.stop',
-  USER_AVATAR_UPDATED: 'user.avatar.updated',
-  GROUP_MEMBER_ROLE_UPDATED: 'group.member.role.updated',
+  MESSAGE_EDITED: 'message.edited',
+
+  // Thread events
+  THREAD_REPLY_CREATED: 'thread.reply.created',
+
+  // Mention events
+  USER_MENTIONED: 'user.mentioned',
+  MENTION_BROADCAST: 'mention.broadcast',
+
+  // File events
+  CHAT_FILE_UPLOADED: 'file.chat.upload',
+
+  // ===== Group events =====
+  GROUP_CREATED: 'group.created',
+  GROUP_UPDATED: 'group.updated',
   GROUP_DELETED: 'group.deleted',
+  GROUP_MEMBER_ADDED: 'group.member.added',
   GROUP_MEMBER_REMOVED: 'group.member.removed',
+  GROUP_MEMBER_ROLE_UPDATED: 'group.member.role.updated',
+
+  // Workspace events
+  WORKSPACE_CREATED: 'workspace.created',
+  WORKSPACE_UPDATED: 'workspace.updated',
+  WORKSPACE_DELETED: 'workspace.deleted',
+  WORKSPACE_MEMBER_ADDED: 'workspace.member.added',
+  WORKSPACE_MEMBER_REMOVED: 'workspace.member.removed',
+  WORKSPACE_INVITE_CREATED: 'workspace.invite.created',
+  WORKSPACE_INVITE_ACCEPTED: 'workspace.invite.accepted',
+  WORKSPACE_INVITE_REJECTED: 'workspace.invite.rejected',
+  WORKSPACE_INVITE_CANCELLED: 'workspace.invite.cancelled',
+  WORKSPACE_MEMBER_ROLE_UPDATED: 'workspace.member.role.updated',
+  WORKSPACE_DISSOLVED: 'workspace.dissolved',
+  WORKSPACE_RESTORED: 'workspace.restored',
+  WORKSPACE_MEMBER_KICKED: 'workspace.member.kicked',
+  WORKSPACE_MEMBER_LEFT: 'workspace.member.left',
+  WORKSPACE_OWNER_TRANSFERRED: 'workspace.owner.transferred',
+
+  // Channel events
+  CHANNEL_CREATED: 'channel.created',
+  CHANNEL_UPDATED: 'channel.updated',
+  CHANNEL_DELETED: 'channel.deleted',
+  CHANNEL_ARCHIVED: 'channel.archived',
+  CHANNEL_MEMBER_ADDED: 'channel.member.added',
+  CHANNEL_MEMBER_REMOVED: 'channel.member.removed',
+
+  // Admin/Audit events
+  AUDIT_LOG_CREATED: 'admin.audit_log.created',
+  RBAC_UPDATED: 'rbac.updated',
+  WORKSPACE_QUOTA_UPDATED: 'workspace.quota.updated',
+
+  // Join Request events
+  GROUP_JOIN_REQUEST_CREATED: 'group.join.request.created',
+  GROUP_JOIN_REQUEST_UPDATED: 'group.join.request.updated',
+
+  // Task events
+  TASK_CREATED: 'task.created',
+  TASK_UPDATED: 'task.updated',
+  TASK_DELETED: 'task.deleted',
+  TASK_DEADLINE_APPROACHING: 'task.deadline.approaching',
+
+  // Friend events
   FRIEND_REQUEST_SENT: 'friend.request.sent',
   FRIEND_REQUEST_ACCEPTED: 'friend.request.accepted',
   FRIEND_REQUEST_REJECTED: 'friend.request.rejected',
@@ -66,6 +121,15 @@ const EventSubjects = {
   FRIEND_UNFRIENDED: 'friend.unfriended',
   FRIEND_USER_BLOCKED: 'friend.user.blocked',
   FRIEND_USER_UNBLOCKED: 'friend.user.unblocked',
+
+  // ===== System/Gateway specific events =====
+  USER_ONLINE: 'user.online',
+  USER_OFFLINE: 'user.offline',
+  TYPING_START: 'typing.start',
+  TYPING_STOP: 'typing.stop',
+  USER_AVATAR_UPDATED: 'user.avatar.updated',
+  NOTIFICATION_CREATED: 'notification.created',
+  SYSTEM_BROADCAST: 'system.broadcast',
 };
 
 // ============= CALL STATE =============
@@ -159,7 +223,7 @@ function removeParticipant(roomName: string, participantId: string): boolean {
 async function saveCallEventMessage(
   chatId: string,
   callerId: string,
-  messageType: 'call_ended' | 'call_missed' | 'call_declined' | 'call_cancelled',
+  messageType: 'call_ended' | 'call_missed' | 'call_declined' | 'call_cancelled' | 'call_started' | 'call_participant_joined' | 'call_participant_left',
   metadata: { isVideo: boolean; duration?: number; callerName?: string }
 ) {
   try {
@@ -167,19 +231,12 @@ async function saveCallEventMessage(
     const messagingServiceUrl = process.env.MESSAGING_SERVICE_URL || 'http://localhost:3020';
     const content = JSON.stringify(metadata);
     
-    // Create HMAC signature
-    const signature = createInternalSignature(INTERNAL_SERVICE_SECRET, {
-      userId: callerId,
-      role: 'USER', // default fallback for ws-gateway proxy
-    });
-
     await fetch(`${messagingServiceUrl}/messages/${chatId}`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         'x-user-id': callerId,
         'x-user-name': metadata.callerName || 'System',
-        'x-internal-signature': signature,
       },
       body: JSON.stringify({ content, type: messageType }),
     });
@@ -223,7 +280,7 @@ const io = new SocketIOServer(httpServer, {
 
 async function setupRedisAdapter() {
   try {
-    const pubClient = new Redis(REDIS_URL);
+    const pubClient = new Redis(REDIS_URL, { lazyConnect: true });
     const subClient = pubClient.duplicate();
 
     await Promise.all([pubClient.connect(), subClient.connect()]);
@@ -231,6 +288,7 @@ async function setupRedisAdapter() {
     io.adapter(createAdapter(pubClient, subClient));
     console.log('[WS Gateway] Redis adapter connected');
   } catch (error) {
+    console.error('[WS Gateway] Redis adapter failed to connect:', error);
     console.warn('[WS Gateway] Redis adapter not available, using memory adapter');
   }
 }
@@ -247,34 +305,64 @@ async function setupNats() {
     });
 
     console.log('[WS Gateway] NATS connected');
+    
+    // Catch-all subscriber for debugging
+    const allEventsSub = natsConnection.subscribe('>');
+    (async () => {
+      for await (const msg of allEventsSub) {
+        try {
+          const decoded = jsonCodec.decode(msg.data) as any;
+          console.log(`[NATS DEBUG] Received event on subject: ${msg.subject}`, decoded);
+        } catch (e) {
+          console.log(`[NATS DEBUG] Received raw message on subject: ${msg.subject}`);
+        }
+      }
+    })();
+
+    // Listen for reconnection to re-subscribe
+    (async () => {
+      if (!natsConnection) return;
+      for await (const s of natsConnection.status()) {
+        console.log(`[WS Gateway] NATS status change: ${s.type}`);
+        if ((s.type as string) === 'reconnect' || (s.type as string) === 'connect') {
+          console.log('[WS Gateway] NATS (re)connected, setting up subscriptions...');
+          subscribeToNatsEvents();
+        }
+      }
+    })();
+
     subscribeToNatsEvents();
   } catch (error) {
-    console.warn('[WS Gateway] NATS not available');
+    console.warn('[WS Gateway] NATS not available', error);
   }
 }
 
 function subscribeToNatsEvents() {
   if (!natsConnection) return;
 
+  // Clear existing subscriptions to avoid duplicates on reconnect
+  for (const sub of activeSubscriptions) {
+    try { sub.unsubscribe(); } catch (e) {}
+  }
+  activeSubscriptions = [];
+
+  const addSub = (sub: any) => {
+    activeSubscriptions.push(sub);
+    return sub;
+  };
+
   // Message Created -> Fan-out to each participant's personal room
-  // We use ONLY personal rooms (user:${uid}) for delivery to guarantee
-  // exactly-once per user. Using both chat rooms + personal rooms caused duplicates.
-  const msgCreatedSub = natsConnection.subscribe(EventSubjects.MESSAGE_CREATED);
+  const msgCreatedSub = addSub(natsConnection.subscribe(EventSubjects.MESSAGE_CREATED));
   (async () => {
     for await (const msg of msgCreatedSub) {
-      const event = jsonCodec.decode(msg.data) as any;
-      const { chatId, ...messageData } = event.payload;
-
       try {
+        const event = jsonCodec.decode(msg.data) as any;
+        const { chatId, ...messageData } = event.payload;
+
         // UNIFIED: Now points to messaging-service instead of group-service
         const messagingServiceUrl = process.env.MESSAGING_SERVICE_URL || 'http://localhost:3020';
-        const signature = createInternalSignature(INTERNAL_SERVICE_SECRET, {
-          userId: 'ws-gateway',
-          role: 'SYSTEM',
-        });
         const response = await fetch(`${messagingServiceUrl}/chats/internal/${chatId}/participant-ids`, {
           headers: {
-            'x-internal-signature': signature,
             'x-user-id': 'ws-gateway',
             'x-user-role': 'SYSTEM',
           },
@@ -293,14 +381,13 @@ function subscribeToNatsEvents() {
       } catch (err) {
         // Fallback: broadcast to chat room if group-service is unreachable
         console.warn('[WS] Fan-out failed, falling back to room broadcast:', (err as any).message);
-        io.to(`chat:${chatId}`).emit('message:new', { message: messageData, chatId });
       }
     }
   })();
 
 
   // Message Read
-  const msgReadSub = natsConnection.subscribe(EventSubjects.MESSAGE_READ);
+  const msgReadSub = addSub(natsConnection.subscribe(EventSubjects.MESSAGE_READ));
   (async () => {
     for await (const msg of msgReadSub) {
       const event = jsonCodec.decode(msg.data) as any;
@@ -310,7 +397,7 @@ function subscribeToNatsEvents() {
   })();
 
   // Message Reaction
-  const msgReactSub = natsConnection.subscribe(EventSubjects.MESSAGE_REACTION);
+  const msgReactSub = addSub(natsConnection.subscribe(EventSubjects.MESSAGE_REACTION));
   (async () => {
     for await (const msg of msgReactSub) {
       const event = jsonCodec.decode(msg.data) as any;
@@ -320,7 +407,7 @@ function subscribeToNatsEvents() {
   })();
 
   // Message Deleted
-  const msgDeletedSub = natsConnection.subscribe(EventSubjects.MESSAGE_DELETED);
+  const msgDeletedSub = addSub(natsConnection.subscribe(EventSubjects.MESSAGE_DELETED));
   (async () => {
     for await (const msg of msgDeletedSub) {
       const event = jsonCodec.decode(msg.data) as any;
@@ -330,7 +417,7 @@ function subscribeToNatsEvents() {
   })();
 
   // Message Pinned
-  const msgPinnedSub = natsConnection.subscribe('message.pinned');
+  const msgPinnedSub = addSub(natsConnection.subscribe('message.pinned'));
   (async () => {
     for await (const msg of msgPinnedSub) {
       const event = jsonCodec.decode(msg.data) as any;
@@ -340,7 +427,7 @@ function subscribeToNatsEvents() {
   })();
 
   // Thread Reply Created
-  const threadReplySub = natsConnection.subscribe('thread.reply.created');
+  const threadReplySub = addSub(natsConnection.subscribe('thread.reply.created'));
   (async () => {
     for await (const msg of threadReplySub) {
       const event = jsonCodec.decode(msg.data) as any;
@@ -350,18 +437,10 @@ function subscribeToNatsEvents() {
     }
   })();
 
-  // User Mentioned
-  const userMentionedSub = natsConnection.subscribe('user.mentioned');
-  (async () => {
-    for await (const msg of userMentionedSub) {
-      const event = jsonCodec.decode(msg.data) as any;
-      const { userId, chatId, messageId, mentionedBy } = event.payload;
-      io.to(`user:${userId}`).emit('mention:new', { chatId, messageId, mentionedBy, timestamp: event.timestamp });
-    }
-  })();
+
 
   // Mention Broadcast (@here, @channel)
-  const mentionBroadcastSub = natsConnection.subscribe('mention.broadcast');
+  const mentionBroadcastSub = addSub(natsConnection.subscribe('mention.broadcast'));
   (async () => {
     for await (const msg of mentionBroadcastSub) {
       const event = jsonCodec.decode(msg.data) as any;
@@ -371,7 +450,7 @@ function subscribeToNatsEvents() {
   })();
 
   // Message Edited
-  const msgEditedSub = natsConnection.subscribe('message.edited');
+  const msgEditedSub = addSub(natsConnection.subscribe('message.edited'));
   (async () => {
     for await (const msg of msgEditedSub) {
       const event = jsonCodec.decode(msg.data) as any;
@@ -381,7 +460,7 @@ function subscribeToNatsEvents() {
   })();
 
   // User Online
-  const userOnlineSub = natsConnection.subscribe(EventSubjects.USER_ONLINE);
+  const userOnlineSub = addSub(natsConnection.subscribe(EventSubjects.USER_ONLINE));
   (async () => {
     for await (const msg of userOnlineSub) {
       const event = jsonCodec.decode(msg.data) as any;
@@ -391,7 +470,7 @@ function subscribeToNatsEvents() {
   })();
 
   // User Offline
-  const userOfflineSub = natsConnection.subscribe(EventSubjects.USER_OFFLINE);
+  const userOfflineSub = addSub(natsConnection.subscribe(EventSubjects.USER_OFFLINE));
   (async () => {
     for await (const msg of userOfflineSub) {
       const event = jsonCodec.decode(msg.data) as any;
@@ -401,7 +480,7 @@ function subscribeToNatsEvents() {
   })();
 
   // User Avatar Updated
-  const userAvatarSub = natsConnection.subscribe(EventSubjects.USER_AVATAR_UPDATED);
+  const userAvatarSub = addSub(natsConnection.subscribe(EventSubjects.USER_AVATAR_UPDATED));
   (async () => {
     for await (const msg of userAvatarSub) {
       const event = jsonCodec.decode(msg.data) as any;
@@ -411,223 +490,831 @@ function subscribeToNatsEvents() {
     }
   })();
   
-  // Group Deleted
-  const groupDeletedSub = natsConnection.subscribe(EventSubjects.GROUP_DELETED || 'group.deleted');
+
+  // Friend Request Sent
+  const friendRequestSentSub = addSub(natsConnection.subscribe(EventSubjects.FRIEND_REQUEST_SENT));
   (async () => {
-    for await (const msg of groupDeletedSub) {
+    for await (const msg of friendRequestSentSub) {
+      try {
+        const event = jsonCodec.decode(msg.data) as any;
+        const { requestId, senderId, receiverId, senderName, senderAvatar, receiverName } = event.payload;
+        console.log(`[WS] Friend request ${requestId} from ${senderId} to ${receiverId} (${receiverName})`);
+        
+        const socketPayload = {
+          id: requestId,
+          sender: {
+            id: senderId,
+            name: senderName,
+            avatar: senderAvatar
+          },
+          createdAt: event.timestamp || new Date().toISOString()
+        };
+
+        // Notify receiver
+        io.to(`user:${receiverId}`).emit('friend:request:received', socketPayload);
+        
+        // Notify sender (for other tabs/sync)
+        io.to(`user:${senderId}`).emit('friend:request:sent', { requestId, receiverId, receiverName });
+      } catch (err) {
+        console.error('[WS] Error processing friend:request:sent:', err);
+      }
+    }
+  })();
+
+  // Friend Request Accepted
+  const friendRequestAcceptedSub = addSub(natsConnection.subscribe(EventSubjects.FRIEND_REQUEST_ACCEPTED));
+  (async () => {
+    for await (const msg of friendRequestAcceptedSub) {
+      try {
+        const event = jsonCodec.decode(msg.data) as any;
+        const { senderId, receiverId, receiverName, senderName, receiverAvatar, senderAvatar, chatId } = event.payload;
+        console.log(`[WS] Friend request accepted by ${receiverName} (${receiverId}), notifying sender ${senderId}`);
+        
+        // Notify Sender (Person A) - they get info about Person B
+        io.to(`user:${senderId}`).emit('friend:request:accepted', {
+          friendId: receiverId,
+          user: {
+            id: receiverId,
+            name: receiverName,
+            avatar: receiverAvatar
+          },
+          chatId: chatId || '',
+          createdAt: event.timestamp || new Date().toISOString()
+        });
+
+        // Notify Receiver (Person B) - they get info about Person A (sync other tabs)
+        io.to(`user:${receiverId}`).emit('friend:request:accepted', {
+          friendId: senderId,
+          user: {
+            id: senderId,
+            name: senderName || 'Người gửi',
+            avatar: senderAvatar
+          },
+          chatId: chatId || '',
+          createdAt: event.timestamp || new Date().toISOString()
+        });
+      } catch (err) {
+        console.error('[WS] Error processing friend:request:accepted:', err);
+      }
+    }
+  })();
+
+  // Friend Request Rejected
+  const friendRequestRejectedSub = addSub(natsConnection.subscribe(EventSubjects.FRIEND_REQUEST_REJECTED));
+  (async () => {
+    for await (const msg of friendRequestRejectedSub) {
+      try {
+        const event = jsonCodec.decode(msg.data) as any;
+        const { senderId, receiverId, requestId } = event.payload;
+        console.log(`[WS] Friend request ${requestId} rejected by ${receiverId}`);
+        
+        // Notify both parties to sync all tabs
+        io.to(`user:${senderId}`).emit('friend:request:rejected', { requestId, receiverId });
+        io.to(`user:${receiverId}`).emit('friend:request:rejected', { requestId, senderId });
+      } catch (err) {
+        console.error('[WS] Error processing friend:request:rejected:', err);
+      }
+    }
+  })();
+
+  // Friend Request Cancelled
+  const friendRequestCancelledSub = addSub(natsConnection.subscribe(EventSubjects.FRIEND_REQUEST_CANCELLED));
+  (async () => {
+    for await (const msg of friendRequestCancelledSub) {
+      try {
+        const event = jsonCodec.decode(msg.data) as any;
+        const { senderId, receiverId, requestId } = event.payload;
+        console.log(`[WS] Friend request ${requestId} cancelled by ${senderId}`);
+        
+        // Notify both parties to sync all tabs
+        io.to(`user:${receiverId}`).emit('friend:request:cancelled', { requestId, senderId });
+        io.to(`user:${senderId}`).emit('friend:request:cancelled', { requestId, receiverId });
+      } catch (err) {
+        console.error('[WS] Error processing friend:request:cancelled:', err);
+      }
+    }
+  })();
+
+  // Friend Unfriended
+  const friendUnfriendedSub = addSub(natsConnection.subscribe(EventSubjects.FRIEND_UNFRIENDED));
+  (async () => {
+    for await (const msg of friendUnfriendedSub) {
+      try {
+        const event = jsonCodec.decode(msg.data) as any;
+        const { userId, friendId } = event.payload;
+        console.log(`[WS] User ${userId} unfriended ${friendId}`);
+        
+        io.to(`user:${userId}`).emit('friend:unfriended', { friendId });
+        io.to(`user:${friendId}`).emit('friend:unfriended', { friendId: userId });
+      } catch (err) {
+        console.error('[WS] Error processing friend:unfriended:', err);
+      }
+    }
+  })();
+
+  // Friend Blocked
+  const friendBlockedSub = addSub(natsConnection.subscribe(EventSubjects.FRIEND_USER_BLOCKED));
+  (async () => {
+    for await (const msg of friendBlockedSub) {
+      try {
+        const event = jsonCodec.decode(msg.data) as any;
+        const { blockerId, blockedId } = event.payload;
+        console.log(`[WS] User ${blockerId} blocked ${blockedId}`);
+        
+        io.to(`user:${blockerId}`).emit('friend:blocked', { blockedId });
+        io.to(`user:${blockedId}`).emit('friend:blocked', { blockerId });
+      } catch (err) {
+        console.error('[WS] Error processing friend:blocked:', err);
+      }
+    }
+  })();
+
+  // Friend Unblocked
+  const friendUnblockedSub = addSub(natsConnection.subscribe(EventSubjects.FRIEND_USER_UNBLOCKED));
+  (async () => {
+    for await (const msg of friendUnblockedSub) {
+      try {
+        const event = jsonCodec.decode(msg.data) as any;
+        const { blockerId, blockedId } = event.payload;
+        console.log(`[WS] User ${blockerId} unblocked ${blockedId}`);
+        
+        io.to(`user:${blockerId}`).emit('friend:unblocked', { blockedId });
+        io.to(`user:${blockedId}`).emit('friend:unblocked', { blockerId });
+      } catch (err) {
+        console.error('[WS] Error processing friend:unblocked:', err);
+      }
+    }
+  })();
+  
+  // Workspace Invite Created
+  const workspaceInviteSub = addSub(natsConnection.subscribe(EventSubjects.WORKSPACE_INVITE_CREATED));
+  (async () => {
+    for await (const msg of workspaceInviteSub) {
       const event = jsonCodec.decode(msg.data) as any;
-      const { chatId, memberIds } = event.payload;
-      console.log(`[WS] Group deleted: ${chatId}`);
+      const { inviteeId, workspaceName, inviterId, role, token } = event.payload;
+      
+      if (inviteeId) {
+        console.log(`[WS] Notifying user ${inviteeId} about new workspace invite for ${workspaceName}`);
+        io.to(`user:${inviteeId}`).emit('workspace:invite:new', {
+          workspaceName,
+          role,
+          token,
+          inviterId,
+          timestamp: event.timestamp || new Date().toISOString()
+        });
+      }
+    }
+  })();
+
+  // Workspace Dissolved
+  const workspaceDissolvedSub = addSub(natsConnection.subscribe(EventSubjects.WORKSPACE_DISSOLVED));
+  (async () => {
+    for await (const msg of workspaceDissolvedSub) {
+      const event = jsonCodec.decode(msg.data) as any;
+      const { workspaceId, memberIds, dissolvedBy } = event.payload;
+      
+      console.log(`[WS] Workspace ${workspaceId} dissolved. Notifying members.`);
       if (Array.isArray(memberIds)) {
         for (const uid of memberIds) {
-          io.to(`user:${uid}`).emit('chat:deleted', { chatId });
+          io.to(`user:${uid}`).emit('workspace:dissolved', { workspaceId, dissolvedBy });
         }
       }
     }
   })();
 
-  // Group Member Removed (Kicked or Self Leave)
-  const groupMemberRemovedSub = natsConnection.subscribe(EventSubjects.GROUP_MEMBER_REMOVED || 'group.member.removed');
+  // Workspace Restored
+  const workspaceRestoredSub = addSub(natsConnection.subscribe(EventSubjects.WORKSPACE_RESTORED));
   (async () => {
-    for await (const msg of groupMemberRemovedSub) {
+    for await (const msg of workspaceRestoredSub) {
       const event = jsonCodec.decode(msg.data) as any;
-      const { chatId, memberId, isSelfLeave } = event.payload;
-      console.log(`[WS] Member ${memberId} removed from chat ${chatId}. SelfLeave: ${isSelfLeave}`);
-      // Notify the specific member they are out
-      io.to(`user:${memberId}`).emit('chat:member_removed', { chatId, isSelfLeave });
-      // Notify the chat room to update members list
-      io.to(`chat:${chatId}`).emit('chat:member_updated', { chatId, memberId, action: 'removed' });
+      const { workspaceId, memberIds, restoredBy } = event.payload;
+      
+      console.log(`[WS] Workspace ${workspaceId} restored. Notifying members.`);
+      if (Array.isArray(memberIds)) {
+        for (const uid of memberIds) {
+          io.to(`user:${uid}`).emit('workspace:restored', { workspaceId, restoredBy });
+        }
+      }
     }
   })();
 
-  // Group Member Role Updated
-  const groupMemberRoleUpdatedSub = natsConnection.subscribe(EventSubjects.GROUP_MEMBER_ROLE_UPDATED || 'group.member.role.updated');
+  // Workspace Member Left/Kicked
+  const workspaceMemberEvents = [
+    EventSubjects.WORKSPACE_MEMBER_LEFT,
+    EventSubjects.WORKSPACE_MEMBER_KICKED
+  ];
+
+  for (const subject of workspaceMemberEvents) {
+    const sub = addSub(natsConnection.subscribe(subject));
+    (async () => {
+      for await (const msg of sub) {
+        const event = jsonCodec.decode(msg.data) as any;
+        const { workspaceId, userId, memberIds, reason, kickedBy } = event.payload;
+        
+        console.log(`[WS] User ${userId} left/kicked from workspace ${workspaceId}. Reason: ${reason}`);
+        
+        // Notify the user who left
+        io.to(`user:${userId}`).emit('workspace:member:left', { workspaceId, userId, reason, kickedBy });
+        
+        // Notify remaining members
+        if (Array.isArray(memberIds)) {
+          for (const uid of memberIds) {
+            if (uid !== userId) {
+              io.to(`user:${uid}`).emit('workspace:member:updated', { workspaceId, userId, action: 'removed', reason });
+            }
+          }
+        }
+      }
+    })();
+  }
+
+  // Workspace Created
+  const workspaceCreatedSub = addSub(natsConnection.subscribe(EventSubjects.WORKSPACE_CREATED));
   (async () => {
-    for await (const msg of groupMemberRoleUpdatedSub) {
+    for await (const msg of workspaceCreatedSub) {
       const event = jsonCodec.decode(msg.data) as any;
-      const { chatId, memberId, newRole } = event.payload;
-      console.log(`[WS] Member ${memberId} role updated to ${newRole} in chat ${chatId}`);
-      // Notify the specific member
-      io.to(`user:${memberId}`).emit('chat:role_updated', { chatId, newRole });
-      // Notify the chat room
-      io.to(`chat:${chatId}`).emit('chat:member_updated', { chatId, memberId, action: 'role_updated', newRole });
+      const { userId, workspace } = event.payload;
+      console.log(`[WS] Workspace ${workspace?.id} created by user ${userId}`);
+      io.to(`user:${userId}`).emit('workspace:created', { workspace });
     }
   })();
 
-  // Group Updated (Info/Policy)
-  const groupUpdatedSub = natsConnection.subscribe(EventSubjects.GROUP_UPDATED || 'group.updated');
+  // Workspace Updated
+  const workspaceUpdatedSub = addSub(natsConnection.subscribe(EventSubjects.WORKSPACE_UPDATED));
+  (async () => {
+    for await (const msg of workspaceUpdatedSub) {
+      const event = jsonCodec.decode(msg.data) as any;
+      const { id, memberIds, ...updates } = event.payload;
+      console.log(`[WS] Workspace ${id} updated. Notifying members.`);
+      if (Array.isArray(memberIds)) {
+        for (const uid of memberIds) {
+          io.to(`user:${uid}`).emit('workspace:updated', { workspaceId: id, ...updates });
+        }
+      }
+    }
+  })();
+
+  // Workspace Member Added
+  const workspaceMemberAddedSub = addSub(natsConnection.subscribe(EventSubjects.WORKSPACE_MEMBER_ADDED));
+  (async () => {
+    for await (const msg of workspaceMemberAddedSub) {
+      const event = jsonCodec.decode(msg.data) as any;
+      const { workspaceId, userId, memberIds } = event.payload;
+      console.log(`[WS] User ${userId} added to workspace ${workspaceId}`);
+      
+      // Notify all current members if list provided
+      if (Array.isArray(memberIds)) {
+        for (const uid of memberIds) {
+          io.to(`user:${uid}`).emit('workspace:member:updated', { workspaceId, userId, action: 'added' });
+        }
+      } else {
+        // Fallback: Notify the new member at least
+        io.to(`user:${userId}`).emit('workspace:member:updated', { workspaceId, userId, action: 'added' });
+      }
+    }
+  })();
+
+  // Workspace Member Removed
+  const workspaceMemberRemovedSub = addSub(natsConnection.subscribe(EventSubjects.WORKSPACE_MEMBER_REMOVED));
+  (async () => {
+    for await (const msg of workspaceMemberRemovedSub) {
+      const event = jsonCodec.decode(msg.data) as any;
+      const { workspaceId, userId, memberIds } = event.payload;
+      console.log(`[WS] User ${userId} removed from workspace ${workspaceId}`);
+      io.to(`user:${userId}`).emit('workspace:member:left', { workspaceId, userId, reason: 'REMOVED' });
+      if (Array.isArray(memberIds)) {
+        for (const uid of memberIds) {
+          if (uid !== userId) {
+            io.to(`user:${uid}`).emit('workspace:member:updated', { workspaceId, userId, action: 'removed' });
+          }
+        }
+      }
+    }
+  })();
+
+  // RBAC Updated -> Instant permission refresh
+  const rbacUpdatedSub = addSub(natsConnection.subscribe(EventSubjects.RBAC_UPDATED));
+  (async () => {
+    for await (const msg of rbacUpdatedSub) {
+      const event = jsonCodec.decode(msg.data) as any;
+      const { userId, role, scope, scopeId } = event.payload;
+      console.log(`[WS] RBAC updated for user ${userId}: ${role} (${scope}:${scopeId})`);
+      io.to(`user:${userId}`).emit('rbac:updated', { role, scope, scopeId });
+    }
+  })();
+
+  // Workspace Quota Updated
+  const quotaUpdatedSub = addSub(natsConnection.subscribe(EventSubjects.WORKSPACE_QUOTA_UPDATED));
+  (async () => {
+    for await (const msg of quotaUpdatedSub) {
+      const event = jsonCodec.decode(msg.data) as any;
+      const { orgId, used, limit } = event.payload;
+      console.log(`[WS] Quota updated for org ${orgId}: ${used}/${limit}`);
+      io.to(`org:${orgId}`).emit('workspace:quota:updated', { used, limit });
+    }
+  })();
+
+  // Audit Log Created -> Live feed for admins
+  const auditLogSub = addSub(natsConnection.subscribe(EventSubjects.AUDIT_LOG_CREATED));
+  (async () => {
+    for await (const msg of auditLogSub) {
+      const event = jsonCodec.decode(msg.data) as any;
+      const { userId, action, resource, data } = event.payload;
+      
+      // Emit to org room if data contains orgId
+      const orgId = data?.orgId;
+      if (orgId) {
+        console.log(`[WS] Live Audit Log for org ${orgId}: ${action} by ${userId}`);
+        io.to(`org:${orgId}`).emit('admin:audit:new', { userId, action, resource, data, createdAt: event.timestamp });
+      }
+      
+      // Also emit to system admin room
+      io.to('role:SUPER_ADMIN').to('role:ADMIN').emit('admin:audit:new', { userId, action, resource, data, createdAt: event.timestamp });
+    }
+  })();
+
+  // Workspace Member Role Updated
+  const workspaceMemberRoleSub = addSub(natsConnection.subscribe(EventSubjects.WORKSPACE_MEMBER_ROLE_UPDATED));
+  (async () => {
+    for await (const msg of workspaceMemberRoleSub) {
+      const event = jsonCodec.decode(msg.data) as any;
+      const { workspaceId, userId, role, memberIds } = event.payload;
+      
+      console.log(`[WS] Role updated for user ${userId} in workspace ${workspaceId} to ${role}`);
+      
+      if (Array.isArray(memberIds)) {
+        for (const uid of memberIds) {
+          io.to(`user:${uid}`).emit('workspace:member:updated', { workspaceId, userId, action: 'role_updated', role });
+        }
+      }
+    }
+  })();
+
+  // Workspace Owner Transferred
+  const workspaceOwnerTransferredSub = addSub(natsConnection.subscribe(EventSubjects.WORKSPACE_OWNER_TRANSFERRED));
+  (async () => {
+    for await (const msg of workspaceOwnerTransferredSub) {
+      const event = jsonCodec.decode(msg.data) as any;
+      const { workspaceId, oldOwnerId, newOwnerId, memberIds } = event.payload;
+      
+      console.log(`[WS] Ownership transferred for workspace ${workspaceId} from ${oldOwnerId} to ${newOwnerId}`);
+      
+      if (Array.isArray(memberIds)) {
+        for (const uid of memberIds) {
+          io.to(`user:${uid}`).emit('workspace:owner:transferred', { workspaceId, oldOwnerId, newOwnerId });
+        }
+      }
+    }
+  })();
+
+  // Workspace Invite Accepted
+  const workspaceInviteAcceptedSub = addSub(natsConnection.subscribe(EventSubjects.WORKSPACE_INVITE_ACCEPTED));
+  (async () => {
+    for await (const msg of workspaceInviteAcceptedSub) {
+      const event = jsonCodec.decode(msg.data) as any;
+      const { workspaceId, userId, inviterId, memberIds } = event.payload;
+      
+      console.log(`[WS] User ${userId} accepted invite for workspace ${workspaceId}`);
+      
+      // Notify the inviter specifically
+      if (inviterId) {
+        io.to(`user:${inviterId}`).emit('workspace:invite:accepted', { workspaceId, userId });
+      }
+
+      // Notify all members to refresh their list
+      if (Array.isArray(memberIds)) {
+        for (const uid of memberIds) {
+          io.to(`user:${uid}`).emit('workspace:member:updated', { workspaceId, userId, action: 'joined' });
+        }
+      }
+    }
+  })();
+
+  // Workspace Invite Rejected
+  const workspaceInviteRejectedSub = addSub(natsConnection.subscribe(EventSubjects.WORKSPACE_INVITE_REJECTED));
+  (async () => {
+    for await (const msg of workspaceInviteRejectedSub) {
+      const event = jsonCodec.decode(msg.data) as any;
+      const { workspaceId, email, inviterId } = event.payload;
+      
+      console.log(`[WS] Invite to ${email} for workspace ${workspaceId} was rejected.`);
+      
+      // Notify the inviter specifically
+      if (inviterId) {
+        io.to(`user:${inviterId}`).emit('workspace:invite:rejected', { workspaceId, email });
+      }
+    }
+  })();
+
+  // Workspace Invite Cancelled
+  const workspaceInviteCancelledSub = addSub(natsConnection.subscribe(EventSubjects.WORKSPACE_INVITE_CANCELLED));
+  (async () => {
+    for await (const msg of workspaceInviteCancelledSub) {
+      const event = jsonCodec.decode(msg.data) as any;
+      const { workspaceId, memberIds } = event.payload;
+      
+      console.log(`[WS] Invite cancelled for workspace ${workspaceId}. Notifying members.`);
+      if (Array.isArray(memberIds)) {
+        for (const uid of memberIds) {
+          io.to(`user:${uid}`).emit('workspace:invite:cancelled', { workspaceId });
+        }
+      }
+    }
+  })();
+
+  // Workspace Deleted (Hard delete)
+  const workspaceDeletedSub = addSub(natsConnection.subscribe(EventSubjects.WORKSPACE_DELETED));
+  (async () => {
+    for await (const msg of workspaceDeletedSub) {
+      const event = jsonCodec.decode(msg.data) as any;
+      const { id, workspaceId, memberIds } = event.payload;
+      const finalId = workspaceId || id;
+      
+      console.log(`[WS] Workspace ${finalId} deleted. Notifying members.`);
+      if (Array.isArray(memberIds)) {
+        for (const uid of memberIds) {
+          io.to(`user:${uid}`).emit('workspace:deleted', { workspaceId: finalId });
+        }
+      }
+    }
+  })();
+
+  // Group Created
+  const groupCreatedSub = addSub(natsConnection.subscribe(EventSubjects.GROUP_CREATED));
+  (async () => {
+    for await (const msg of groupCreatedSub) {
+      const event = jsonCodec.decode(msg.data) as any;
+      const { id, memberIds } = event.payload;
+      console.log(`[WS] Group ${id} created. Notifying members.`);
+      if (Array.isArray(memberIds)) {
+        for (const uid of memberIds) {
+          io.to(`user:${uid}`).emit('chat:new', { chatId: id });
+        }
+      }
+    }
+  })();
+
+  // Group Updated
+  const groupUpdatedSub = addSub(natsConnection.subscribe(EventSubjects.GROUP_UPDATED));
   (async () => {
     for await (const msg of groupUpdatedSub) {
       const event = jsonCodec.decode(msg.data) as any;
-      const { chatId, ...updateData } = event.payload;
-      console.log(`[WS] Group ${chatId} updated`);
-      io.to(`chat:${chatId}`).emit('chat:updated', { chatId, ...updateData });
+      const { id, memberIds, ...updates } = event.payload;
+      console.log(`[WS] Group ${id} updated. Notifying members.`);
+      if (Array.isArray(memberIds)) {
+        for (const uid of memberIds) {
+          io.to(`user:${uid}`).emit('chat:updated', { chatId: id, ...updates });
+        }
+      }
+    }
+  })();
+
+  // Group Deleted
+  const groupDeletedSub = addSub(natsConnection.subscribe(EventSubjects.GROUP_DELETED));
+  (async () => {
+    for await (const msg of groupDeletedSub) {
+      const event = jsonCodec.decode(msg.data) as any;
+      const { id, memberIds } = event.payload;
+      console.log(`[WS] Group ${id} deleted. Notifying members.`);
+      if (Array.isArray(memberIds)) {
+        for (const uid of memberIds) {
+          io.to(`user:${uid}`).emit('chat:deleted', { chatId: id });
+        }
+      }
     }
   })();
 
   // Group Member Added
-  const groupMemberAddedSub = natsConnection.subscribe(EventSubjects.GROUP_MEMBER_ADDED || 'group.member.added');
+  const groupMemberAddedSub = addSub(natsConnection.subscribe(EventSubjects.GROUP_MEMBER_ADDED));
   (async () => {
     for await (const msg of groupMemberAddedSub) {
       const event = jsonCodec.decode(msg.data) as any;
-      const { chatId, memberId, addedBy } = event.payload;
-      console.log(`[WS] Member ${memberId} added to chat ${chatId}`);
-      io.to(`chat:${chatId}`).emit('chat:member_updated', { chatId, memberId, action: 'added', addedBy });
+      const { chatId, userId, memberIds } = event.payload;
+      console.log(`[WS] User ${userId} joined group ${chatId}`);
+      if (Array.isArray(memberIds)) {
+        for (const uid of memberIds) {
+          io.to(`user:${uid}`).emit('chat:member_updated', { chatId, userId, action: 'joined' });
+        }
+      }
+    }
+  })();
+
+  // Group Member Removed
+  const groupMemberRemovedSub = addSub(natsConnection.subscribe(EventSubjects.GROUP_MEMBER_REMOVED));
+  (async () => {
+    for await (const msg of groupMemberRemovedSub) {
+      const event = jsonCodec.decode(msg.data) as any;
+      const { chatId, userId, memberIds, reason } = event.payload;
+      console.log(`[WS] User ${userId} removed from group ${chatId}`);
+      io.to(`user:${userId}`).emit('chat:member_removed', { chatId, userId, reason });
+      if (Array.isArray(memberIds)) {
+        for (const uid of memberIds) {
+          if (uid !== userId) {
+            io.to(`user:${uid}`).emit('chat:member_updated', { chatId, userId, action: 'removed' });
+          }
+        }
+      }
+    }
+  })();
+
+  // Group Member Role Updated
+  const groupMemberRoleUpdatedSub = addSub(natsConnection.subscribe(EventSubjects.GROUP_MEMBER_ROLE_UPDATED));
+  (async () => {
+    for await (const msg of groupMemberRoleUpdatedSub) {
+      const event = jsonCodec.decode(msg.data) as any;
+      const { chatId, userId, role, memberIds } = event.payload;
+      console.log(`[WS] Role updated for user ${userId} in group ${chatId} to ${role}`);
+      if (Array.isArray(memberIds)) {
+        for (const uid of memberIds) {
+          io.to(`user:${uid}`).emit('chat:role_updated', { chatId, memberId: userId, newRole: role });
+        }
+      }
+    }
+  })();
+
+  // Channel Created
+  const channelCreatedSub = addSub(natsConnection.subscribe(EventSubjects.CHANNEL_CREATED));
+  (async () => {
+    for await (const msg of channelCreatedSub) {
+      const event = jsonCodec.decode(msg.data) as any;
+      const { workspaceId, channel, memberIds } = event.payload;
+      console.log(`[WS] Channel ${channel?.id} created in workspace ${workspaceId}`);
+      if (Array.isArray(memberIds)) {
+        for (const uid of memberIds) {
+          io.to(`user:${uid}`).emit('channel:new', { workspaceId, channel });
+        }
+      }
+    }
+  })();
+
+  // Channel Updated
+  const channelUpdatedSub = addSub(natsConnection.subscribe(EventSubjects.CHANNEL_UPDATED));
+  (async () => {
+    for await (const msg of channelUpdatedSub) {
+      const event = jsonCodec.decode(msg.data) as any;
+      const { id, workspaceId, memberIds, ...updates } = event.payload;
+      console.log(`[WS] Channel ${id} updated. Notifying members.`);
+      if (Array.isArray(memberIds)) {
+        for (const uid of memberIds) {
+          io.to(`user:${uid}`).emit('channel:updated', { channelId: id, workspaceId, ...updates });
+        }
+      }
+    }
+  })();
+
+  // Channel Deleted
+  const channelDeletedSub = addSub(natsConnection.subscribe(EventSubjects.CHANNEL_DELETED));
+  (async () => {
+    for await (const msg of channelDeletedSub) {
+      const event = jsonCodec.decode(msg.data) as any;
+      const { id, workspaceId, memberIds } = event.payload;
+      console.log(`[WS] Channel ${id} deleted. Notifying members.`);
+      if (Array.isArray(memberIds)) {
+        for (const uid of memberIds) {
+          io.to(`user:${uid}`).emit('channel:deleted', { channelId: id, workspaceId });
+        }
+      }
+    }
+  })();
+
+  // Task Created
+  const taskCreatedSub = addSub(natsConnection.subscribe(EventSubjects.TASK_CREATED));
+  (async () => {
+    for await (const msg of taskCreatedSub) {
+      const event = jsonCodec.decode(msg.data) as any;
+      const { chatId, task, memberIds } = event.payload;
+      console.log(`[WS] Task created in chat ${chatId}`);
+      if (Array.isArray(memberIds)) {
+        for (const uid of memberIds) {
+          io.to(`user:${uid}`).emit('task:new', { chatId, task });
+        }
+      }
+    }
+  })();
+
+  // Task Updated
+  const taskUpdatedSub = addSub(natsConnection.subscribe(EventSubjects.TASK_UPDATED));
+  (async () => {
+    for await (const msg of taskUpdatedSub) {
+      const event = jsonCodec.decode(msg.data) as any;
+      const { taskId, chatId, memberIds, ...updates } = event.payload;
+      console.log(`[WS] Task ${taskId} updated in chat ${chatId}`);
+      if (Array.isArray(memberIds)) {
+        for (const uid of memberIds) {
+          io.to(`user:${uid}`).emit('task:updated', { taskId, chatId, ...updates });
+        }
+      }
     }
   })();
 
   // Join Request Created
-  const groupJoinRequestCreatedSub = natsConnection.subscribe(EventSubjects.GROUP_JOIN_REQUEST_CREATED || 'group.join.request.created');
+  const joinRequestCreatedSub = addSub(natsConnection.subscribe(EventSubjects.GROUP_JOIN_REQUEST_CREATED));
   (async () => {
-    for await (const msg of groupJoinRequestCreatedSub) {
+    for await (const msg of joinRequestCreatedSub) {
       const event = jsonCodec.decode(msg.data) as any;
-      const { chatId, accountId, requestId } = event.payload;
-      console.log(`[WS] New join request for chat ${chatId} from ${accountId}`);
-      io.to(`chat:${chatId}`).emit('chat:join_request:new', { chatId, accountId, requestId });
+      const { chatId, requestId, accountId, adminIds } = event.payload;
+      console.log(`[WS] New join request for group ${chatId}`);
+      if (Array.isArray(adminIds)) {
+        for (const aid of adminIds) {
+          io.to(`user:${aid}`).emit('chat:join_request:new', { chatId, requestId, accountId });
+        }
+      }
     }
   })();
 
   // Join Request Updated
-  const groupJoinRequestUpdatedSub = natsConnection.subscribe(EventSubjects.GROUP_JOIN_REQUEST_UPDATED || 'group.join.request.updated');
+  const joinRequestUpdatedSub = addSub(natsConnection.subscribe(EventSubjects.GROUP_JOIN_REQUEST_UPDATED));
   (async () => {
-    for await (const msg of groupJoinRequestUpdatedSub) {
+    for await (const msg of joinRequestUpdatedSub) {
       const event = jsonCodec.decode(msg.data) as any;
-      const { chatId, accountId, status, handledBy } = event.payload;
-      console.log(`[WS] Join request for chat ${chatId} updated to ${status}`);
-      io.to(`chat:${chatId}`).emit('chat:join_request:updated', { chatId, accountId, status, handledBy });
-      // If approved, the member will be notified via group.member.added separately
+      const { chatId, requestId, accountId, status, adminIds } = event.payload;
+      console.log(`[WS] Join request ${requestId} updated to ${status}`);
+      if (Array.isArray(adminIds)) {
+        for (const aid of adminIds) {
+          io.to(`user:${aid}`).emit('chat:join_request:updated', { chatId, requestId, accountId, status });
+        }
+      }
+      // Also notify the applicant
+      io.to(`user:${accountId}`).emit('chat:join_request:status', { chatId, requestId, status });
     }
   })();
 
-  // Task Events
-  const taskCreatedSub = natsConnection.subscribe(EventSubjects.TASK_CREATED);
+  // Channel Archived
+  const channelArchivedSub = addSub(natsConnection.subscribe(EventSubjects.CHANNEL_ARCHIVED));
   (async () => {
-    for await (const msg of taskCreatedSub) {
+    for await (const msg of channelArchivedSub) {
       const event = jsonCodec.decode(msg.data) as any;
-      const { chatId, ...taskData } = event.payload;
-      console.log(`[WS] Task created in chat ${chatId}`);
-      io.to(`chat:${chatId}`).emit('task:new', { chatId, ...taskData });
+      const { id, workspaceId, memberIds } = event.payload;
+      console.log(`[WS] Channel ${id} archived in workspace ${workspaceId}`);
+      if (Array.isArray(memberIds)) {
+        for (const uid of memberIds) {
+          io.to(`user:${uid}`).emit('channel:archived', { channelId: id, workspaceId });
+        }
+      }
     }
   })();
 
-  const taskUpdatedSub = natsConnection.subscribe(EventSubjects.TASK_UPDATED);
+  // Channel Member Added
+  const channelMemberAddedSub = addSub(natsConnection.subscribe(EventSubjects.CHANNEL_MEMBER_ADDED));
   (async () => {
-    for await (const msg of taskUpdatedSub) {
+    for await (const msg of channelMemberAddedSub) {
       const event = jsonCodec.decode(msg.data) as any;
-      const { chatId, taskId, ...updateData } = event.payload;
-      console.log(`[WS] Task ${taskId} updated in chat ${chatId}`);
-      io.to(`chat:${chatId}`).emit('task:updated', { chatId, taskId, ...updateData });
+      const { channelId, userId, memberIds } = event.payload;
+      console.log(`[WS] User ${userId} joined channel ${channelId}`);
+      if (Array.isArray(memberIds)) {
+        for (const uid of memberIds) {
+          io.to(`user:${uid}`).emit('channel:member_updated', { channelId, userId, action: 'joined' });
+        }
+      }
     }
   })();
 
-  // Friend Request Sent
-  const friendRequestSentSub = natsConnection.subscribe(EventSubjects.FRIEND_REQUEST_SENT || 'friend.request.sent');
+  // Channel Member Removed
+  const channelMemberRemovedSub = addSub(natsConnection.subscribe(EventSubjects.CHANNEL_MEMBER_REMOVED));
   (async () => {
-    for await (const msg of friendRequestSentSub) {
+    for await (const msg of channelMemberRemovedSub) {
       const event = jsonCodec.decode(msg.data) as any;
-      const { requestId, senderId, receiverId, senderName, senderAvatar } = event.payload;
-      
-      const socketPayload = {
-        id: requestId,
-        sender: {
-          id: senderId,
-          name: senderName,
-          avatar: senderAvatar
-        },
-        createdAt: event.timestamp || new Date().toISOString()
-      };
-
-      console.log(`[WS] Friend request ${requestId} from ${senderId} to ${receiverId}`);
-      
-      // Notify receiver
-      io.to(`user:${receiverId}`).emit('friend:request:received', socketPayload);
-      
-      // Notify sender (for other tabs)
-      io.to(`user:${senderId}`).emit('friend:request:sent', { requestId, receiverId });
+      const { channelId, userId, memberIds } = event.payload;
+      console.log(`[WS] User ${userId} left channel ${channelId}`);
+      io.to(`user:${userId}`).emit('channel:member_removed', { channelId, userId });
+      if (Array.isArray(memberIds)) {
+        for (const uid of memberIds) {
+          if (uid !== userId) {
+            io.to(`user:${uid}`).emit('channel:member_updated', { channelId, userId, action: 'removed' });
+          }
+        }
+      }
     }
   })();
 
-  // Friend Request Accepted
-  const friendRequestAcceptedSub = natsConnection.subscribe(EventSubjects.FRIEND_REQUEST_ACCEPTED || 'friend.request.accepted');
+  // Task Deleted
+  const taskDeletedSub = addSub(natsConnection.subscribe(EventSubjects.TASK_DELETED));
   (async () => {
-    for await (const msg of friendRequestAcceptedSub) {
+    for await (const msg of taskDeletedSub) {
       const event = jsonCodec.decode(msg.data) as any;
-      const { senderId, ...acceptData } = event.payload;
-      console.log(`[WS] Friend request accepted by ${acceptData.receiverId}, notifying sender ${senderId}`);
-      
-      const socketPayload = {
-        friendId: acceptData.receiverId,
-        user: {
-          id: acceptData.receiverId,
-          name: acceptData.receiverName,
-          avatar: null // Avatar should be fetched by client if needed or included in NATS
-        },
-        chatId: acceptData.chatId || '',
-        createdAt: event.timestamp || new Date().toISOString()
-      };
-
-      io.to(`user:${senderId}`).emit('friend:request:accepted', socketPayload);
-      io.to(`user:${acceptData.receiverId}`).emit('friend:request:accepted', socketPayload);
+      const { taskId, chatId, memberIds } = event.payload;
+      console.log(`[WS] Task ${taskId} deleted in chat ${chatId}`);
+      if (Array.isArray(memberIds)) {
+        for (const uid of memberIds) {
+          io.to(`user:${uid}`).emit('task:deleted', { taskId, chatId });
+        }
+      }
     }
   })();
 
-  // Friend Request Rejected
-  const friendRequestRejectedSub = natsConnection.subscribe(EventSubjects.FRIEND_REQUEST_REJECTED);
+  // Message Edited
+  const messageEditedSub = addSub(natsConnection.subscribe(EventSubjects.MESSAGE_EDITED));
   (async () => {
-    for await (const msg of friendRequestRejectedSub) {
+    for await (const msg of messageEditedSub) {
       const event = jsonCodec.decode(msg.data) as any;
-      const { senderId, receiverId, requestId } = event.payload;
-      console.log(`[WS] Friend request ${requestId} rejected by ${receiverId}`);
-      io.to(`user:${senderId}`).emit('friend:request:rejected', { requestId, receiverId });
+      const { messageId, chatId, content, memberIds } = event.payload;
+      console.log(`[WS] Message ${messageId} edited in chat ${chatId}`);
+      if (Array.isArray(memberIds)) {
+        for (const uid of memberIds) {
+          io.to(`user:${uid}`).emit('message:edited', { messageId, chatId, content });
+        }
+      }
     }
   })();
 
-  // Friend Request Cancelled
-  const friendRequestCancelledSub = natsConnection.subscribe(EventSubjects.FRIEND_REQUEST_CANCELLED);
+  // Message Reaction (Scalable flow)
+  const messageReactionSub = addSub(natsConnection.subscribe(EventSubjects.MESSAGE_REACTION));
   (async () => {
-    for await (const msg of friendRequestCancelledSub) {
+    for await (const msg of messageReactionSub) {
       const event = jsonCodec.decode(msg.data) as any;
-      const { senderId, receiverId, requestId } = event.payload;
-      console.log(`[WS] Friend request ${requestId} cancelled by ${senderId}`);
-      io.to(`user:${receiverId}`).emit('friend:request:cancelled', { requestId, senderId });
+      const { messageId, chatId, userId, userName, emoji, action, memberIds } = event.payload;
+      console.log(`[WS] Reaction ${action} on message ${messageId} in chat ${chatId}`);
+      if (Array.isArray(memberIds)) {
+        for (const uid of memberIds) {
+          io.to(`user:${uid}`).emit('message:reacted', { messageId, chatId, userId, userName, emoji, action });
+        }
+      }
     }
   })();
 
-  // Unfriended
-  const friendUnfriendedSub = natsConnection.subscribe(EventSubjects.FRIEND_UNFRIENDED);
+  // User Mentioned
+  const userMentionedSub = addSub(natsConnection.subscribe(EventSubjects.USER_MENTIONED));
   (async () => {
-    for await (const msg of friendUnfriendedSub) {
+    for await (const msg of userMentionedSub) {
       const event = jsonCodec.decode(msg.data) as any;
-      const { userId, friendId } = event.payload;
-      console.log(`[WS] ${userId} unfriended ${friendId}`);
-      io.to(`user:${userId}`).emit('friend:unfriended', { friendId });
-      io.to(`user:${friendId}`).emit('friend:unfriended', { friendId: userId });
+      const { userId, chatId, messageId, mentionerName } = event.payload;
+      console.log(`[WS] User ${userId} mentioned in chat ${chatId}`);
+      io.to(`user:${userId}`).emit('message:mention', { chatId, messageId, mentionerName });
     }
   })();
 
-  // User Blocked
-  const friendUserBlockedSub = natsConnection.subscribe(EventSubjects.FRIEND_USER_BLOCKED);
+  // Thread Reply Created
+  const threadReplyCreatedSub = addSub(natsConnection.subscribe(EventSubjects.THREAD_REPLY_CREATED));
   (async () => {
-    for await (const msg of friendUserBlockedSub) {
+    for await (const msg of threadReplyCreatedSub) {
       const event = jsonCodec.decode(msg.data) as any;
-      const { blockerId, blockedId } = event.payload;
-      console.log(`[WS] ${blockerId} blocked ${blockedId}`);
-      io.to(`user:${blockerId}`).emit('friend:blocked', { blockedId });
-      io.to(`user:${blockedId}`).emit('friend:blocked', { blockerId });
+      const { parentMessageId, chatId, reply, memberIds } = event.payload;
+      console.log(`[WS] New thread reply in chat ${chatId} for message ${parentMessageId}`);
+      if (Array.isArray(memberIds)) {
+        for (const uid of memberIds) {
+          io.to(`user:${uid}`).emit('thread:reply:new', { parentMessageId, chatId, reply });
+        }
+      }
     }
   })();
 
-  // User Unblocked
-  const friendUserUnblockedSub = natsConnection.subscribe(EventSubjects.FRIEND_USER_UNBLOCKED);
+  // Chat File Uploaded
+  const chatFileUploadedSub = addSub(natsConnection.subscribe(EventSubjects.CHAT_FILE_UPLOADED));
   (async () => {
-    for await (const msg of friendUserUnblockedSub) {
+    for await (const msg of chatFileUploadedSub) {
       const event = jsonCodec.decode(msg.data) as any;
-      const { blockerId, blockedId } = event.payload;
-      console.log(`[WS] ${blockerId} unblocked ${blockedId}`);
-      io.to(`user:${blockerId}`).emit('friend:unblocked', { blockedId });
-      io.to(`user:${blockedId}`).emit('friend:unblocked', { blockerId });
+      const { chatId, file, memberIds } = event.payload;
+      console.log(`[WS] New file uploaded in chat ${chatId}`);
+      if (Array.isArray(memberIds)) {
+        for (const uid of memberIds) {
+          io.to(`user:${uid}`).emit('chat:file:new', { chatId, file });
+        }
+      }
     }
   })();
+
+  // Task Deadline Approaching
+  const taskDeadlineSub = addSub(natsConnection.subscribe(EventSubjects.TASK_DEADLINE_APPROACHING));
+  (async () => {
+    for await (const msg of taskDeadlineSub) {
+      const event = jsonCodec.decode(msg.data) as any;
+      const { taskId, chatId, title, deadline, assignedTo } = event.payload;
+      console.log(`[WS] Task deadline approaching for ${taskId} in chat ${chatId}`);
+      if (Array.isArray(assignedTo)) {
+        for (const uid of assignedTo) {
+          io.to(`user:${uid}`).emit('task:deadline_warning', { taskId, chatId, title, deadline });
+        }
+      }
+    }
+  })();
+
+  // Notification Created
+  const notificationSub = addSub(natsConnection.subscribe(EventSubjects.NOTIFICATION_CREATED));
+  (async () => {
+    for await (const msg of notificationSub) {
+      try {
+        const event = jsonCodec.decode(msg.data) as any;
+        const notificationData = event.payload;
+        const { userId } = notificationData;
+        console.log(`[WS] New notification for user ${userId}: ${notificationData.title}`);
+        io.to(`user:${userId}`).emit('notification:new', { ...notificationData, timestamp: event.timestamp });
+      } catch (err) {
+        console.error('[WS] Error processing notification:new:', err);
+      }
+    }
+  })();
+  
+  // System Broadcast
+  const systemBroadcastSub = addSub(natsConnection.subscribe(EventSubjects.SYSTEM_BROADCAST));
+  (async () => {
+    for await (const msg of systemBroadcastSub) {
+      const event = jsonCodec.decode(msg.data) as any;
+      const { title, body, type, data } = event.payload;
+      console.log(`[WS] System broadcast: ${title}`);
+      io.emit('system:broadcast', { title, body, type, data, timestamp: event.timestamp });
+    }
+  })();
+
 
   console.log('[WS Gateway] Subscribed to NATS events (including all friend actions)');
 }
@@ -635,7 +1322,10 @@ function subscribeToNatsEvents() {
 // ============= PUBLISH EVENTS =============
 
 function publishEvent(subject: string, payload: any) {
-  if (!natsConnection) return;
+  if (!natsConnection) {
+    console.warn(`[WS Gateway] NATS not connected. Cannot publish event on ${subject}`);
+    return;
+  }
   natsConnection.publish(
     subject,
     jsonCodec.encode({
@@ -665,9 +1355,11 @@ io.use(async (socket: AuthenticatedSocket, next) => {
       return next(new Error('Authentication required'));
     }
 
-    const decoded = jwt.verify(token, JWT_SECRET) as { sub?: string; id?: string; name?: string };
+    const decoded = jwt.verify(token, JWT_SECRET) as { sub?: string; id?: string; name?: string; role?: string; orgId?: string };
     socket.userId = decoded.sub || decoded.id || '';
     socket.userName = decoded.name || 'User';
+    socket.role = decoded.role || 'WORKSPACE_MEMBER';
+    socket.orgId = decoded.orgId;
     next();
   } catch (error) {
     next(new Error('Invalid token'));
@@ -698,7 +1390,23 @@ io.on('connection', async (socket: AuthenticatedSocket) => {
 
   // Join personal room
   socket.join(`user:${userId}`);
+  console.log(`[WS] User ${userId} joined room: user:${userId}`);
 
+  // Join admin room if applicable
+  if (socket.role === 'SUPER_ADMIN' || socket.role === 'ADMIN') {
+    socket.join('admins');
+    socket.join('role:SUPER_ADMIN'); // Specific room for system-wide broadcasts
+    console.log(`[WS] Admin ${userId} joined room: admins`);
+  }
+
+  // Join organization room
+  if (socket.orgId) {
+    socket.join(`org:${socket.orgId}`);
+    console.log(`[WS] User ${userId} joined room: org:${socket.orgId}`);
+  }
+
+  // Join workspace rooms if any (optional, usually handled by client join events)
+  
   // Notify others only if truly new login
   if (isNewLogin) {
     publishEvent(EventSubjects.USER_ONLINE, { userId, userName });
@@ -745,19 +1453,12 @@ io.on('connection', async (socket: AuthenticatedSocket) => {
       // UNIFIED: Now points to messaging-service instead of chat-service
       const messagingServiceUrl = process.env.MESSAGING_SERVICE_URL || 'http://localhost:3020';
 
-      // Create HMAC signature
-      const signature = createInternalSignature(INTERNAL_SERVICE_SECRET, {
-        userId,
-        role: 'USER',
-      });
-
       const response = await fetch(`${messagingServiceUrl}/messages/${chatId}`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
           'x-user-id': userId,
           'x-user-name': userName,
-          'x-internal-signature': signature,
         },
         body: JSON.stringify({ content, type, replyToId, fileName, fileSize, fileType }),
       });
@@ -1226,7 +1927,175 @@ io.on('connection', async (socket: AuthenticatedSocket) => {
 
   // ============= DISCONNECT =============
 
+  // ============= AI ASSISTANT HANDLER (Phase 1) =============
+
+  socket.on('chat:ai_query', async (data: { chatId: string; message: string; conversationId?: number }) => {
+    const { chatId, message, conversationId } = data;
+    if (!message?.trim()) return;
+
+    const aiServiceUrl = process.env.SPRING_AI_URL || 'http://localhost:8080';
+    console.log(`[AI] Using AI Service URL: ${aiServiceUrl}`);
+    const sessionId = `ai_${Date.now()}`;
+
+    // Notify user AI is thinking
+    io.to(`user:${userId}`).emit('ai:thinking', { chatId, sessionId });
+    console.log(`[AI] User ${userName} queried AI in chat ${chatId}: "${message.slice(0, 60)}..."`);
+
+    try {
+      // Step 1: Ensure conversation exists (create if not provided)
+      let activeConversationId = conversationId;
+      if (!activeConversationId) {
+        const convRes = await fetch(`${aiServiceUrl}/chat/conversations`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'x-user-id': userId },
+          body: JSON.stringify({ title: `Chat ${chatId}`, chatId }),
+        });
+        if (convRes.ok) {
+          const conv = await convRes.json() as any;
+          activeConversationId = conv.id;
+          // Tell client which conversationId was used so it can resume later
+          io.to(`user:${userId}`).emit('ai:conversation_id', { chatId, conversationId: activeConversationId, sessionId });
+        }
+      }
+
+      // Step 2: Call streaming RAG endpoint
+      const streamRes = await fetch(`${aiServiceUrl}/chat/messages`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-user-id': userId },
+        body: JSON.stringify({ conversationId: activeConversationId, message }),
+      });
+
+      if (!streamRes.ok || !streamRes.body) {
+        throw new Error(`AI service returned ${streamRes.status}`);
+      }
+
+      // Step 3: Pipe SSE tokens → Socket.IO
+      const reader = (streamRes.body as any).getReader();
+      const decoder = new TextDecoder();
+      let fullResponse = '';
+      let buffer = '';
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        
+        buffer += decoder.decode(value, { stream: true });
+        
+        let lineEndIndex;
+        while ((lineEndIndex = buffer.indexOf('\n')) !== -1) {
+          const line = buffer.slice(0, lineEndIndex).trim();
+          buffer = buffer.slice(lineEndIndex + 1);
+
+          if (line.startsWith('data:')) {
+            const content = line.replace(/^data:\s*/, '');
+            if (content && content !== '[DONE]') {
+              fullResponse += content;
+              io.to(`user:${userId}`).emit('ai:token', { chatId, token: content, sessionId });
+            }
+          }
+        }
+      }
+
+      // Step 4: Signal completion with full response
+      io.to(`user:${userId}`).emit('ai:done', {
+        chatId,
+        response: fullResponse,
+        sessionId,
+        conversationId: activeConversationId,
+      });
+      console.log(`[AI] Completed response for ${userName} in chat ${chatId} (${fullResponse.length} chars)`);
+
+    } catch (err: any) {
+      console.error(`[AI] Error processing query for ${userName}:`, err.message);
+      io.to(`user:${userId}`).emit('ai:error', {
+        chatId,
+        sessionId,
+        error: 'AI service is currently unavailable. Please try again later.',
+      });
+    }
+  });
+
+  // ============= AI AGENT HANDLER (Phase 2 — Tool Calling) =============
+
+  socket.on('chat:agent_query', async (data: { chatId: string; message: string; conversationId?: number; workspaceId?: string }) => {
+    const { chatId, message, conversationId, workspaceId } = data;
+    if (!message?.trim()) return;
+
+    const aiServiceUrl = process.env.SPRING_AI_URL || 'http://localhost:8080';
+    console.log(`[Agent] Using AI Service URL: ${aiServiceUrl}`);
+    const sessionId = `agent_${Date.now()}`;
+
+    // Notify user — agent is "thinking" (may call tools before streaming)
+    io.to(`user:${userId}`).emit('ai:thinking', { chatId, sessionId, mode: 'agent' });
+    console.log(`[Agent] User ${userName} agent query in chat ${chatId}: "${message.slice(0, 60)}..."`);
+
+    try {
+      // Call /agent/chat — it auto-creates conversation and executes tools
+      const agentRes = await fetch(`${aiServiceUrl}/agent/chat`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-user-id': userId,
+        },
+        body: JSON.stringify({
+          conversationId: conversationId || null,
+          message,
+          chatId,
+          workspaceId: workspaceId || null,
+        }),
+      });
+
+      if (!agentRes.ok || !agentRes.body) {
+        throw new Error(`Agent service returned ${agentRes.status}`);
+      }
+
+      // Pipe SSE tokens → Socket.IO (same pattern as Phase 1)
+      const reader = (agentRes.body as any).getReader();
+      const decoder = new TextDecoder();
+      let fullResponse = '';
+      let buffer = '';
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        
+        buffer += decoder.decode(value, { stream: true });
+        
+        let lineEndIndex;
+        while ((lineEndIndex = buffer.indexOf('\n')) !== -1) {
+          const line = buffer.slice(0, lineEndIndex).trim();
+          buffer = buffer.slice(lineEndIndex + 1);
+
+          if (line.startsWith('data:')) {
+            const content = line.replace(/^data:\s*/, '');
+            if (content && content !== '[DONE]') {
+              fullResponse += content;
+              io.to(`user:${userId}`).emit('ai:token', { chatId, token: content, sessionId });
+            }
+          }
+        }
+      }
+
+      io.to(`user:${userId}`).emit('ai:done', {
+        chatId,
+        response: fullResponse,
+        sessionId,
+        mode: 'agent',
+      });
+      console.log(`[Agent] Completed for ${userName}, chars=${fullResponse.length}`);
+
+    } catch (err: any) {
+      console.error(`[Agent] Error for ${userName}:`, err.message);
+      io.to(`user:${userId}`).emit('ai:error', {
+        chatId,
+        sessionId,
+        error: 'AI Agent is currently unavailable. Please try again.',
+      });
+    }
+  });
+
   socket.on('disconnect', async () => {
+
     console.log(`[WS] User disconnected: ${userName} (${userId})`);
 
     // Cleanup active call on disconnect
