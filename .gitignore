@@ -19,3 +19,6 @@ docs
 /packages/**/dist
 # Planning files
 PLAN-*.md
+
+# Source repo (temp)
+repo-chat-test-be-master/
