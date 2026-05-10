@@ -26,23 +26,23 @@ export interface TokenPayload {
 // System roles enum for type safety
 export enum SystemRole {
   SUPER_ADMIN = 'SUPER_ADMIN',
-  ORG_ADMIN = 'ORG_ADMIN',
-  SECURITY_OFFICER = 'SECURITY_OFFICER',
+  ADMIN = 'ADMIN',
   WORKSPACE_MANAGER = 'WORKSPACE_MANAGER',
-  KNOWLEDGE_ADMIN = 'KNOWLEDGE_ADMIN',
-  AI_ADMIN = 'AI_ADMIN',
+  WORKSPACE_OWNER = 'WORKSPACE_OWNER',
+  WORKSPACE_ADMIN = 'WORKSPACE_ADMIN',
   EMPLOYEE = 'EMPLOYEE',
-  GUEST = 'GUEST',
+  WORKSPACE_MEMBER = 'WORKSPACE_MEMBER',
+  WORKSPACE_GUEST = 'WORKSPACE_GUEST',
 }
 
 // Role levels for hierarchy comparison
 export const ROLE_LEVELS: Record<SystemRole, number> = {
   [SystemRole.SUPER_ADMIN]: 0,
-  [SystemRole.ORG_ADMIN]: 1,
-  [SystemRole.SECURITY_OFFICER]: 2,
-  [SystemRole.WORKSPACE_MANAGER]: 3,
-  [SystemRole.KNOWLEDGE_ADMIN]: 4,
-  [SystemRole.AI_ADMIN]: 5,
-  [SystemRole.EMPLOYEE]: 10,
-  [SystemRole.GUEST]: 20,
+  [SystemRole.ADMIN]: 1,
+  [SystemRole.WORKSPACE_MANAGER]: 2,
+  [SystemRole.WORKSPACE_OWNER]: 3,
+  [SystemRole.WORKSPACE_ADMIN]: 4,
+  [SystemRole.EMPLOYEE]: 5,
+  [SystemRole.WORKSPACE_MEMBER]: 6,
+  [SystemRole.WORKSPACE_GUEST]: 7,
 };

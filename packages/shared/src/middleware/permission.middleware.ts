@@ -150,13 +150,12 @@ export function requirePermission(
     
     // Simple role-based permission mapping
     const rolePermissions: Record<string, string[]> = {
-      [SystemRole.ORG_ADMIN]: ['user', 'chat', 'knowledge', 'audit'],
-      [SystemRole.SECURITY_OFFICER]: ['audit', 'chat.dm'],
-      [SystemRole.WORKSPACE_MANAGER]: ['chat.channel'],
-      [SystemRole.KNOWLEDGE_ADMIN]: ['knowledge'],
-      [SystemRole.AI_ADMIN]: ['ai'],
-      [SystemRole.EMPLOYEE]: ['user:own', 'chat', 'knowledge:acl', 'ai:execute'],
-      [SystemRole.GUEST]: ['chat:member'],
+      [SystemRole.SUPER_ADMIN]: ['user', 'chat', 'knowledge', 'audit', 'ai', 'role'],
+      [SystemRole.ADMIN]: ['user', 'chat', 'knowledge', 'audit', 'ai'],
+      [SystemRole.WORKSPACE_OWNER]: ['chat', 'workspace:manage', 'audit', 'knowledge'],
+      [SystemRole.WORKSPACE_ADMIN]: ['chat', 'workspace:manage', 'knowledge'],
+      [SystemRole.WORKSPACE_MEMBER]: ['user:own', 'chat', 'knowledge:acl', 'ai'],
+      [SystemRole.WORKSPACE_GUEST]: ['chat:member'],
     };
 
     const userRoles = req.user.roles || [req.user.role];

@@ -36,11 +36,31 @@ export const EventSubjects = {
   // Typing events
   TYPING_START: 'typing.start',
   TYPING_STOP: 'typing.stop',
+
+  // System events
+  SYSTEM_BROADCAST: 'system.broadcast',
+
+  // Organization events
+  ORGANIZATION_CREATED: 'organization.created',
+  WORKSPACE_QUOTA_UPDATED: 'workspace.quota.updated',
+
+  // RBAC events
+  RBAC_UPDATED: 'rbac.updated',
+
+  // Admin/Audit events
+  AUDIT_LOG_CREATED: 'admin.audit_log.created',
 } as const;
 
 export type EventSubject = typeof EventSubjects[keyof typeof EventSubjects];
 
 // Event Payloads
+export interface SystemBroadcastEvent {
+  title: string;
+  body: string;
+  senderId: string;
+  type: 'ANNOUNCEMENT' | 'MAINTENANCE' | 'ALERT';
+  data?: Record<string, unknown>;
+}
 export interface UserCreatedEvent {
   id: string;
   email: string;
@@ -137,6 +157,37 @@ export interface NotificationCreatedEvent {
   title: string;
   body: string;
   data?: Record<string, unknown>;
+}
+
+export interface OrganizationCreatedEvent {
+  orgId: string;
+  orgName: string;
+  adminId: string;
+  workspaceName?: string;
+  workspaceSlug?: string;
+  createdAt: string;
+}
+
+export interface WorkspaceQuotaUpdatedEvent {
+  orgId: string;
+  used: number;
+  limit: number;
+}
+
+export interface RbacUpdatedEvent {
+  userId: string;
+  role: string;
+  scope: 'SYSTEM' | 'WORKSPACE' | 'CHANNEL';
+  scopeId?: string;
+}
+
+export interface AuditLogCreatedEvent {
+  id: string;
+  userId: string;
+  action: string;
+  resource: string;
+  data: any;
+  createdAt: string;
 }
 
 // Generic event wrapper
