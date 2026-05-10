@@ -1,0 +1,135 @@
+generator client {
+  provider = "prisma-client-js"
+  output   = "../node_modules/.prisma/client-auth"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("AUTH_DATABASE_URL")
+}
+
+// ================= AUTH SERVICE MODELS =================
+
+model Account {
+  id             String    @id @default(uuid())
+  name           String    @db.VarChar(255)
+  number         String    @unique
+  email          String    @unique
+  password       String
+  avatar         String?
+  status         String?
+  birthDate      DateTime?
+  location       String?
+  gender         String    @db.VarChar(10)
+  currentAvatars String?   @db.Text
+  pushToken      String?   @db.VarChar(255)
+  
+  isOnline       Boolean   @default(false)
+  isVerified     Boolean   @default(false)
+  lastSeen       DateTime?
+  role           AccountRole @default(WORKSPACE_MEMBER)
+  maxWorkspaces  Int?
+
+  isSuspended    Boolean   @default(false)
+  suspendedAt    DateTime?
+  suspendedBy    String?
+  suspendReason  String?   @db.VarChar(500)
+
+  isAnonymized   Boolean   @default(false)
+  anonymizedAt   DateTime?
+
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  devices        LoggedInDevice[]
+  otps           Otp[]
+  auditLogs      AuditLog[]
+  refreshTokens  RefreshToken[]
+
+  @@map("account")
+}
+
+model LoggedInDevice {
+  id         String   @id @default(uuid())
+  userId     String
+  deviceId   String
+  deviceName String
+  platform   String
+  accessToken String  @db.Text
+  ipAddress  String?
+  lastActive DateTime @default(now())
+  createdAt  DateTime @default(now())
+  
+  account    Account  @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("logged_in_device")
+}
+
+model Otp {
+  id        String   @id @default(uuid())
+  email     String
+  code      String   @db.VarChar(6)
+  type      OtpType  @default(VERIFY_EMAIL)
+  expiresAt DateTime
+  isUsed    Boolean  @default(false)
+  attempts  Int      @default(0)
+  createdAt DateTime @default(now())
+
+  account   Account? @relation(fields: [email], references: [email])
+
+  @@index([email])
+  @@index([email, code])
+  @@map("otp")
+}
+
+model AuditLog {
+  id        String   @id @default(uuid())
+  userId    String
+  action    String
+  resource  String
+  data      Json?
+  ipAddress String?
+  createdAt DateTime @default(now())
+
+  account   Account  @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, createdAt])
+  @@map("audit_log")
+}
+
+model RefreshToken {
+  id        String   @id @default(uuid())
+  jti       String   @unique
+  userId    String
+  familyId  String
+  isRevoked Boolean  @default(false)
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+
+  account   Account  @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([familyId])
+  @@index([jti])
+  @@map("refresh_token")
+}
+
+// ================= ENUMS =================
+
+enum AccountRole {
+  SUPER_ADMIN
+  ADMIN
+  WORKSPACE_MANAGER
+  WORKSPACE_OWNER
+  WORKSPACE_ADMIN
+  EMPLOYEE
+  WORKSPACE_MEMBER
+  WORKSPACE_GUEST
+}
+
+enum OtpType {
+  VERIFY_EMAIL
+  RESET_PASSWORD
+  CHANGE_EMAIL
+}

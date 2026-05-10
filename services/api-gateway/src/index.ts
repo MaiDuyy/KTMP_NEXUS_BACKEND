@@ -18,6 +18,10 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 
 app.set('trust proxy', 1);
+app.use((req, res, next) => {
+  console.log(`[Gateway] Incoming: ${req.method} ${req.url}`);
+  next();
+});
 
 app.use(helmet());
 
@@ -25,8 +29,9 @@ app.use(cors({
   origin: process.env.CORS_ORIGIN || 'http://localhost:3002',
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'X-Correlation-ID'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Correlation-ID', 'X-Workspace-Id'],
 }));
+
 
 
 app.use(express.json({ limit: '10mb' }));
@@ -54,10 +59,13 @@ app.use('/api/auth/signup', strictRateLimiter);
 app.use('/api/auth/signin-phone', strictRateLimiter);
 app.use('/api/auth/verify-otp', strictRateLimiter);
 app.use('/api/auth/resend-otp', strictRateLimiter);
+app.use('/api/auth/register-organization', strictRateLimiter);
 app.use('/api/otp', strictRateLimiter);
 
+import { workspaceMiddleware } from './middleware/workspace.js';
+
 // Gateway auth: public paths bypass, protected paths enforce JWT
-app.use('/api', gatewayAuthMiddleware, proxyRoutes);
+app.use('/api', gatewayAuthMiddleware, workspaceMiddleware, proxyRoutes);
 
 app.use((_req, res) => {
   res.status(404).json({
@@ -95,6 +103,15 @@ async function start() {
     process.exit(1);
   }
 }
+
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('[Gateway] Unhandled Rejection:', reason);
+});
+
+process.on('uncaughtException', (error) => {
+  console.error('[Gateway] Uncaught Exception:', error);
+  process.exit(1);
+});
 
 start();
 

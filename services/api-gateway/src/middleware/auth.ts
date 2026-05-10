@@ -8,6 +8,7 @@ declare global {
   namespace Express {
     interface Request {
       user?: TokenPayload;
+      workspaceRole?: string;
       correlationId?: string;
     }
   }
@@ -41,10 +42,19 @@ const PUBLIC_PATHS = new Set([
   '/auth/verify-otp',
   '/auth/resend-otp',
   '/auth/refresh-token',
+  '/auth/register-organization',
   '/otp/request',
   '/otp/resend',
   '/otp/verify',
 ]);
+
+const PUBLIC_PATH_PREFIXES = [
+  '/invitations/validate',
+  '/invitations/accept',
+  '/workspaces/invites/validate',
+  '/workspaces/invites/accept',
+  '/workspaces/invites/accept-body',
+];
 
 
 function extractToken(req: Request): string | null {
@@ -125,7 +135,13 @@ export function optionalAuthMiddleware(req: Request, res: Response, next: NextFu
  * req.path is relative to /api mount point, e.g. '/auth/signin'
  */
 export function gatewayAuthMiddleware(req: Request, res: Response, next: NextFunction) {
+  if (req.method === 'OPTIONS') {
+    return next();
+  }
   if (PUBLIC_PATHS.has(req.path)) {
+    return next();
+  }
+  if (PUBLIC_PATH_PREFIXES.some(prefix => req.path.startsWith(prefix))) {
     return next();
   }
   return authMiddleware(req, res, next);
@@ -175,8 +191,8 @@ export function permissionMiddleware(resource: string, action: string) {
     const roleLevel = req.user.roleLevel ?? 999;
     
     // Very basic mapping (could be extended)
-    if (resource === 'audit' && roleLevel <= 2) return next(); // SECURITY_OFFICER or better
-    if (resource === 'role' && roleLevel <= 1) return next(); // ORG_ADMIN or better
+    if (resource === 'audit' && roleLevel <= 2) return next(); // WORKSPACE_OWNER or better (0=SUPER, 1=ADMIN, 2=OWNER)
+    if (resource === 'role' && roleLevel <= 1) return next(); // ADMIN or better
     
     // If the gateway doesn't explicitly authorize it, we still let the downstream
     // service make the final decision (downstream services use @ott/shared's requirePermission)
@@ -185,6 +201,9 @@ export function permissionMiddleware(resource: string, action: string) {
 }
 
 export function correlationMiddleware(req: Request, res: Response, next: NextFunction) {
+  if (req.method === 'OPTIONS') {
+    return next();
+  }
   const correlationId = req.headers['x-correlation-id'] as string || 
     `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
   

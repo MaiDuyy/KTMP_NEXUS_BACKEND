@@ -5,8 +5,9 @@ WORKDIR /app
 # Install OpenSSL for Prisma
 RUN apk add --no-cache openssl
 
-# Create directory structure matching monorepo
-RUN mkdir -p packages/shared services/api-gateway
+RUN mkdir -p packages/shared services/api-gateway protos
+COPY protos ./protos
+
 
 # Copy shared package first (preserving relative path structure)
 COPY packages/shared/package.json ./packages/shared/
@@ -42,6 +43,12 @@ RUN addgroup -g 1001 -S nodejs && \
 COPY --from=builder /app/services/api-gateway/dist ./dist
 COPY --from=builder /app/services/api-gateway/node_modules ./node_modules
 COPY --from=builder /app/services/api-gateway/package*.json ./
+
+
+
+RUN mkdir -p protos
+COPY --from=builder /app/protos ./protos
+
 
 # Also need shared package in correct relative location
 RUN mkdir -p ../packages/shared

@@ -1,0 +1,35 @@
+# Server Configuration
+PORT=8080
+NODE_ENV=development
+
+# CORS Origin (Frontend URL)
+CORS_ORIGIN=http://localhost:3000
+
+# JWT Configuration
+JWT_SECRET=your-super-secret-jwt-key-change-in-production
+
+# Database Configuration (MariaDB/MySQL)
+DATABASE_HOST=localhost
+DATABASE_PORT=3306
+DATABASE_USER=root
+DATABASE_PASSWORD=your_password
+DATABASE_NAME=chat_db
+
+# Email SMTP Configuration (for OTP)
+SMTP_HOST=smtp.gmail.com
+SMTP_PORT=587
+SMTP_SECURE=false
+SMTP_USER=your-email@gmail.com
+SMTP_PASS=your-app-password
+EMAIL_FROM_NAME=Chat App
+EMAIL_FROM_ADDRESS=noreply@chatapp.com
+
+# Cloudinary Configuration (for avatar upload)
+CLOUDINARY_CLOUD_NAME=your-cloud-name
+CLOUDINARY_API_KEY=your-api-key
+CLOUDINARY_API_SECRET=your-api-secret
+
+# File Upload Configuration
+MAX_FILE_SIZE=5242880
+
+

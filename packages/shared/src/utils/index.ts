@@ -1,5 +1,5 @@
 import { v4 as uuidv4 } from 'uuid';
-import { createInternalSignature } from './hmac.js';
+
 
 export * from './hmac.js';
 
@@ -177,18 +177,3 @@ export function debounce<T extends (...args: unknown[]) => unknown>(
   };
 }
 
-
-// Ví dụ ý tưởng utility
-export const internalFetch = async (url: string, options: any = {}, context: { userId?: string, role?: string }) => {
-    const secret = process.env.INTERNAL_SERVICE_SECRET || 'dev-internal-secret-change-in-production';
-    const signature = createInternalSignature(secret, context);
-    
-    return fetch(url, {
-        ...options,
-        headers: {
-            ...options.headers,
-            'x-internal-signature': signature,
-            'x-user-id': context.userId || 'system',
-        }
-    });
-};

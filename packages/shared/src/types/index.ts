@@ -15,6 +15,10 @@ export interface User {
   lastSeen?: Date;
   createdAt: Date;
   updatedAt: Date;
+  isSuspended?: boolean;
+  suspendedAt?: Date;
+  suspendedBy?: string;
+  suspendReason?: string;
 }
 
 export type UserRole = 'ADMIN' | 'MANAGER' | 'STAFF' | 'USER';
