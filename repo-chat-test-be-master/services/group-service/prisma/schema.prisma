@@ -1,0 +1,243 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ================= GROUP SERVICE MODELS =================
+// Copy từ monolith - models liên quan đến Chat/Group và participants
+
+model Chat {
+  id           String            @id @default(uuid())
+  isGroup      Boolean           @default(false)
+  name         String?           @db.VarChar(255)
+  avatar       String?           @db.VarChar(255)
+  createdAt    DateTime          @default(now())
+  updatedAt    DateTime          @updatedAt
+  
+  participants ChatParticipant[]
+
+  @@map("chat")
+}
+
+model ChatParticipant {
+  id         String   @id @default(uuid())
+  chatId     String
+  accountId  String
+  categoryId String?
+  priority   Boolean? @default(true)
+  readed     Boolean? @default(false)
+  pin        Boolean  @default(false)
+  notify     Boolean  @default(true)
+  hidden     Boolean  @default(false)
+  role       ChatParticipantRole @default(MEMBER)
+
+  chat       Chat     @relation(fields: [chatId], references: [id], onDelete: Cascade)
+  category   Category? @relation(fields: [categoryId], references: [id])
+
+  @@unique([chatId, accountId])
+  @@index([accountId])
+  @@index([categoryId])
+  @@map("chat_participant")
+}
+
+enum ChatParticipantRole {
+  MEMBER
+  LEADER
+  DEPUTY
+}
+
+// ================= CATEGORY =================
+
+model Category {
+  id        String            @id @default(uuid())
+  name      String
+  color     String
+  accountId String
+  
+  chatParticipants ChatParticipant[]
+
+  @@index([accountId])
+  @@map("category")
+}
+
+// ================= WORKSPACE (WS-01, WS-02) =================
+
+model Workspace {
+  id          String   @id @default(uuid())
+  name        String   @db.VarChar(100)
+  description String?  @db.VarChar(500)
+  icon        String?  // Emoji or URL
+  slug        String   @unique @db.VarChar(50) // URL-friendly name
+  
+  ownerId     String   // User who created/owns workspace
+  orgId       String?  // Optional: link to organization
+  
+  // Settings
+  isPublic         Boolean @default(false) // Anyone in org can join
+  allowGuestAccess Boolean @default(false)
+  
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  
+  channels    Channel[]
+  members     WorkspaceMember[]
+  invites     WorkspaceInvite[]
+  categories  ChannelCategory[]
+  
+  @@index([ownerId])
+  @@index([slug])
+  @@map("workspace")
+}
+
+// WS-09: Workspace Member
+model WorkspaceMember {
+  id          String        @id @default(uuid())
+  workspaceId String
+  userId      String
+  role        WorkspaceRole @default(MEMBER)
+  
+  joinedAt    DateTime @default(now())
+  invitedBy   String?
+  
+  workspace   Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  
+  @@unique([workspaceId, userId])
+  @@index([userId])
+  @@map("workspace_member")
+}
+
+enum WorkspaceRole {
+  OWNER      // Full control
+  ADMIN      // Manage channels, members
+  MEMBER     // Standard access
+  GUEST      // Limited access (WS-05)
+}
+
+// ================= CHANNEL (WS-03, WS-04, WS-05) =================
+
+model Channel {
+  id          String      @id @default(uuid())
+  workspaceId String
+  name        String      @db.VarChar(100)
+  description String?     @db.VarChar(500)
+  topic       String?     @db.VarChar(250)
+  
+  type        ChannelType @default(PUBLIC)
+  
+  // WS-08: Category grouping
+  categoryId  String?
+  position    Int         @default(0) // Order within category
+  
+  // WS-06: Archive status
+  isArchived  Boolean     @default(false)
+  archivedAt  DateTime?
+  archivedBy  String?
+  
+  // WS-11: Default channel
+  isDefault   Boolean     @default(false) // Auto-join new members
+  
+  creatorId   String
+  createdAt   DateTime    @default(now())
+  updatedAt   DateTime    @updatedAt
+  
+  workspace   Workspace   @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  category    ChannelCategory? @relation(fields: [categoryId], references: [id])
+  members     ChannelMember[]
+  permissions ChannelPermissionOverride[]
+  
+  @@unique([workspaceId, name]) // Unique name per workspace
+  @@index([workspaceId])
+  @@index([categoryId])
+  @@index([type])
+  @@map("channel")
+}
+
+enum ChannelType {
+  PUBLIC     // WS-03: Anyone in workspace can join
+  PRIVATE    // WS-04: Invite only
+  GUEST      // WS-05: For external guests
+}
+
+// WS-08: Channel Categories
+model ChannelCategory {
+  id          String   @id @default(uuid())
+  workspaceId String
+  name        String   @db.VarChar(50)
+  position    Int      @default(0)
+  
+  workspace   Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  channels    Channel[]
+  
+  @@unique([workspaceId, name])
+  @@map("channel_category")
+}
+
+// WS-09: Channel Members
+model ChannelMember {
+  id        String            @id @default(uuid())
+  channelId String
+  userId    String
+  
+  // WS-10: Per-member permission overrides
+  canPost   Boolean           @default(true)
+  role      ChannelMemberRole @default(MEMBER)
+  
+  // Preferences
+  isMuted   Boolean  @default(false)
+  isPinned  Boolean  @default(false)
+  
+  joinedAt  DateTime @default(now())
+  
+  channel   Channel  @relation(fields: [channelId], references: [id], onDelete: Cascade)
+  
+  @@unique([channelId, userId])
+  @@index([userId])
+  @@map("channel_member")
+}
+
+enum ChannelMemberRole {
+  OWNER      // Channel creator/owner
+  ADMIN      // Can manage members
+  MEMBER     // Standard member
+  READONLY   // WS-10: Can only read
+}
+
+// WS-10: Permission overrides (for roles/groups)
+model ChannelPermissionOverride {
+  id         String   @id @default(uuid())
+  channelId  String
+  
+  targetType String   // 'ROLE' | 'USER' | 'EVERYONE'
+  targetId   String?  // roleId or userId, null for EVERYONE
+  
+  allow      String[] // Permissions allowed
+  deny       String[] // Permissions denied
+  
+  channel    Channel  @relation(fields: [channelId], references: [id], onDelete: Cascade)
+  
+  @@unique([channelId, targetType, targetId])
+  @@map("channel_permission_override")
+}
+
+// Workspace invites (for private workspaces)
+model WorkspaceInvite {
+  id          String    @id @default(uuid())
+  workspaceId String
+  code        String    @unique
+  
+  maxUses     Int?      // null = unlimited
+  uses        Int       @default(0)
+  expiresAt   DateTime?
+  
+  createdBy   String
+  createdAt   DateTime  @default(now())
+  
+  workspace   Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  
+  @@index([code])
+  @@map("workspace_invite")
+}

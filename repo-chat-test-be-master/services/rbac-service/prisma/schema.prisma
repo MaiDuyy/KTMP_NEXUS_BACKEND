@@ -1,0 +1,153 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ================= RBAC SERVICE MODELS =================
+// Enterprise Role-Based Access Control
+
+// Predefined system roles
+enum SystemRole {
+  SUPER_ADMIN      // Level 0 - Highest access
+  ORG_ADMIN        // Level 1 - Organization management
+  SECURITY_OFFICER // Level 2 - Audit & compliance
+  WORKSPACE_MANAGER // Level 3 - Workspace management
+  KNOWLEDGE_ADMIN  // Level 4 - Knowledge management
+  AI_ADMIN         // Level 5 - AI configuration
+  EMPLOYEE         // Level 10 - Standard user
+  GUEST            // Level 20 - Limited access
+}
+
+model Role {
+  id          String   @id @default(uuid())
+  name        String   @unique // SUPER_ADMIN, ORG_ADMIN, etc.
+  displayName String
+  description String?
+  level       Int      // Hierarchy level (0 = highest)
+  isSystem    Boolean  @default(false) // Built-in roles cannot be deleted
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  // Relations
+  permissions RolePermission[]
+  userRoles   UserRole[]
+
+  @@index([name])
+  @@index([level])
+  @@map("role")
+}
+
+model Permission {
+  id          String   @id @default(uuid())
+  resource    String   // chat, dm, knowledge, user, audit, etc.
+  action      String   // read, write, delete, admin, execute
+  scope       String   @default("own") // own, team, department, org, system
+  description String?
+  createdAt   DateTime @default(now())
+
+  // Relations
+  roles RolePermission[]
+
+  @@unique([resource, action, scope])
+  @@index([resource])
+  @@map("permission")
+}
+
+model RolePermission {
+  roleId       String
+  permissionId String
+  grantedAt    DateTime @default(now())
+
+  role       Role       @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  permission Permission @relation(fields: [permissionId], references: [id], onDelete: Cascade)
+
+  @@id([roleId, permissionId])
+  @@map("role_permission")
+}
+
+model UserRole {
+  id        String   @id @default(uuid())
+  userId    String   // Reference to Account in auth-service
+  roleId    String
+  
+  // Scoped assignments (optional)
+  orgId       String?  // For org-scoped roles
+  workspaceId String?  // For workspace-scoped roles
+  departmentId String? // For department-scoped roles
+  
+  grantedBy String   // Who assigned this role
+  grantedAt DateTime @default(now())
+  expiresAt DateTime? // Optional expiration for temporary roles
+
+  role Role @relation(fields: [roleId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, roleId, orgId, workspaceId])
+  @@index([userId])
+  @@index([roleId])
+  @@map("user_role")
+}
+
+// Department for ACL purposes
+model Department {
+  id          String   @id @default(uuid())
+  name        String   @unique
+  description String?
+  parentId    String?  // For hierarchical departments
+  managerId   String?  // Department manager userId
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  parent   Department?  @relation("DepartmentHierarchy", fields: [parentId], references: [id])
+  children Department[] @relation("DepartmentHierarchy")
+  members  DepartmentMember[]
+
+  @@map("department")
+}
+
+model DepartmentMember {
+  id           String   @id @default(uuid())
+  userId       String
+  departmentId String
+  isPrimary    Boolean  @default(false) // Primary department
+  joinedAt     DateTime @default(now())
+
+  department Department @relation(fields: [departmentId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, departmentId])
+  @@index([userId])
+  @@map("department_member")
+}
+
+// Group for flexible ACL
+model Group {
+  id          String   @id @default(uuid())
+  name        String   @unique
+  description String?
+  ownerId     String   // Creator/owner userId
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  members GroupMember[]
+
+  @@map("group")
+}
+
+model GroupMember {
+  id       String   @id @default(uuid())
+  userId   String
+  groupId  String
+  role     String   @default("member") // member, admin
+  joinedAt DateTime @default(now())
+
+  group Group @relation(fields: [groupId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, groupId])
+  @@index([userId])
+  @@map("group_member")
+}

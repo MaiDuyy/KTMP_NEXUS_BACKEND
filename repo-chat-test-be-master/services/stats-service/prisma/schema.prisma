@@ -1,0 +1,52 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ================= STATS SERVICE MODELS =================
+
+model Stat {
+  key       String   @id
+  value     Int      @default(0)
+  updatedAt DateTime @default(now()) @updatedAt
+
+  @@map("stat")
+}
+
+model DailyStat {
+  id          String   @id @default(uuid())
+  date        DateTime @unique
+  newUsers    Int      @default(0)
+  activeUsers Int      @default(0)
+  messages    Int      @default(0)
+  createdAt   DateTime @default(now())
+
+  @@map("daily_stat")
+}
+
+model UserStat {
+  userId           String   @id
+  messagesSent     Int      @default(0)
+  messagesReceived Int      @default(0)
+  friendsCount     Int      @default(0)
+  groupsCount      Int      @default(0)
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @default(now()) @updatedAt
+
+  @@map("user_stat")
+}
+
+model ChatStat {
+  chatId       String   @id
+  messageCount Int      @default(0)
+  memberCount  Int      @default(0)
+  mediaCount   Int      @default(0)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @default(now()) @updatedAt
+
+  @@map("chat_stat")
+}

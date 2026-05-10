@@ -1,0 +1,27 @@
+node_modules
+# Keep environment variables out of version control
+.env
+.env.local
+.env.docker
+.env.dev
+.env.dockergit
+.agent
+dist
+.github
+docs
+# src
+.env
+# Prisma
+/services/**/prisma/migrations/*
+!services/**/prisma/migrations/README.md
+
+/services/**/node_modules
+/services/**/dist
+/packages/**/node_modules
+/packages/**/dist
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
