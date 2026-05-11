@@ -365,11 +365,11 @@ router.put('/users/status', (req, res) => forwardRequest(req, res, SERVICES.USER
 router.put('/users/online-status', (req, res) => forwardRequest(req, res, SERVICES.USER, '/users/online-status'));
 router.post('/users/heartbeat', (req, res) => forwardRequest(req, res, SERVICES.USER, '/users/heartbeat'));
 router.get('/users/devices', (req, res) => forwardRequest(req, res, SERVICES.USER, '/users/devices'));
-router.get('/users/directory', roleMiddleware('SUPER_ADMIN', 'ADMIN', 'WORKSPACE_ADMIN', 'WORKSPACE_MEMBER'), (req, res) => {
+router.get('/users/directory', roleMiddleware('SUPER_ADMIN', 'ADMIN', 'WORKSPACE_ADMIN', 'WORKSPACE_MEMBER', 'EMPLOYEE'), (req, res) => {
   const query = new URLSearchParams(req.query as any).toString();
   forwardRequest(req, res, SERVICES.USER, `/users/directory${query ? `?${query}` : ''}`);
 });
-router.get('/users/batch/:ids', roleMiddleware('SUPER_ADMIN', 'ADMIN', 'WORKSPACE_OWNER', 'WORKSPACE_ADMIN', 'WORKSPACE_MEMBER'), (req, res) => 
+router.get('/users/batch/:ids', roleMiddleware('SUPER_ADMIN', 'ADMIN', 'WORKSPACE_OWNER', 'WORKSPACE_ADMIN', 'WORKSPACE_MEMBER', 'EMPLOYEE'), (req, res) =>
   forwardRequest(req, res, SERVICES.USER, `/users/batch?ids=${req.params.ids}`));
 
 // 2. User Status & Custom Status (Specific prefixes)
@@ -693,9 +693,9 @@ router.post('/audit/reports', (req, res) => forwardRequest(req, res, SERVICES.AU
 // eliminating the need for the Node.js knowledge-service.
 
 // Spring: Document CRUD
-router.get('/documents', roleMiddleware('SUPER_ADMIN', 'ADMIN', 'WORKSPACE_ADMIN', 'WORKSPACE_MEMBER'), (req, res) =>
+router.get('/documents', roleMiddleware('SUPER_ADMIN', 'ADMIN', 'WORKSPACE_ADMIN', 'WORKSPACE_MEMBER', 'EMPLOYEE'), (req, res) =>
   forwardRequest(req, res, SERVICES.SPRING_AI, '/documents'));
-router.get('/documents/:id', roleMiddleware('SUPER_ADMIN', 'ADMIN', 'WORKSPACE_ADMIN', 'WORKSPACE_MEMBER'), (req, res) =>
+router.get('/documents/:id', roleMiddleware('SUPER_ADMIN', 'ADMIN', 'WORKSPACE_ADMIN', 'WORKSPACE_MEMBER', 'EMPLOYEE'), (req, res) =>
   forwardRequest(req, res, SERVICES.SPRING_AI, `/documents/${req.params.id}`));
 router.post('/documents/upload', roleMiddleware('SUPER_ADMIN', 'ADMIN', 'WORKSPACE_ADMIN'), (req, res) =>
   forwardMultipartRequest(req, res, SERVICES.SPRING_AI, '/documents/upload'));
@@ -707,32 +707,32 @@ router.post('/documents/:id/approve', roleMiddleware('SUPER_ADMIN', 'ADMIN'), (r
   forwardRequest(req, res, SERVICES.SPRING_AI, `/documents/${req.params.id}/approve`));
 
 // Spring: Chunks & Stats
-router.get('/documents/:id/chunks', roleMiddleware('SUPER_ADMIN', 'ADMIN', 'WORKSPACE_ADMIN', 'WORKSPACE_MEMBER'), (req, res) =>
+router.get('/documents/:id/chunks', roleMiddleware('SUPER_ADMIN', 'ADMIN', 'WORKSPACE_ADMIN', 'WORKSPACE_MEMBER', 'EMPLOYEE'), (req, res) =>
   forwardRequest(req, res, SERVICES.SPRING_AI, `/documents/${req.params.id}/chunks`));
-router.get('/documents/:id/chunks/:chunkIndex', roleMiddleware('SUPER_ADMIN', 'ADMIN', 'WORKSPACE_ADMIN', 'WORKSPACE_MEMBER'), (req, res) =>
+router.get('/documents/:id/chunks/:chunkIndex', roleMiddleware('SUPER_ADMIN', 'ADMIN', 'WORKSPACE_ADMIN', 'WORKSPACE_MEMBER', 'EMPLOYEE'), (req, res) =>
   forwardRequest(req, res, SERVICES.SPRING_AI, `/documents/${req.params.id}/chunks/${req.params.chunkIndex}`));
-router.get('/documents/:id/stats', roleMiddleware('SUPER_ADMIN', 'ADMIN', 'WORKSPACE_ADMIN', 'WORKSPACE_MEMBER'), (req, res) =>
+router.get('/documents/:id/stats', roleMiddleware('SUPER_ADMIN', 'ADMIN', 'WORKSPACE_ADMIN', 'WORKSPACE_MEMBER', 'EMPLOYEE'), (req, res) =>
   forwardRequest(req, res, SERVICES.SPRING_AI, `/documents/${req.params.id}/stats`));
 
 // Spring: Semantic Search
-router.post('/documents/search', roleMiddleware('SUPER_ADMIN', 'ADMIN', 'WORKSPACE_ADMIN', 'WORKSPACE_MEMBER'), (req, res) =>
+router.post('/documents/search', roleMiddleware('SUPER_ADMIN', 'ADMIN', 'WORKSPACE_ADMIN', 'WORKSPACE_MEMBER', 'EMPLOYEE'), (req, res) =>
   forwardRequest(req, res, SERVICES.SPRING_AI, '/documents/search'));
 
 // Spring: Chat / Conversations
-router.post('/chat/conversations', roleMiddleware('SUPER_ADMIN', 'ADMIN', 'WORKSPACE_MEMBER'), (req, res) =>
+router.post('/chat/conversations', roleMiddleware('SUPER_ADMIN', 'ADMIN', 'WORKSPACE_MEMBER', 'EMPLOYEE'), (req, res) =>
   forwardRequest(req, res, SERVICES.SPRING_AI, '/chat/conversations'));
-router.get('/chat/conversations', roleMiddleware('SUPER_ADMIN', 'ADMIN', 'WORKSPACE_MEMBER'), (req, res) =>
+router.get('/chat/conversations', roleMiddleware('SUPER_ADMIN', 'ADMIN', 'WORKSPACE_MEMBER', 'EMPLOYEE'), (req, res) =>
   forwardRequest(req, res, SERVICES.SPRING_AI, '/chat/conversations'));
-router.get('/chat/conversations/:id/messages', roleMiddleware('SUPER_ADMIN', 'ADMIN', 'WORKSPACE_MEMBER'), (req, res) =>
+router.get('/chat/conversations/:id/messages', roleMiddleware('SUPER_ADMIN', 'ADMIN', 'WORKSPACE_MEMBER', 'EMPLOYEE'), (req, res) =>
   forwardRequest(req, res, SERVICES.SPRING_AI, `/chat/conversations/${req.params.id}/messages`));
-router.delete('/chat/conversations/:id', roleMiddleware('SUPER_ADMIN', 'ADMIN', 'WORKSPACE_MEMBER'), (req, res) =>
+router.delete('/chat/conversations/:id', roleMiddleware('SUPER_ADMIN', 'ADMIN', 'WORKSPACE_MEMBER', 'EMPLOYEE'), (req, res) =>
   forwardRequest(req, res, SERVICES.SPRING_AI, `/chat/conversations/${req.params.id}`));
-router.post('/chat/messages', roleMiddleware('SUPER_ADMIN', 'ADMIN', 'WORKSPACE_MEMBER'), (req, res) =>
+router.post('/chat/messages', roleMiddleware('SUPER_ADMIN', 'ADMIN', 'WORKSPACE_MEMBER', 'EMPLOYEE'), (req, res) =>
   forwardStreamRequest(req, res, SERVICES.SPRING_AI, '/chat/messages'));
 
 // ============= AI AGENT ROUTES (Phase 2) =============
 // Streams SSE response from /agent/chat back to client
-router.post('/agent/chat', roleMiddleware('SUPER_ADMIN', 'ADMIN', 'WORKSPACE_MEMBER'), (req, res) =>
+router.post('/agent/chat', roleMiddleware('SUPER_ADMIN', 'ADMIN', 'WORKSPACE_MEMBER', 'EMPLOYEE'), (req, res) =>
   forwardStreamRequest(req, res, SERVICES.SPRING_AI, '/agent/chat'));
 router.get('/agent/health', (req, res) =>
   forwardRequest(req, res, SERVICES.SPRING_AI, '/agent/health'));

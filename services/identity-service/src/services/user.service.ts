@@ -175,7 +175,7 @@ export class UserService {
   }
 
 
-  async searchDirectory(query: string, currentUserId: string, limit: number = 20) {
+  async searchDirectory(query: string, currentUserId: string, workspaceId?: string, limit: number = 20) {
     function normalize(str: string) {
       return str.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
     }

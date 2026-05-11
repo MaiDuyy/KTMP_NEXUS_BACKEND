@@ -89,9 +89,11 @@ userRoutes.delete('/custom-status', asyncHandler(async (req: Request, res: Respo
 // ============= DIRECTORY =============
 userRoutes.get('/directory', asyncHandler(async (req: Request, res: Response) => {
   const userId = req.headers['x-user-id'] as string;
-  if (!userId) return res.status(401).json({ success: false, message: 'Chưa đăng nhập!' });
+  if (!userId)
+    return res.status(401).json({ success: false, message: 'Chưa đăng nhập!' });
   const q = typeof req.query.q === 'string' ? req.query.q : '';
-  const users = await userService.searchDirectory(q, userId);
+  const workspaceId = typeof req.query.workspaceId === 'string' ? req.query.workspaceId : undefined;
+  const users = await userService.searchDirectory(q, userId, workspaceId);
   res.json({ success: true, users });
 }));
 
