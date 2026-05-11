@@ -232,6 +232,16 @@ export class ChatService {
       if (workspaceMember.role === 'WORKSPACE_GUEST') {
         throw new Error('Khách (Guest) không có quyền tạo nhóm chat mới trong Workspace!');
       }
+      // Ensure all members belong to the workspace
+      const workspaceMembers = await prisma.workspaceMember.findMany({
+        where: { workspaceId, userId: { in: uniqueMemberIds } },
+        select: { userId: true }
+      });
+      const inWorkspaceIds = workspaceMembers.map(m => m.userId);
+      const invalidIds = uniqueMemberIds.filter(id => !inWorkspaceIds.includes(id));
+      if (invalidIds.length > 0) {
+        throw new Error('Một số thành viên được chọn không thuộc Workspace này!');
+      }
     }
 
     const chat = await prisma.chat.create({
@@ -312,6 +322,16 @@ export class ChatService {
         participants: true,
       },
     });
+
+    if (workspaceId) {
+      // Verify partner is in workspace
+      const partnerInWorkspace = await prisma.workspaceMember.findUnique({
+        where: { workspaceId_userId: { workspaceId, userId: partnerId } }
+      });
+      if (!partnerInWorkspace) {
+        throw new Error('Người nhận không thuộc Workspace này!');
+      }
+    }
 
     if (existingChat) {
       const myParticipant = existingChat.participants.find((p) => p.accountId === userId);
@@ -450,6 +470,18 @@ export class ChatService {
       throw new Error('Bạn không có quyền thêm thành viên!');
     }
 
+        if (chat.workspaceId) {
+      // Ensure added members belong to the workspace
+      const workspaceMembers = await prisma.workspaceMember.findMany({
+        where: { workspaceId: chat.workspaceId, userId: { in: memberIds } },
+        select: { userId: true }
+      });
+      const inWorkspaceIds = workspaceMembers.map(m => m.userId);
+      const invalidIds = memberIds.filter(id => !inWorkspaceIds.includes(id));
+      if (invalidIds.length > 0) {
+        throw new Error('Một số thành viên được chọn không thuộc Workspace này!');
+      }
+    }
     const existingMemberIds = chat.participants.map((p) => p.accountId);
     const newMemberIds = memberIds.filter((id) => !existingMemberIds.includes(id));
 
