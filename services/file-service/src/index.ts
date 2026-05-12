@@ -157,6 +157,70 @@ app.post('/upload/avatar', upload.single('file'), async (req, res) => {
   }
 });
 
+// ============= UPLOAD WORKSPACE ICON =============
+
+app.post('/upload/workspace-icon', upload.single('file'), async (req, res) => {
+  try {
+    const userId = req.headers['x-user-id'] as string;
+    const { workspaceId } = req.body;
+
+    if (!userId) {
+      return res.status(401).json({ success: false, message: 'Chưa đăng nhập!' });
+    }
+    if (!req.file) {
+      return res.status(400).json({ success: false, message: 'Vui lòng chọn file ảnh!' });
+    }
+    if (!ALLOWED_IMAGE_TYPES.includes(req.file.mimetype)) {
+      return res.status(400).json({ success: false, message: 'Chỉ chấp nhận file ảnh (jpg, png, gif, webp)!' });
+    }
+    if (req.file.size > 2 * 1024 * 1024) {
+      return res.status(400).json({ success: false, message: 'Ảnh không được vượt quá 2MB!' });
+    }
+
+    const uploadResult = await storage.upload(req.file.buffer, {
+      folder: 'chat-app/workspace-icons',
+      publicId: `workspace_${workspaceId || userId}_${Date.now()}`,
+      resourceType: 'image',
+      mimeType: req.file.mimetype,
+      transformation: [
+        { width: 256, height: 256, crop: 'fill', gravity: 'center' },
+        { quality: 'auto', format: 'webp' },
+      ],
+    });
+
+    await prisma.file.create({
+      data: {
+        id: uuidv4(),
+        userId,
+        type: 'WORKSPACE_ICON',
+        mimeType: req.file.mimetype,
+        url: uploadResult.url,
+        publicId: uploadResult.publicId,
+        size: req.file.size,
+      },
+    });
+
+    await publishEvent(EventSubjects.FILE_UPLOADED, {
+      userId,
+      type: 'WORKSPACE_ICON',
+      url: uploadResult.url,
+      workspaceId,
+    });
+
+    logger.info({ userId, workspaceId }, 'Workspace icon uploaded');
+
+    res.json({
+      success: true,
+      message: 'Upload icon workspace thành công!',
+      url: uploadResult.url,
+      publicId: uploadResult.publicId,
+    });
+  } catch (error: any) {
+    logger.error({ error: error.message }, 'Upload workspace icon error');
+    res.status(500).json({ success: false, message: 'Lỗi upload icon workspace!' });
+  }
+});
+
 // ============= UPLOAD CHAT FILE =============
 
 app.post('/upload/chat', upload.single('file'), async (req, res) => {

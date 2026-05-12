@@ -214,8 +214,21 @@ async function forwardMultipartRequest(
       },
       (proxyRes) => {
         res.status(proxyRes.statusCode || 500);
+        // Skip CORS + hop-by-hop headers — the Gateway's own CORS middleware
+        // already set the correct Access-Control-* for the browser.
+        // Copying them from the downstream service (which may use '*') would
+        // overwrite the gateway's credential-safe origin and break the request.
+        const SKIP_HEADERS = new Set([
+          'transfer-encoding',
+          'access-control-allow-origin',
+          'access-control-allow-credentials',
+          'access-control-allow-methods',
+          'access-control-allow-headers',
+          'access-control-expose-headers',
+          'access-control-max-age',
+        ]);
         Object.entries(proxyRes.headers).forEach(([key, value]) => {
-          if (value) res.setHeader(key, value);
+          if (value && !SKIP_HEADERS.has(key.toLowerCase())) res.setHeader(key, value);
         });
         proxyRes.pipe(res);
       }

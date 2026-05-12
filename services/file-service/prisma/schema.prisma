@@ -39,4 +39,5 @@ enum FileType {
   CHAT
   GROUP_AVATAR
   DOCUMENT
+  WORKSPACE_ICON
 }

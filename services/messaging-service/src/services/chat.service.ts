@@ -78,6 +78,7 @@ export class ChatService {
         name: chat.name,
         avatar: chat.avatar,
         isGroup: chat.isGroup,
+        joinPolicy: chat.joinPolicy,
         isBlocked,
         isBlockedByMe,
         pin: myParticipant?.pin || false,

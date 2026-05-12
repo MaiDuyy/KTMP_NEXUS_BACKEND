@@ -57,6 +57,14 @@ workspaceRoutes.delete('/:id', asyncHandler(async (req: Request, res: Response) 
   res.json({ success: true, message: 'Xóa workspace thành công!' });
 }));
 
+workspaceRoutes.get('/:id/stats', asyncHandler(async (req: Request, res: Response) => {
+  const userId = req.headers['x-user-id'] as string;
+  const { id } = req.params;
+  if (!userId) return res.status(401).json({ success: false, message: 'Chưa đăng nhập!' });
+  const result = await workspaceService.getWorkspaceStats(id as string, userId);
+  res.json(result);
+}));
+
 // Member management
 workspaceRoutes.get('/:id/members', asyncHandler(async (req: Request, res: Response) => {
   const userId = req.headers['x-user-id'] as string;

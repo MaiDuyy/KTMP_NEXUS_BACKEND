@@ -192,7 +192,23 @@ export class UserService {
       return score;
     }
 
-    const where: any = { isAnonymized: false, id: { not: currentUserId }, role: { not: "SUPER_ADMIN" } };
+    let filterUserIds: string[] | undefined = undefined;
+    if (workspaceId) {
+      try {
+        const members = await messagingGrpc.getWorkspaceMembers(workspaceId);
+        filterUserIds = members.map((m: any) => m.userId);
+      } catch (err) {
+        console.error("[UserService] Failed to filter by workspace", err);
+      }
+    }
+
+    const where: any = { isAnonymized: false, role: { not: "SUPER_ADMIN" } };
+    if (filterUserIds) {
+      where.id = { in: filterUserIds, not: currentUserId };
+    } else {
+      where.id = { not: currentUserId };
+    }
+
     if (query?.trim()) {
       where.OR = [
         { name: { contains: query, mode: "insensitive" } },
