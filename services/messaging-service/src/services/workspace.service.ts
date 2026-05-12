@@ -94,7 +94,22 @@ export class WorkspaceService {
     if (data.allowGuestAccess !== undefined) updateData.allowGuestAccess = data.allowGuestAccess;
 
     const updated = await prisma.workspace.update({ where: { id }, data: updateData });
-    logger.info({ workspaceId: id }, 'Workspace updated');
+
+    // Broadcast to all workspace members via ws-gateway
+    const memberIds = workspace.members.map(m => m.userId);
+    await publishEvent(EventSubjects.WORKSPACE_UPDATED, {
+      id: updated.id,
+      memberIds,
+      updates: {
+        name: updated.name,
+        description: updated.description,
+        icon: updated.icon,
+        isPublic: updated.isPublic,
+      },
+      updatedBy: userId,
+    }).catch(err => logger.warn({ err: err.message }, 'NATS publish workspace.updated failed (non-fatal)'));
+
+    logger.info({ workspaceId: id }, 'Workspace updated + event published');
     return updated;
   }
 
@@ -438,6 +453,96 @@ export class WorkspaceService {
 
       return updated;
     });
+  }
+
+  async getWorkspaceStats(workspaceId: string, userId: string) {
+    const workspace = await prisma.workspace.findUnique({
+      where: { id: workspaceId },
+      include: { members: true },
+    });
+    if (!workspace) throw new Error('Không tìm thấy workspace!');
+
+    const isMember = workspace.members.some(m => m.userId === userId);
+    if (!isMember) throw new Error('Bạn không có quyền truy cập workspace này!');
+
+    const thirtyDaysAgo = new Date();
+    thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
+
+    const chats = await prisma.chat.findMany({
+      where: { workspaceId },
+      select: { id: true }
+    });
+    const chatIds = chats.map(c => c.id);
+
+    const messageActivityRaw = await prisma.message.findMany({
+      where: {
+        chatId: { in: chatIds },
+        time: { gte: thirtyDaysAgo }
+      },
+      select: { time: true },
+    });
+
+    const activityMap = new Map<string, number>();
+    messageActivityRaw.forEach(m => {
+      const date = new Date(m.time).toISOString().split('T')[0];
+      activityMap.set(date, (activityMap.get(date) || 0) + 1);
+    });
+
+    const messageActivity = Array.from(activityMap.entries())
+      .map(([date, count]) => ({ date, count }))
+      .sort((a, b) => a.date.localeCompare(b.date));
+
+    const twelveWeeksAgo = new Date();
+    twelveWeeksAgo.setDate(twelveWeeksAgo.getDate() - 12 * 7);
+
+    const membersActivityRaw = await prisma.workspaceMember.findMany({
+      where: {
+        workspaceId,
+        joinedAt: { gte: twelveWeeksAgo }
+      },
+      select: { joinedAt: true },
+    });
+
+    const weekMap = new Map<string, number>();
+    membersActivityRaw.forEach(m => {
+      const d = new Date(m.joinedAt);
+      d.setHours(0,0,0,0);
+      d.setDate(d.getDate() - d.getDay() + 1); // Monday
+      const weekStr = d.toISOString().split('T')[0];
+      weekMap.set(weekStr, (weekMap.get(weekStr) || 0) + 1);
+    });
+
+    const memberActivity = Array.from(weekMap.entries())
+      .map(([week, count]) => ({ week, count }))
+      .sort((a, b) => a.week.localeCompare(b.week));
+
+    const recentMembers = await prisma.workspaceMember.findMany({
+      where: { workspaceId },
+      orderBy: { joinedAt: 'desc' },
+      take: 5,
+      select: { userId: true, role: true, joinedAt: true }
+    });
+    
+    const userIds = recentMembers.map(m => m.userId);
+    const userMap = await userorgClient.getUsers(userIds);
+    
+    const recentActivity = recentMembers.map(m => {
+      const u = userMap.get(m.userId);
+      return {
+        id: m.userId,
+        user: u?.name || 'Người dùng',
+        action: 'đã gia nhập Workspace',
+        target: '',
+        time: new Date(m.joinedAt).toISOString()
+      };
+    });
+
+    return {
+      success: true,
+      messageActivity,
+      memberActivity,
+      recentActivity
+    };
   }
 
   async getWorkspaceMetadata(id: string) {
