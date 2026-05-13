@@ -23,8 +23,14 @@ jobs:
           node-version: ${{ env.NODE_VERSION }}
           cache: 'npm'
       
-      - name: Install dependencies
-        run: npm ci
+      - name: Install shared dependencies
+        run: cd packages/shared && npm install --legacy-peer-deps
+      
+      - name: Build shared package
+        run: cd packages/shared && npm run build
+
+      - name: Install root dependencies
+        run: npm install --legacy-peer-deps --ignore-scripts
       
       - name: Build Docker images
         run: docker-compose build --parallel
