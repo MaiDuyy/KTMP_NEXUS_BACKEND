@@ -15,11 +15,7 @@ const SYSTEM_ROLES = [
   { name: 'SUPER_ADMIN', displayName: 'Super Admin', description: 'Toàn quyền hệ thống', level: 0 },
   { name: 'ADMIN', displayName: 'Admin', description: 'Quản trị hệ thống', level: 1 },
   { name: 'WORKSPACE_MANAGER', displayName: 'Workspace Manager', description: 'Quản lý không gian làm việc', level: 2 },
-  { name: 'WORKSPACE_OWNER', displayName: 'Workspace Owner', description: 'Chủ sở hữu Workspace', level: 3 },
-  { name: 'WORKSPACE_ADMIN', displayName: 'Workspace Admin', description: 'Quản trị Workspace', level: 4 },
-  { name: 'EMPLOYEE', displayName: 'Employee', description: 'Nhân viên chính thức', level: 5 },
-  { name: 'WORKSPACE_MEMBER', displayName: 'Workspace Member', description: 'Thành viên Workspace', level: 6 },
-  { name: 'WORKSPACE_GUEST', displayName: 'Workspace Guest', description: 'Khách truy cập Workspace', level: 7 },
+  { name: 'EMPLOYEE', displayName: 'Employee', description: 'Nhân viên chính thức', level: 3 },
 ];
 
 // Default permissions matrix
@@ -94,20 +90,6 @@ const ROLE_PERMISSIONS: Record<string, string[]> = {
     'ai:execute:own',
     'role:read:system', 'role:assign:org',
   ],
-  WORKSPACE_OWNER: [
-    'user:read:org',
-    'chat.dm:read:org',
-    'audit:read:system', 'audit:export:system',
-    'role:read:system',
-    'knowledge:read:system',
-  ],
-  WORKSPACE_ADMIN: [
-    'user:read:org',
-    'chat.channel:read:org', 'chat.channel:admin:workspace',
-    'chat.dm:read:own', 'chat.dm:write:own',
-    'knowledge:read:acl',
-    'ai:execute:own',
-  ],
   EMPLOYEE: [
     'user:read:own', 'user:read:org', 'user:write:own',
     'chat.channel:read:member', 'chat.channel:write:member',
@@ -115,16 +97,6 @@ const ROLE_PERMISSIONS: Record<string, string[]> = {
     'knowledge:read:acl',
     'ai:execute:own',
     'audit:read:own',
-  ],
-  WORKSPACE_MEMBER: [
-    'user:read:own', 'user:read:org', 'user:write:own',
-    'chat.channel:read:member', 'chat.channel:write:member',
-    'chat.dm:read:own', 'chat.dm:write:own',
-    'knowledge:read:acl',
-  ],
-  WORKSPACE_GUEST: [
-    'user:read:own',
-    'chat.channel:read:member',
   ],
 };
 
@@ -250,9 +222,9 @@ async function main() {
       name: 'Regular User',
       email: 'user1@ott.com',
       number: '0900000005',
-      role: 'WORKSPACE_MEMBER',
-      authRole: 'WORKSPACE_MEMBER',
-      orgRole: 'WORKSPACE_MEMBER',
+      role: 'EMPLOYEE',
+      authRole: 'EMPLOYEE',
+      orgRole: 'EMPLOYEE',
     }
   ];
 

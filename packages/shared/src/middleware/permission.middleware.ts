@@ -152,10 +152,8 @@ export function requirePermission(
     const rolePermissions: Record<string, string[]> = {
       [SystemRole.SUPER_ADMIN]: ['user', 'chat', 'knowledge', 'audit', 'ai', 'role'],
       [SystemRole.ADMIN]: ['user', 'chat', 'knowledge', 'audit', 'ai'],
-      [SystemRole.WORKSPACE_OWNER]: ['chat', 'workspace:manage', 'audit', 'knowledge'],
-      [SystemRole.WORKSPACE_ADMIN]: ['chat', 'workspace:manage', 'knowledge'],
-      [SystemRole.WORKSPACE_MEMBER]: ['user:own', 'chat', 'knowledge:acl', 'ai'],
-      [SystemRole.WORKSPACE_GUEST]: ['chat:member'],
+      [SystemRole.WORKSPACE_MANAGER]: ['user:org', 'chat', 'workspace:manage', 'audit', 'knowledge'],
+      [SystemRole.EMPLOYEE]: ['user:own', 'chat', 'knowledge:acl', 'ai'],
     };
 
     const userRoles = req.user.roles || [req.user.role];

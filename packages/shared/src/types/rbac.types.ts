@@ -28,11 +28,7 @@ export enum SystemRole {
   SUPER_ADMIN = 'SUPER_ADMIN',
   ADMIN = 'ADMIN',
   WORKSPACE_MANAGER = 'WORKSPACE_MANAGER',
-  WORKSPACE_OWNER = 'WORKSPACE_OWNER',
-  WORKSPACE_ADMIN = 'WORKSPACE_ADMIN',
   EMPLOYEE = 'EMPLOYEE',
-  WORKSPACE_MEMBER = 'WORKSPACE_MEMBER',
-  WORKSPACE_GUEST = 'WORKSPACE_GUEST',
 }
 
 // Role levels for hierarchy comparison
@@ -40,9 +36,5 @@ export const ROLE_LEVELS: Record<SystemRole, number> = {
   [SystemRole.SUPER_ADMIN]: 0,
   [SystemRole.ADMIN]: 1,
   [SystemRole.WORKSPACE_MANAGER]: 2,
-  [SystemRole.WORKSPACE_OWNER]: 3,
-  [SystemRole.WORKSPACE_ADMIN]: 4,
-  [SystemRole.EMPLOYEE]: 5,
-  [SystemRole.WORKSPACE_MEMBER]: 6,
-  [SystemRole.WORKSPACE_GUEST]: 7,
+  [SystemRole.EMPLOYEE]: 3,
 };

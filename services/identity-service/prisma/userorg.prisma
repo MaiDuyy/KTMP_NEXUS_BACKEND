@@ -33,7 +33,7 @@ model Account {
   
   isVerified     Boolean   @default(false)
   lastSeen       DateTime?
-  role           AccountRole @default(WORKSPACE_MEMBER)
+  role           AccountRole @default(EMPLOYEE)
   
   isSuspended    Boolean   @default(false)
   suspendedAt    DateTime?
@@ -107,11 +107,7 @@ enum AccountRole {
   SUPER_ADMIN
   ADMIN
   WORKSPACE_MANAGER
-  WORKSPACE_OWNER
-  WORKSPACE_ADMIN
   EMPLOYEE
-  WORKSPACE_MEMBER
-  WORKSPACE_GUEST
 }
 
 enum UserStatus {
@@ -178,7 +174,7 @@ model Invitation {
   email       String
   token       String   @unique
   type        InvitationType @default(USER)
-  role        String?        @default("WORKSPACE_MEMBER")
+  role        String?        @default("EMPLOYEE")
   
   channelIds  String[] @default([])
   workspaceId String?
@@ -209,7 +205,7 @@ model OrgSettings {
   
   allowGuestInvite   Boolean @default(true)
   allowUserInvite    Boolean @default(true)
-  defaultUserRole    String  @default("WORKSPACE_MEMBER")
+  defaultUserRole    String  @default("EMPLOYEE")
   
   messageRetentionDays Int @default(0)
   fileRetentionDays    Int @default(0)

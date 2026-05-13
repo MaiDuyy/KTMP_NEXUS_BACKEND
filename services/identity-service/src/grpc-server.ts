@@ -67,6 +67,17 @@ export function startGrpcServer() {
       }
     },
     
+    CheckFriendship: async (call: any, callback: any) => {
+      try {
+        const { user1Id, user2Id } = call.request;
+        const isFriend = await friendService.checkFriendship(user1Id, user2Id);
+        callback(null, { isFriend });
+      } catch (err) {
+        logger.error({ err }, 'gRPC checkFriendship failed');
+        callback(err);
+      }
+    },
+    
     GetUserByEmail: async (call: any, callback: any) => {
       try {
         const { email } = call.request;

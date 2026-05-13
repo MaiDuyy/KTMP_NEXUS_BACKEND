@@ -146,5 +146,13 @@ export const messagingGrpc = {
         resolve(response);
       });
     });
+  },
+  getAdminStats: (): Promise<any> => {
+    return new Promise((resolve, reject) => {
+      messagingClient.GetAdminStats({}, (err: any, response: any) => {
+        if (err) return reject(err);
+        resolve(response);
+      });
+    });
   }
 };

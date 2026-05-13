@@ -11,7 +11,7 @@ import { authConfig } from '../config/auth.config.js';
 import { auditLogService } from './audit.service.js';
 import { getQuotaByRole } from '../lib/quota.js';
 
-type AccountRole = 'SUPER_ADMIN' | 'ADMIN' | 'WORKSPACE_MANAGER' | 'WORKSPACE_OWNER' | 'WORKSPACE_ADMIN' | 'EMPLOYEE' | 'WORKSPACE_MEMBER' | 'WORKSPACE_GUEST';
+type AccountRole = 'SUPER_ADMIN' | 'ADMIN' | 'WORKSPACE_MANAGER' | 'EMPLOYEE';
 
 interface TokenPayload {
   sub: string;
@@ -189,10 +189,10 @@ export class AuthService {
         gender,
         birthDate: birthDate ? new Date(birthDate) : null,
         location: location || null,
-        role: role || 'WORKSPACE_MEMBER',
+        role: role || 'EMPLOYEE',
         isVerified: false,
         isOnline: false,
-        maxWorkspaces: getQuotaByRole(role || 'WORKSPACE_MEMBER'),
+        maxWorkspaces: getQuotaByRole(role || 'EMPLOYEE'),
       },
     });
 
@@ -208,9 +208,9 @@ export class AuthService {
         gender: newAccount.gender,
         birthDate: newAccount.birthDate,
         location: newAccount.location,
-        role: newAccount.role as any, // Both have WORKSPACE_MEMBER, SUPER_ADMIN, etc.
+        role: newAccount.role as any,
         isVerified: false,
-        maxWorkspaces: getQuotaByRole(newAccount.role || 'WORKSPACE_MEMBER'),
+        maxWorkspaces: getQuotaByRole(newAccount.role || 'EMPLOYEE'),
       }
     }).catch(err => {
       logger.error({ err, userId: newAccount.id }, 'Failed to sync user to userorg schema');
@@ -219,11 +219,11 @@ export class AuthService {
     });
 
     // ⚡ REFACTORED: Direct Prisma query instead of HTTP call
-    assignRbacRole(newAccount.id, 'WORKSPACE_MEMBER', newAccount.id).then(success => {
+    assignRbacRole(newAccount.id, 'EMPLOYEE', newAccount.id).then(success => {
       if (success) {
-        logger.info({ userId: newAccount.id }, 'WORKSPACE_MEMBER role assigned via direct RBAC query');
+        logger.info({ userId: newAccount.id }, 'EMPLOYEE role assigned via direct RBAC query');
       } else {
-        logger.warn({ userId: newAccount.id }, 'Failed to assign WORKSPACE_MEMBER role');
+        logger.warn({ userId: newAccount.id }, 'Failed to assign EMPLOYEE role');
       }
     });
 
@@ -293,7 +293,7 @@ export class AuthService {
 
     const hashedPassword = await bcrypt.hash(password, 10);
     const userId = uuidv4();
-    const accountRole = (role || 'WORKSPACE_MEMBER') as AccountRole;
+    const accountRole = (role || 'EMPLOYEE') as AccountRole;
 
     // 2. Create in Auth Schema
     const authAccount = await authPrisma.account.create({

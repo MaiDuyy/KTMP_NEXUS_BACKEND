@@ -42,7 +42,7 @@ export class OrgSettingsService {
       if (!validLanguages.includes(data.language)) throw new Error('Ngôn ngữ không được hỗ trợ!');
     }
     if (data.defaultUserRole !== undefined) {
-      const validRoles = ['WORKSPACE_MEMBER', 'WORKSPACE_GUEST'];
+      const validRoles = ['WORKSPACE_MANAGER', 'EMPLOYEE'];
       if (!validRoles.includes(data.defaultUserRole)) throw new Error('Role mặc định không hợp lệ!');
     }
     if (data.messageRetentionDays !== undefined && data.messageRetentionDays < 0) throw new Error('Thời gian lưu trữ không thể âm!');

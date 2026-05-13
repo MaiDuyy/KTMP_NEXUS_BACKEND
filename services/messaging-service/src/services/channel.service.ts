@@ -18,6 +18,16 @@ interface UpdateChannelInput {
 interface BrowseOptions { page?: number; limit?: number; search?: string; }
 
 export class ChannelService {
+  private async getWorkspaceMemberIds(workspaceId: string): Promise<string[]> {
+    const members = await prisma.workspaceMember.findMany({ where: { workspaceId }, select: { userId: true } });
+    return members.map((m: any) => m.userId);
+  }
+
+  private async getChannelMemberIds(channelId: string): Promise<string[]> {
+    const members = await prisma.channelMember.findMany({ where: { channelId }, select: { userId: true } });
+    return members.map((m: any) => m.userId);
+  }
+
   async createChannel(workspaceId: string, data: CreateChannelInput, userId: string) {
     const { name, description, topic, type, categoryId, isDefault } = data;
     if (!name || name.trim().length < 2) throw new Error('Tên channel phải có ít nhất 2 ký tự!');
@@ -28,8 +38,15 @@ export class ChannelService {
     if (!membership) throw new Error('Bạn không phải thành viên của workspace này!');
 
     const channelType = type || 'PUBLIC';
-    if (channelType !== 'PUBLIC' && !['WORKSPACE_OWNER', 'WORKSPACE_ADMIN'].includes(membership.role))
-      throw new Error('Chỉ Admin/Owner mới có thể tạo channel Private/Guest!');
+
+    // Only WORKSPACE_OWNER and WORKSPACE_ADMIN can create any channel
+    const isAdminOrOwner = ['WORKSPACE_OWNER', 'WORKSPACE_ADMIN'].includes(membership.role);
+    if (!isAdminOrOwner)
+      throw new Error('Chỉ Admin hoặc Owner của workspace mới có thể tạo kênh!');
+
+    // ANNOUNCEMENT channels require WORKSPACE_OWNER
+    if (channelType === 'ANNOUNCEMENT' && membership.role !== 'WORKSPACE_OWNER')
+      throw new Error('Chỉ Owner mới có thể tạo kênh Thông báo (ANNOUNCEMENT)!');
 
     const existing = await prisma.channel.findUnique({
       where: { workspaceId_name: { workspaceId, name: name.trim().toLowerCase() } },
@@ -50,9 +67,32 @@ export class ChannelService {
       include: { members: true, category: true },
     });
 
+    // Mirror to Chat table for messaging support
+    await prisma.chat.create({
+      data: {
+        id: channel.id,
+        isGroup: true,
+        name: channel.name,
+        workspaceId: channel.workspaceId,
+        joinPolicy: channelType === 'PUBLIC' ? 'PUBLIC' : 'PRIVATE',
+        status: 'ACTIVE',
+        participants: {
+          create: {
+            accountId: userId,
+            role: 'CHANNEL_OWNER',
+          }
+        }
+      }
+    }).catch((e) => logger.error({ err: e.message }, 'Failed to mirror Channel to Chat'));
+
+    const notifyMemberIds = channelType === 'PUBLIC' || channelType === 'ANNOUNCEMENT' 
+      ? await this.getWorkspaceMemberIds(workspaceId) 
+      : [userId];
+
     await publishEvent(EventSubjects.CHANNEL_CREATED, {
       id: channel.id, workspaceId, name: channel.name, type: channel.type,
       createdBy: userId, createdAt: channel.createdAt.toISOString(),
+      memberIds: notifyMemberIds,
     });
     logger.info({ channelId: channel.id, workspaceId }, 'Channel created');
     return channel;
@@ -79,6 +119,18 @@ export class ChannelService {
     if (data.position !== undefined) updateData.position = data.position;
 
     const updated = await prisma.channel.update({ where: { id }, data: updateData });
+    
+    const notifyMemberIds = await this.getWorkspaceMemberIds(channel.workspaceId);
+    
+    // Mirror name update to Chat table
+    if (updateData.name !== undefined) {
+      await prisma.chat.update({
+        where: { id },
+        data: { name: updateData.name }
+      }).catch(() => null);
+    }
+
+    await publishEvent(EventSubjects.CHANNEL_UPDATED, { id, workspaceId: channel.workspaceId, ...updateData, memberIds: notifyMemberIds });
     logger.info({ channelId: id }, 'Channel updated');
     return updated;
   }
@@ -88,7 +140,11 @@ export class ChannelService {
     const updated = await prisma.channel.update({
       where: { id }, data: { isArchived: true, archivedAt: new Date(), archivedBy: userId },
     });
-    await publishEvent(EventSubjects.CHANNEL_ARCHIVED, { channelId: id, archivedBy: userId });
+    // Mirror to Chat table
+    await prisma.chat.update({ where: { id }, data: { status: 'ARCHIVED' } }).catch(() => null);
+    
+    const notifyMemberIds = await this.getChannelMemberIds(id);
+    await publishEvent(EventSubjects.CHANNEL_ARCHIVED, { channelId: id, archivedBy: userId, memberIds: notifyMemberIds });
     logger.info({ channelId: id }, 'Channel archived');
     return updated;
   }
@@ -98,6 +154,9 @@ export class ChannelService {
     const updated = await prisma.channel.update({
       where: { id }, data: { isArchived: false, archivedAt: null, archivedBy: null },
     });
+    // Mirror to Chat table
+    await prisma.chat.update({ where: { id }, data: { status: 'ACTIVE' } }).catch(() => null);
+
     logger.info({ channelId: id }, 'Channel unarchived');
     return updated;
   }
@@ -105,7 +164,14 @@ export class ChannelService {
   async deleteChannel(id: string, userId: string) {
     const channel = await this.getChannelWithPermissionCheck(id, userId, ['CHANNEL_OWNER']);
     await prisma.channel.delete({ where: { id } });
-    await publishEvent(EventSubjects.CHANNEL_DELETED, { channelId: id, workspaceId: channel.workspaceId, deletedBy: userId });
+    // Mirror to Chat table
+    await prisma.chat.delete({ where: { id } }).catch(() => null);
+    
+    const notifyMemberIds = channel.type === 'PUBLIC' || channel.type === 'ANNOUNCEMENT'
+      ? await this.getWorkspaceMemberIds(channel.workspaceId)
+      : channel.members.map((m: any) => m.userId);
+
+    await publishEvent(EventSubjects.CHANNEL_DELETED, { channelId: id, workspaceId: channel.workspaceId, deletedBy: userId, memberIds: notifyMemberIds });
     logger.info({ channelId: id }, 'Channel deleted');
     return { deleted: true };
   }
@@ -174,7 +240,13 @@ export class ChannelService {
     if (existing) throw new Error('Người dùng đã là thành viên của channel!');
 
     const member = await prisma.channelMember.create({ data: { channelId, userId: targetUserId, role: 'CHANNEL_MEMBER' } });
-    await publishEvent(EventSubjects.CHANNEL_MEMBER_ADDED, { channelId, userId: targetUserId, addedBy: adderId });
+    // Mirror to Chat table
+    await prisma.chatParticipant.create({
+      data: { chatId: channelId, accountId: targetUserId, role: 'CHANNEL_MEMBER' }
+    }).catch(() => null);
+
+    const notifyMemberIds = await this.getChannelMemberIds(channelId);
+    await publishEvent(EventSubjects.CHANNEL_MEMBER_ADDED, { channelId, userId: targetUserId, addedBy: adderId, memberIds: notifyMemberIds });
     logger.info({ channelId, userId: targetUserId }, 'Member added to channel');
     return member;
   }
@@ -200,7 +272,13 @@ export class ChannelService {
     }
 
     await prisma.channelMember.delete({ where: { id: target.id } });
-    await publishEvent(EventSubjects.CHANNEL_MEMBER_REMOVED, { channelId, userId: targetUserId, removedBy: removerId });
+    // Mirror to Chat table
+    await prisma.chatParticipant.deleteMany({
+      where: { chatId: channelId, accountId: targetUserId }
+    }).catch(() => null);
+
+    const notifyMemberIds = await this.getChannelMemberIds(channelId);
+    await publishEvent(EventSubjects.CHANNEL_MEMBER_REMOVED, { channelId, userId: targetUserId, removedBy: removerId, memberIds: notifyMemberIds });
     logger.info({ channelId, userId: targetUserId }, 'Member removed from channel');
     return { removed: true };
   }
@@ -248,7 +326,7 @@ export class ChannelService {
     ]);
 
     return {
-      items: channels.map(ch => ({ id: ch.id, name: ch.name, description: ch.description, memberCount: ch._count.members, isJoined: ch.members.length > 0 })),
+      channels: channels.map(ch => ({ id: ch.id, name: ch.name, description: ch.description, memberCount: ch._count.members, isJoined: ch.members.length > 0 })),
       total, page, limit, totalPages: Math.ceil(total / limit),
     };
   }
@@ -268,6 +346,14 @@ export class ChannelService {
     if (existing) throw new Error('Bạn đã là thành viên của channel này!');
 
     const member = await prisma.channelMember.create({ data: { channelId, userId, role: 'CHANNEL_MEMBER' } });
+    // Mirror to Chat table
+    await prisma.chatParticipant.create({
+      data: { chatId: channelId, accountId: userId, role: 'CHANNEL_MEMBER' }
+    }).catch(() => null);
+
+    const notifyMemberIds = await this.getChannelMemberIds(channelId);
+    await publishEvent(EventSubjects.CHANNEL_MEMBER_ADDED, { channelId, userId, addedBy: userId, memberIds: notifyMemberIds });
+
     logger.info({ channelId, userId }, 'User joined public channel');
     return member;
   }

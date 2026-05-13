@@ -392,6 +392,7 @@ enum ChannelType {
   PUBLIC
   PRIVATE
   GUEST
+  ANNOUNCEMENT
 }
 
 model ChannelCategory {

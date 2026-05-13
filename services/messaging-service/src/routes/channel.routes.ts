@@ -6,6 +6,7 @@ import type { Request, Response } from 'express';
 import { channelService } from '../services/channel.service.js';
 import { channelCategoryService } from '../services/channel-category.service.js';
 import { asyncHandler } from '../middleware/errorHandler.js';
+import { userorgClient } from '../lib/userorgClient.js';
 import type { ChannelType } from '@prisma/client';
 
 export const channelRoutes = Router();
@@ -128,7 +129,16 @@ channelRoutes.get('/channels/:id/members', asyncHandler(async (req: Request, res
   const { id } = req.params;
   if (!userId) return res.status(401).json({ success: false, message: 'Chưa đăng nhập!' });
   const channel = await channelService.getChannel(id as string, userId);
-  res.json({ success: true, members: channel.members, total: channel._count.members });
+  const memberUserIds = channel.members.map(m => m.userId);
+  const userMap = await userorgClient.getUsers(memberUserIds);
+  const populatedMembers = channel.members.map(m => {
+    const userObj = userMap.get(m.userId);
+    return {
+      ...m,
+      user: userObj ? { id: userObj.id, name: userObj.name, avatar: userObj.avatar } : { id: m.userId, name: m.userId }
+    };
+  });
+  res.json({ success: true, members: populatedMembers, total: channel._count.members });
 }));
 
 channelRoutes.post('/channels/:id/members', asyncHandler(async (req: Request, res: Response) => {

@@ -7,10 +7,6 @@ export const getQuotaByRole = (role: string) => {
       return 999;
     case 'ADMIN':
       return 100;
-    case 'WORKSPACE_OWNER':
-      return 50;
-    case 'WORKSPACE_ADMIN':
-      return 20;
     default:
       return 10;
   }

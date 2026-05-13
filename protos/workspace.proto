@@ -17,6 +17,7 @@ service WorkspaceService {
   rpc GetExpiredDissolvedWorkspaces (GetExpiredDissolvedWorkspacesRequest) returns (GetExpiredDissolvedWorkspacesResponse);
   rpc GetWorkspaceCount (WorkspaceCountRequest) returns (WorkspaceCountResponse);
   rpc AddMember (AddMemberRequest) returns (AddMemberResponse);
+  rpc GetAdminStats (GetAdminStatsRequest) returns (GetAdminStatsResponse);
 }
 
 message WorkspaceCountRequest {
@@ -150,4 +151,23 @@ message AddMemberRequest {
 message AddMemberResponse {
   bool success = 1;
   string message = 2;
+}
+
+message GetAdminStatsRequest {
+}
+
+message MessageActivityItem {
+  string date = 1;
+  int32 count = 2;
+}
+
+message GetAdminStatsResponse {
+  bool success = 1;
+  int32 totalMessages = 2;
+  int32 totalChats = 3;
+  int32 totalTasks = 4;
+  int32 activeTasks = 5;
+  int32 totalWorkspaces = 6;
+  int32 pendingInvitations = 7;
+  repeated MessageActivityItem messageActivity = 8;
 }

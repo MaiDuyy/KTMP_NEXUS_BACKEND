@@ -64,7 +64,7 @@ export class InvitationService {
     expiresAt.setDate(expiresAt.getDate() + expiryDays);
 
     const invitation = await userorgPrisma.invitation.create({
-      data: { email: email.toLowerCase(), token, type, role: role || 'WORKSPACE_MEMBER', channelIds, workspaceId, orgId, invitedBy, inviterName, expiresAt },
+      data: { email: email.toLowerCase(), token, type, role: role || 'EMPLOYEE', channelIds, workspaceId, orgId, invitedBy, inviterName, expiresAt },
     });
 
     logger.info({ email, type, invitedBy }, 'Invitation created');
@@ -202,7 +202,7 @@ export class InvitationService {
         const grpcResult = await messagingGrpc.addMember(
           invitation.workspaceId,
           userId,
-          invitation.role || 'WORKSPACE_MEMBER',
+          invitation.role || 'EMPLOYEE',
           invitation.invitedBy
         );
         if (!grpcResult.success) {

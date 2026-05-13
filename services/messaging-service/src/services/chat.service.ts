@@ -59,15 +59,18 @@ export class ChatService {
       
       const summary = summaryMap.get(chat.id);
 
-      // Check if blocked (for private chats)
+      // Check if blocked and friendship (for private chats)
       let isBlocked = false;
       let isBlockedByMe = false;
+      let isFriend = false;
       if (!chat.isGroup && otherParticipants.length > 0) {
         try {
           const partnerId = otherParticipants[0].accountId;
           const blockInfo = await userorgClient.checkBlockedStatus(userId, partnerId);
           isBlocked = blockInfo.isBlocked;
           isBlockedByMe = blockInfo.isBlocked && blockInfo.blockerId === userId;
+          
+          isFriend = await userorgClient.checkFriendship(userId, partnerId);
         } catch (err) {
           console.error('[ChatService] Failed to check block status in list', err);
         }
@@ -81,6 +84,7 @@ export class ChatService {
         joinPolicy: chat.joinPolicy,
         isBlocked,
         isBlockedByMe,
+        isFriend,
         pin: myParticipant?.pin || false,
         notify: myParticipant?.notify ?? true,
         readed: myParticipant?.readed ?? false,
@@ -144,9 +148,10 @@ export class ChatService {
     const uniqueAccountIds = [...new Set(chat.participants.map(p => p.accountId))];
     const accountMap = await userorgClient.getUsers(uniqueAccountIds);
 
-    // Check if blocked (for private chats)
+    // Check if blocked and friendship (for private chats)
     let isBlocked = false;
     let isBlockedByMe = false;
+    let isFriend = false;
     if (!chat.isGroup) {
       const partner = chat.participants.find(p => p.accountId !== userId);
       if (partner) {
@@ -154,6 +159,8 @@ export class ChatService {
           const blockInfo = await userorgClient.checkBlockedStatus(userId, partner.accountId);
           isBlocked = blockInfo.isBlocked;
           isBlockedByMe = blockInfo.isBlocked && blockInfo.blockerId === userId;
+
+          isFriend = await userorgClient.checkFriendship(userId, partner.accountId);
         } catch (error) {
           console.error('[ChatService] Error checking blocked status:', error);
         }
@@ -187,6 +194,7 @@ export class ChatService {
       joinRequests,
       isBlocked,
       isBlockedByMe,
+      isFriend,
       pin: myParticipant?.pin || false,
       notify: myParticipant?.notify ?? true,
       myRole: myParticipant?.role,

@@ -27,7 +27,7 @@ model Account {
   isOnline       Boolean   @default(false)
   isVerified     Boolean   @default(false)
   lastSeen       DateTime?
-  role           AccountRole @default(WORKSPACE_MEMBER)
+  role           AccountRole @default(EMPLOYEE)
   maxWorkspaces  Int?
 
   isSuspended    Boolean   @default(false)
@@ -121,11 +121,7 @@ enum AccountRole {
   SUPER_ADMIN
   ADMIN
   WORKSPACE_MANAGER
-  WORKSPACE_OWNER
-  WORKSPACE_ADMIN
   EMPLOYEE
-  WORKSPACE_MEMBER
-  WORKSPACE_GUEST
 }
 
 enum OtpType {

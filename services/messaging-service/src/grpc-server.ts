@@ -5,6 +5,7 @@ import fs from 'fs';
 import { fileURLToPath } from 'url';
 import { chatService } from './services/chat.service.js';
 import { logger } from './lib/logger.js';
+import { prisma } from './lib/prisma.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -226,6 +227,50 @@ export function startGrpcServer() {
         callback(null, { count });
       } catch (err) {
         logger.error({ err }, 'gRPC GetWorkspaceCount failed');
+        callback(err);
+      }
+    },
+    GetAdminStats: async (call: any, callback: any) => {
+      try {
+        const [totalMessages, totalChats, totalTasks, activeTasks, totalWorkspaces, pendingInvitations] = await Promise.all([
+          prisma.message.count(),
+          prisma.chat.count(),
+          prisma.task.count(),
+          prisma.task.count({ where: { status: { not: 'DONE' } } }),
+          prisma.workspace.count(),
+          prisma.workspaceInvite.count({ where: { status: 'PENDING' } }),
+        ]);
+
+        const sevenDaysAgo = new Date();
+        sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
+
+        const messageActivityRaw = await prisma.message.findMany({
+          where: { time: { gte: sevenDaysAgo } },
+          select: { time: true },
+        });
+
+        const activityMap = new Map<string, number>();
+        messageActivityRaw.forEach(m => {
+          const date = new Date(m.time).toISOString().split('T')[0];
+          activityMap.set(date, (activityMap.get(date) || 0) + 1);
+        });
+
+        const messageActivity = Array.from(activityMap.entries())
+          .map(([date, count]) => ({ date, count }))
+          .sort((a, b) => a.date.localeCompare(b.date));
+
+        callback(null, {
+          success: true,
+          totalMessages,
+          totalChats,
+          totalTasks,
+          activeTasks,
+          totalWorkspaces,
+          pendingInvitations,
+          messageActivity,
+        });
+      } catch (err) {
+        logger.error({ err }, 'gRPC GetAdminStats failed');
         callback(err);
       }
     }
