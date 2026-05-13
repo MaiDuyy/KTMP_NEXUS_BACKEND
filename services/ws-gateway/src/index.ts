@@ -1077,38 +1077,6 @@ function subscribeToNatsEvents() {
     }
   })();
 
-  // Channel Member Added
-  const channelMemberAddedSub = addSub(natsConnection.subscribe(EventSubjects.CHANNEL_MEMBER_ADDED));
-  (async () => {
-    for await (const msg of channelMemberAddedSub) {
-      const event = jsonCodec.decode(msg.data) as any;
-      const { channelId, userId, addedBy, memberIds } = event.payload;
-      console.log(`[WS] User ${userId} added to channel ${channelId}`);
-      if (Array.isArray(memberIds)) {
-        for (const uid of memberIds) {
-          io.to(`user:${uid}`).emit('channel:member_updated', { channelId, userId, action: 'added' });
-        }
-      }
-      io.to(`user:${userId}`).emit('channel:member_updated', { channelId, userId, action: 'added' });
-    }
-  })();
-
-  // Channel Member Removed
-  const channelMemberRemovedSub = addSub(natsConnection.subscribe(EventSubjects.CHANNEL_MEMBER_REMOVED));
-  (async () => {
-    for await (const msg of channelMemberRemovedSub) {
-      const event = jsonCodec.decode(msg.data) as any;
-      const { channelId, userId, removedBy, memberIds } = event.payload;
-      console.log(`[WS] User ${userId} removed from channel ${channelId}`);
-      if (Array.isArray(memberIds)) {
-        for (const uid of memberIds) {
-          io.to(`user:${uid}`).emit('channel:member_removed', { channelId, userId });
-        }
-      }
-      io.to(`user:${userId}`).emit('channel:member_removed', { channelId, userId });
-    }
-  })();
-
   // Task Created
   const taskCreatedSub = addSub(natsConnection.subscribe(EventSubjects.TASK_CREATED));
   (async () => {
