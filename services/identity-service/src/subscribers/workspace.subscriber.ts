@@ -30,11 +30,11 @@ export function startWorkspaceSubscriber() {
           continue;
         }
 
-        // Assign WORKSPACE_OWNER role in RBAC schema for this workspace
-        const role = await rbacPrisma.role.findUnique({ where: { name: 'WORKSPACE_OWNER' } });
+        // Assign WORKSPACE_MANAGER role in RBAC schema for this workspace
+        const role = await rbacPrisma.role.findUnique({ where: { name: 'WORKSPACE_MANAGER' } });
         
         if (!role) {
-          logger.error({ roleName: 'WORKSPACE_OWNER' }, '[WorkspaceSubscriber] RBAC role not found');
+          logger.error({ roleName: 'WORKSPACE_MANAGER' }, '[WorkspaceSubscriber] RBAC role not found');
           continue;
         }
 
@@ -47,7 +47,7 @@ export function startWorkspaceSubscriber() {
           },
         });
 
-        logger.info({ userId, workspaceId }, '[WorkspaceSubscriber] Assigned WORKSPACE_OWNER role');
+        logger.info({ userId, workspaceId }, '[WorkspaceSubscriber] Assigned WORKSPACE_MANAGER role');
       } catch (err) {
         logger.error({ err }, '[WorkspaceSubscriber] Failed to process workspace creation');
       }

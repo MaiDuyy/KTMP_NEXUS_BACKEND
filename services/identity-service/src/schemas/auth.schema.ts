@@ -10,7 +10,7 @@ export const signUpSchema = z.object({
   gender: z.enum(['male', 'female', 'other'], { errorMap: () => ({ message: 'Giới tính không hợp lệ' }) }),
   birthDate: z.string().optional(),
   location: z.string().max(255).optional(),
-  role: z.enum(['SUPER_ADMIN', 'ADMIN', 'WORKSPACE_OWNER', 'WORKSPACE_ADMIN', 'WORKSPACE_MEMBER', 'WORKSPACE_GUEST']).optional(),
+  role: z.enum(['SUPER_ADMIN', 'ADMIN', 'WORKSPACE_MANAGER', 'EMPLOYEE']).optional(),
 });
 
 export const signInSchema = z.object({

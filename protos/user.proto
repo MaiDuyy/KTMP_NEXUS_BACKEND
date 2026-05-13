@@ -8,6 +8,7 @@ service UserService {
   rpc GetUserByEmail (GetUserByEmailRequest) returns (UserProfile);
   rpc GetAllUserIds (Empty) returns (GetAllUserIdsResponse);
   rpc ValidateWorkspaceQuota (QuotaRequest) returns (QuotaResponse);
+  rpc CheckFriendship (CheckFriendshipRequest) returns (CheckFriendshipResponse);
 }
 
 message QuotaRequest {
@@ -57,4 +58,13 @@ message CheckBlockedRequest {
 message CheckBlockedResponse {
   bool isBlocked = 1;
   string blockerId = 2;
+}
+
+message CheckFriendshipRequest {
+  string user1Id = 1;
+  string user2Id = 2;
+}
+
+message CheckFriendshipResponse {
+  bool isFriend = 1;
 }

@@ -527,6 +527,17 @@ router.all(/^\/categories/, (req, res) => {
   forwardRequest(req, res, SERVICES.MESSAGING, `${req.path}${query}`);
 });
 
+// Organization Routes -> IDENTITY
+router.all(/^\/departments/, (req, res) => {
+  const query = Object.keys(req.query).length ? `?${new URLSearchParams(req.query as any).toString()}` : '';
+  forwardRequest(req, res, SERVICES.IDENTITY, `${req.path}${query}`);
+});
+
+router.all(/^\/groups/, (req, res) => {
+  const query = Object.keys(req.query).length ? `?${new URLSearchParams(req.query as any).toString()}` : '';
+  forwardRequest(req, res, SERVICES.IDENTITY, `${req.path}${query}`);
+});
+
 // Workspace Member Management
 router.get('/workspaces/:id/members', (req, res) => {
   const query = new URLSearchParams(req.query as any).toString();

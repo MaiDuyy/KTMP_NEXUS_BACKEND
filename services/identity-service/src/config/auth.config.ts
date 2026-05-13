@@ -19,7 +19,7 @@ export const authConfig = {
   accessTokenExpiry: process.env.ACCESS_TOKEN_EXPIRY || "15m",
   refreshTokenExpiry: "7d",
   refreshTokenTtlMs: 7 * 24 * 60 * 60 * 1000,
-  roles: ["USER", "ADMIN", "MODERATOR"] as const,
+  roles: ["SUPER_ADMIN", "ADMIN", "WORKSPACE_MANAGER", "EMPLOYEE"] as const,
   cookie: {
     accessTokenName: "accessToken",
     refreshTokenName: "refreshToken",

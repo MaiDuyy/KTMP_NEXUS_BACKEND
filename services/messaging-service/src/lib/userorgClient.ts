@@ -113,6 +113,22 @@ export const userorgClient = {
     },
     
     /**
+     * Kiểm tra tình trạng bạn bè giữa 2 user qua gRPC
+     */
+    checkFriendship: async (user1Id: string, user2Id: string): Promise<boolean> => {
+        return new Promise((resolve) => {
+            client.CheckFriendship({ user1Id, user2Id }, (err: any, response: any) => {
+                if (err) {
+                    logger.error({ err }, '[UserOrgClient] gRPC checkFriendship failed');
+                    resolve(false);
+                    return;
+                }
+                resolve(!!response.isFriend);
+            });
+        });
+    },
+    
+    /**
      * Tìm user theo email qua gRPC
      */
     getUserByEmail: async (email: string): Promise<any | null> => {
