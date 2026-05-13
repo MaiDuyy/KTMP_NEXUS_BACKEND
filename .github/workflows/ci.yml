@@ -33,7 +33,7 @@ jobs:
         run: npm install --legacy-peer-deps --ignore-scripts
       
       - name: Build Docker images
-        run: docker-compose build --parallel
+        run: docker compose build --parallel
 
   test:
     runs-on: ubuntu-latest
