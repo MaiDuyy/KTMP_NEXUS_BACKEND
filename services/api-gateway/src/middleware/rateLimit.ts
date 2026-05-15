@@ -16,11 +16,11 @@ declare module 'express' {
 
 /**
  * Cấu hình giới hạn request mặc định (Default rate limiter)
- * Quy định: 100 requests mỗi 15 phút cho một địa chỉ IP
+ * Quy định: 1000 requests mỗi 15 phút cho một địa chỉ IP
  */
 export const rateLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
-  max: 100,
+  max: 1000,
   standardHeaders: true,
   legacyHeaders: false,
   message: {
