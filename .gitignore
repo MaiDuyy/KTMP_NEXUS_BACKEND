@@ -3,7 +3,7 @@ node_modules
 .env
 .env.docker
 dist
-# .github/workflows/deploy-aws.yml
+.github/workflows/deploy-aws.yml
 docs
 /src
 !packages/shared/src
