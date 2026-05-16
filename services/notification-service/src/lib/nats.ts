@@ -20,6 +20,7 @@ export const EventSubjects = {
   FRIEND_USER_UNBLOCKED: 'friend.user.unblocked',
   
   // Message events
+  MESSAGE_CREATED: 'message.created',
   MESSAGE_SENT: 'message.sent',
   MESSAGE_REACTION: 'message.reaction',
   USER_MENTIONED: 'user.mentioned',

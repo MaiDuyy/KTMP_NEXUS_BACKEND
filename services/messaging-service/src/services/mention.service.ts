@@ -32,7 +32,13 @@ export class MentionService {
     return mentions;
   }
 
-  async processMentions(messageId: string, content: string, chatId: string, senderId: string) {
+  async processMentions(
+    messageId: string, 
+    content: string, 
+    chatId: string, 
+    senderId: string,
+    metadata?: { senderName?: string, chatName?: string }
+  ) {
     const parsedMentions = this.extractMentions(content);
     if (parsedMentions.length === 0) return [];
 
@@ -46,16 +52,46 @@ export class MentionService {
     );
 
     const userMentions = mentionRecords.filter((m) => m.targetType === 'USER' && m.targetId);
+    const notifiedUserIds = new Set<string>();
+
     for (const mention of userMentions) {
-      await this.notifyMentionedUser(mention.targetId!, { messageId, chatId, mentionedBy: senderId, mentionType: 'USER' });
+      if (mention.targetId) {
+        await this.notifyMentionedUser(mention.targetId, { 
+          messageId, 
+          chatId, 
+          mentionedBy: senderId, 
+          mentionType: 'USER',
+          senderName: metadata?.senderName,
+          chatName: metadata?.chatName
+        });
+        notifiedUserIds.add(mention.targetId);
+      }
     }
 
     const hasBroadcast = mentionRecords.some((m) => m.targetType === 'HERE' || m.targetType === 'CHANNEL');
     if (hasBroadcast) {
-      await publishEvent('mention.broadcast', {
-        messageId, chatId, mentionedBy: senderId,
-        types: mentionRecords.filter((m) => m.targetType !== 'USER').map((m) => m.targetType),
+      // Fetch participants to notify
+      const participants = await prisma.chatParticipant.findMany({
+        where: { chatId },
+        select: { accountId: true }
       });
+      
+      // Filter out: sender AND users who already got a direct mention notification
+      const participantIds = participants
+        .map(p => p.accountId)
+        .filter(id => id !== senderId && !notifiedUserIds.has(id));
+
+      if (participantIds.length > 0) {
+        await publishEvent(EventSubjects.MENTION_BROADCAST, {
+          messageId, 
+          chatId, 
+          mentionedBy: senderId,
+          participantIds,
+          senderName: metadata?.senderName,
+          chatName: metadata?.chatName,
+          types: mentionRecords.filter((m) => m.targetType !== 'USER').map((m) => m.targetType),
+        });
+      }
     }
 
     logger.info({ messageId, mentionCount: mentionRecords.length }, 'Mentions processed');
@@ -64,7 +100,14 @@ export class MentionService {
 
   private async notifyMentionedUser(
     userId: string,
-    payload: { messageId: string; chatId: string; mentionedBy: string; mentionType: MentionTargetType }
+    payload: { 
+      messageId: string; 
+      chatId: string; 
+      mentionedBy: string; 
+      mentionType: MentionTargetType;
+      senderName?: string;
+      chatName?: string;
+    }
   ) {
     await publishEvent(EventSubjects.USER_MENTIONED, { userId, ...payload, timestamp: new Date().toISOString() });
   }

@@ -14,10 +14,12 @@ interface FriendRequestEvent {
 
 interface MessageEvent {
   chatId: string;
+  workspaceId?: string | null;
   senderId: string;
-  senderName: string;
-  receiverIds: string[];
-  preview: string;
+  senderName?: string;
+  sender?: { name: string };
+  participantIds: string[];
+  content?: string;
 }
 
 interface GroupInviteEvent {
@@ -59,18 +61,34 @@ export function setupSubscribers() {
     });
   });
 
-  // New message (for offline users)
-  subscribe<MessageEvent>(EventSubjects.MESSAGE_SENT, async (data) => {
-    for (const receiverId of data.receiverIds) {
-      if (receiverId !== data.senderId) {
-        await notificationService.create({
-          userId: receiverId,
-          type: 'NEW_MESSAGE',
-          title: data.senderName,
-          body: data.preview.substring(0, 100),
-          data: { chatId: data.chatId, senderId: data.senderId },
-        });
+  // New message (using unified MESSAGE_CREATED)
+  subscribe<any>(EventSubjects.MESSAGE_CREATED, async (data) => {
+    const senderName = data.senderName || data.sender?.name || 'Ai đó';
+    const preview = data.content || 'Đã gửi một tin nhắn';
+    const participantIds = data.participantIds || [];
+    const mentionedUserIds = data.mentionedUserIds || [];
+
+    for (const receiverId of participantIds) {
+      // Skip if it's the sender
+      if (receiverId === data.senderId) continue;
+
+      // Skip if the user was already mentioned (they will get a MENTION notification instead)
+      if (mentionedUserIds.includes(receiverId)) {
+        logger.debug({ userId: receiverId, messageId: data.id }, 'Skipping NEW_MESSAGE notification for mentioned user');
+        continue;
       }
+
+      await notificationService.create({
+        userId: receiverId,
+        type: 'NEW_MESSAGE',
+        title: senderName,
+        body: preview.substring(0, 100),
+        data: { 
+          chatId: data.chatId, 
+          senderId: data.senderId,
+          workspaceId: data.workspaceId
+        },
+      });
     }
   });
 
@@ -99,9 +117,23 @@ export function setupSubscribers() {
 
   // Broadcast mention (@here/@channel)
   subscribe<any>(EventSubjects.MENTION_BROADCAST, async (data) => {
-    const { chatId, chatName, senderName, senderId, types } = data;
-    // Broadcast handling logic here
-    logger.info({ chatId, types }, 'Broadcast mention received');
+    const { chatId, chatName, senderName, senderId, types, participantIds } = data;
+    
+    if (!participantIds || !Array.isArray(participantIds)) return;
+
+    const mentionTypeLabel = types.includes('CHANNEL') ? '@channel' : '@here';
+
+    for (const userId of participantIds) {
+      await notificationService.create({
+        userId,
+        type: 'MENTION',
+        title: chatName ? `${mentionTypeLabel} trong ${chatName}` : `${mentionTypeLabel}`,
+        body: `${senderName || 'Ai đó'} đã nhắc đến mọi người`,
+        data: { chatId, senderId, broadcast: true },
+      });
+    }
+    
+    logger.info({ chatId, types, count: participantIds.length }, 'Broadcast mention notifications created');
   });
 
   // Workspace invite
