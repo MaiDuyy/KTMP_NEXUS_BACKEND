@@ -9,6 +9,37 @@ import { messageService } from './message.service.js';
 import { userorgClient } from '../lib/userorgClient.js';
 export class ChatService {
   /**
+   * Lấy tổng số tin nhắn chưa đọc theo từng workspace
+   */
+  async getUnreadCountsPerWorkspace(userId: string) {
+    const chats = await prisma.chat.findMany({
+      where: {
+        participants: {
+          some: { accountId: userId, hidden: false }
+        }
+      },
+      select: { id: true, workspaceId: true }
+    });
+
+    if (chats.length === 0) return {};
+
+    const chatIds = chats.map(c => c.id);
+    const summaries = await messageService.getChatSummary(userId, chatIds);
+    
+    const workspaceCounts: Record<string, number> = {};
+    
+    summaries.forEach((s: any) => {
+      const chat = chats.find(c => c.id === s.chatId);
+      if (chat && s.unreadCount > 0) {
+        const wsKey = chat.workspaceId || 'global';
+        workspaceCounts[wsKey] = (workspaceCounts[wsKey] || 0) + s.unreadCount;
+      }
+    });
+
+    return workspaceCounts;
+  }
+
+  /**
    * Lấy danh sách chat của user
    */
   async getChats(userId: string, type?: 'all' | 'private' | 'group', workspaceId?: string) {
@@ -88,6 +119,7 @@ export class ChatService {
         pin: myParticipant?.pin || false,
         notify: myParticipant?.notify ?? true,
         readed: myParticipant?.readed ?? false,
+        isReadOnly: chat.isReadOnly,
         lastMessage: summary?.lastMessage || null,
         unreadCount: summary?.unreadCount || 0,
         participantIds: otherParticipants.map((p) => p.accountId),
@@ -140,7 +172,17 @@ export class ChatService {
     // Check user is participant
     const isParticipant = chat.participants.some((p) => p.accountId === userId);
     if (!isParticipant) {
-      throw new Error('Bạn không có quyền xem chat này!');
+      // Fail-safe for public workspace channels: allow workspace members to view
+      if (chat.workspaceId && chat.joinPolicy === 'PUBLIC') {
+        const workspaceMember = await prisma.workspaceMember.findUnique({
+          where: { workspaceId_userId: { workspaceId: chat.workspaceId, userId } }
+        });
+        if (!workspaceMember) {
+          throw new Error('Bạn không có quyền xem chat này!');
+        }
+      } else {
+        throw new Error('Bạn không có quyền xem chat này!');
+      }
     }
 
     const myParticipant = chat.participants.find((p) => p.accountId === userId);
@@ -191,6 +233,7 @@ export class ChatService {
       avatar: chat.avatar,
       isGroup: chat.isGroup,
       joinPolicy: chat.joinPolicy,
+      isReadOnly: chat.isReadOnly,
       joinRequests,
       isBlocked,
       isBlockedByMe,
@@ -212,6 +255,7 @@ export class ChatService {
       }),
       createdAt: chat.createdAt,
       updatedAt: chat.updatedAt,
+      pinnedMessages: chat.pinnedMessages,
     };
   }
 
@@ -374,6 +418,15 @@ export class ChatService {
       },
     });
 
+    // Publish event so the partner sees the new chat in real-time
+    await publishEvent(EventSubjects.GROUP_CREATED, {
+      id: newChat.id,
+      isGroup: false,
+      workspaceId: workspaceId || null,
+      memberIds: [userId, partnerId],
+      createdAt: newChat.createdAt.toISOString(),
+    });
+
     return {
       chat: {
         id: newChat.id,
@@ -384,7 +437,7 @@ export class ChatService {
     };
   }
 
-  async updateChat(chatId: string, userId: string, data: { name?: string; avatar?: string; joinPolicy?: any }) {
+  async updateChat(chatId: string, userId: string, data: { name?: string; avatar?: string; joinPolicy?: any; isReadOnly?: boolean }) {
     const chat = await prisma.chat.findUnique({
       where: { id: chatId },
       include: { participants: true },
@@ -413,6 +466,9 @@ export class ChatService {
         throw new Error('Chỉ nhóm trưởng mới có thể thay đổi chế độ tham gia!');
       }
       updateData.joinPolicy = data.joinPolicy;
+    }
+    if (data.isReadOnly !== undefined) {
+      updateData.isReadOnly = data.isReadOnly;
     }
 
     const updatedChat = await prisma.chat.update({
@@ -963,10 +1019,16 @@ export class ChatService {
   async getChatMetadataInternal(chatId: string) {
     const chat = await prisma.chat.findUnique({
       where: { id: chatId },
-      include: {
-        participants: {
-          select: { accountId: true }
-        }
+      select: { 
+        id: true,
+        name: true,
+        avatar: true,
+        isGroup: true,
+        workspaceId: true,
+        updatedAt: true,
+        createdAt: true,
+        participants: { select: { accountId: true } },
+        pinnedMessages: true
       }
     });
     if (!chat) return null;

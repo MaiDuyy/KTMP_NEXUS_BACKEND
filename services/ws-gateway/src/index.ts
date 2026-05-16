@@ -137,6 +137,7 @@ const EventSubjects = {
 interface ActiveCall {
   callerId: string;
   callerName: string;
+  callerAvatar?: string;
   chatId: string;
   isVideo: boolean;
   callType: 'private' | 'group';
@@ -351,36 +352,31 @@ function subscribeToNatsEvents() {
     return sub;
   };
 
-  // Message Created -> Fan-out to each participant's personal room
   const msgCreatedSub = addSub(natsConnection.subscribe(EventSubjects.MESSAGE_CREATED));
   (async () => {
     for await (const msg of msgCreatedSub) {
       try {
         const event = jsonCodec.decode(msg.data) as any;
-        const { chatId, ...messageData } = event.payload;
+        const { chatId, workspaceId, participantIds, ...messageData } = event.payload;
 
-        // UNIFIED: Now points to messaging-service instead of group-service
-        const messagingServiceUrl = process.env.MESSAGING_SERVICE_URL || 'http://localhost:3020';
-        const response = await fetch(`${messagingServiceUrl}/chats/internal/${chatId}/participant-ids`, {
-          headers: {
-            'x-user-id': 'ws-gateway',
-            'x-user-role': 'SYSTEM',
-          },
-        });
-        if (response.ok) {
-          const data = await response.json() as any;
-          if (Array.isArray(data?.participantIds)) {
-            for (const uid of data.participantIds) {
-              io.to(`user:${uid}`).emit('message:new', { message: messageData, chatId });
-            }
+        if (Array.isArray(participantIds)) {
+          for (const uid of participantIds) {
+            io.to(`user:${uid}`).emit('message:new', { 
+              message: messageData, 
+              chatId,
+              workspaceId 
+            });
           }
         } else {
-          // Fallback: broadcast to chat room if group-service is unavailable
-          io.to(`chat:${chatId}`).emit('message:new', { message: messageData, chatId });
+          // Fallback if participantIds is missing (though it shouldn't be now)
+          io.to(`chat:${chatId}`).emit('message:new', { 
+            message: messageData, 
+            chatId,
+            workspaceId 
+          });
         }
       } catch (err) {
-        // Fallback: broadcast to chat room if group-service is unreachable
-        console.warn('[WS] Fan-out failed, falling back to room broadcast:', (err as any).message);
+        console.error('[WS] Error processing MESSAGE_CREATED:', (err as any).message);
       }
     }
   })();
@@ -401,8 +397,8 @@ function subscribeToNatsEvents() {
   (async () => {
     for await (const msg of msgReactSub) {
       const event = jsonCodec.decode(msg.data) as any;
-      const { chatId, ...reactionData } = event.payload;
-      io.to(`chat:${chatId}`).emit('message:reacted', { chatId, ...reactionData });
+      const { chatId, workspaceId, ...reactionData } = event.payload;
+      io.to(`chat:${chatId}`).emit('message:reacted', { chatId, workspaceId, ...reactionData });
     }
   })();
 
@@ -411,8 +407,8 @@ function subscribeToNatsEvents() {
   (async () => {
     for await (const msg of msgDeletedSub) {
       const event = jsonCodec.decode(msg.data) as any;
-      const { chatId, ...deleteData } = event.payload;
-      io.to(`chat:${chatId}`).emit('message:recalled', { chatId, ...deleteData });
+      const { chatId, workspaceId, ...deleteData } = event.payload;
+      io.to(`chat:${chatId}`).emit('message:recalled', { chatId, workspaceId, ...deleteData });
     }
   })();
 
@@ -421,8 +417,8 @@ function subscribeToNatsEvents() {
   (async () => {
     for await (const msg of msgPinnedSub) {
       const event = jsonCodec.decode(msg.data) as any;
-      const { chatId, messageId, pin, userId, userName } = event.payload;
-      io.to(`chat:${chatId}`).emit('message:pinned', { chatId, messageId, pin, userId, userName });
+      const { chatId, workspaceId, messageId, pin, userId, userName } = event.payload;
+      io.to(`chat:${chatId}`).emit('message:pinned', { chatId, workspaceId, messageId, pin, userId, userName });
     }
   })();
 
@@ -439,16 +435,6 @@ function subscribeToNatsEvents() {
 
 
 
-  // Mention Broadcast (@here, @channel)
-  const mentionBroadcastSub = addSub(natsConnection.subscribe('mention.broadcast'));
-  (async () => {
-    for await (const msg of mentionBroadcastSub) {
-      const event = jsonCodec.decode(msg.data) as any;
-      const { chatId, messageId, mentionedBy, types } = event.payload;
-      io.to(`chat:${chatId}`).emit('mention:broadcast', { chatId, messageId, mentionedBy, types });
-    }
-  })();
-
   // Message Edited
   const msgEditedSub = addSub(natsConnection.subscribe('message.edited'));
   (async () => {
@@ -456,6 +442,28 @@ function subscribeToNatsEvents() {
       const event = jsonCodec.decode(msg.data) as any;
       const { chatId, messageId, content, editedAt } = event.payload;
       io.to(`chat:${chatId}`).emit('message:edited', { chatId, messageId, content, editedAt });
+    }
+  })();
+
+  // Group Created
+  const groupCreatedSub = addSub(natsConnection.subscribe(EventSubjects.GROUP_CREATED));
+  (async () => {
+    for await (const msg of groupCreatedSub) {
+      try {
+        const event = jsonCodec.decode(msg.data) as any;
+        const { id, memberIds, ...chatData } = event.payload;
+        console.log(`[WS] New group created: ${id}. Notifying members.`);
+        if (Array.isArray(memberIds)) {
+          for (const uid of memberIds) {
+            io.to(`user:${uid}`).emit('chat:new', { 
+              chatId: id, 
+              ...chatData 
+            });
+          }
+        }
+      } catch (err) {
+        console.error('[WS] Error processing GROUP_CREATED:', err);
+      }
     }
   })();
 
@@ -833,6 +841,70 @@ function subscribeToNatsEvents() {
     }
   })();
 
+  // Notification Created
+  const notificationCreatedSub = addSub(natsConnection.subscribe(EventSubjects.NOTIFICATION_CREATED));
+  (async () => {
+    for await (const msg of notificationCreatedSub) {
+      try {
+        const event = jsonCodec.decode(msg.data) as any;
+        const { userId, ...notificationData } = event.payload;
+        console.log(`[WS] Sending notification to user: ${userId}`);
+        io.to(`user:${userId}`).emit('notification:new', notificationData);
+      } catch (err) {
+        console.error('[WS] Error processing NOTIFICATION_CREATED:', err);
+      }
+    }
+  })();
+
+  // User Mentioned (Direct)
+  const userMentionedSub = addSub(natsConnection.subscribe(EventSubjects.USER_MENTIONED));
+  (async () => {
+    for await (const msg of userMentionedSub) {
+      try {
+        const event = jsonCodec.decode(msg.data) as any;
+        const { userId, ...mentionData } = event.payload;
+        console.log(`[WS] Sending direct mention to user: ${userId}`);
+        io.to(`user:${userId}`).emit('mention:new', mentionData);
+      } catch (err) {
+        console.error('[WS] Error processing USER_MENTIONED:', err);
+      }
+    }
+  })();
+
+  // Mention Broadcast (@here/@channel)
+  const mentionBroadcastSub = addSub(natsConnection.subscribe(EventSubjects.MENTION_BROADCAST));
+  (async () => {
+    for await (const msg of mentionBroadcastSub) {
+      try {
+        const event = jsonCodec.decode(msg.data) as any;
+        const { participantIds, ...mentionData } = event.payload;
+        
+        if (participantIds && Array.isArray(participantIds)) {
+          console.log(`[WS] Sending mention broadcast to ${participantIds.length} users`);
+          for (const userId of participantIds) {
+            io.to(`user:${userId}`).emit('mention:broadcast', mentionData);
+          }
+        }
+      } catch (err) {
+        console.error('[WS] Error processing MENTION_BROADCAST:', err);
+      }
+    }
+  })();
+
+  // System Broadcast
+  const systemBroadcastSub = addSub(natsConnection.subscribe(EventSubjects.SYSTEM_BROADCAST));
+  (async () => {
+    for await (const msg of systemBroadcastSub) {
+      try {
+        const event = jsonCodec.decode(msg.data) as any;
+        console.log(`[WS] Broadcasting system message: ${event.payload?.title}`);
+        io.emit('system:broadcast', event.payload);
+      } catch (err) {
+        console.error('[WS] Error processing SYSTEM_BROADCAST:', err);
+      }
+    }
+  })();
+
   // Workspace Member Role Updated
   const workspaceMemberRoleSub = addSub(natsConnection.subscribe(EventSubjects.WORKSPACE_MEMBER_ROLE_UPDATED));
   (async () => {
@@ -940,19 +1012,19 @@ function subscribeToNatsEvents() {
   })();
 
   // Group Created
-  const groupCreatedSub = addSub(natsConnection.subscribe(EventSubjects.GROUP_CREATED));
-  (async () => {
-    for await (const msg of groupCreatedSub) {
-      const event = jsonCodec.decode(msg.data) as any;
-      const { id, memberIds } = event.payload;
-      console.log(`[WS] Group ${id} created. Notifying members.`);
-      if (Array.isArray(memberIds)) {
-        for (const uid of memberIds) {
-          io.to(`user:${uid}`).emit('chat:new', { chatId: id });
-        }
-      }
-    }
-  })();
+  // const groupCreatedSub = addSub(natsConnection.subscribe(EventSubjects.GROUP_CREATED));
+  // (async () => {
+  //   for await (const msg of groupCreatedSub) {
+  //     const event = jsonCodec.decode(msg.data) as any;
+  //     const { id, memberIds } = event.payload;
+  //     console.log(`[WS] Group ${id} created. Notifying members.`);
+  //     if (Array.isArray(memberIds)) {
+  //       for (const uid of memberIds) {
+  //         io.to(`user:${uid}`).emit('chat:new', { chatId: id });
+  //       }
+  //     }
+  //   }
+  // })();
 
   // Group Updated
   const groupUpdatedSub = addSub(natsConnection.subscribe(EventSubjects.GROUP_UPDATED));
@@ -1232,17 +1304,6 @@ function subscribeToNatsEvents() {
     }
   })();
 
-  // User Mentioned
-  const userMentionedSub = addSub(natsConnection.subscribe(EventSubjects.USER_MENTIONED));
-  (async () => {
-    for await (const msg of userMentionedSub) {
-      const event = jsonCodec.decode(msg.data) as any;
-      const { userId, chatId, messageId, mentionerName } = event.payload;
-      console.log(`[WS] User ${userId} mentioned in chat ${chatId}`);
-      io.to(`user:${userId}`).emit('message:mention', { chatId, messageId, mentionerName });
-    }
-  })();
-
   // Thread Reply Created
   const threadReplyCreatedSub = addSub(natsConnection.subscribe(EventSubjects.THREAD_REPLY_CREATED));
   (async () => {
@@ -1304,16 +1365,7 @@ function subscribeToNatsEvents() {
     }
   })();
   
-  // System Broadcast
-  const systemBroadcastSub = addSub(natsConnection.subscribe(EventSubjects.SYSTEM_BROADCAST));
-  (async () => {
-    for await (const msg of systemBroadcastSub) {
-      const event = jsonCodec.decode(msg.data) as any;
-      const { title, body, type, data } = event.payload;
-      console.log(`[WS] System broadcast: ${title}`);
-      io.emit('system:broadcast', { title, body, type, data, timestamp: event.timestamp });
-    }
-  })();
+
 
 
   console.log('[WS Gateway] Subscribed to NATS events (including all friend actions)');
@@ -1501,12 +1553,11 @@ io.on('connection', async (socket: AuthenticatedSocket) => {
     console.log(`[WS] ${userName} marked ${chatId} as read (Async)`);
   });
 
-  // React to message
+  // React to message (Broadcast handled via NATS from messaging-service)
   socket.on('message:react', async (data) => {
-    const { messageId, chatId, emoji } = data;
-    io.to(`chat:${chatId}`).emit('message:reacted', {
-      messageId, chatId, userId, userName, emoji, action: 'added',
-    });
+    // Just a placeholder to avoid client errors, but we don't emit directly
+    // because we don't know if the action was 'added' or 'removed' yet.
+    // The real broadcast comes from the messaging-service via NATS.
   });
 
   // Pin message (Handled via NATS from messaging-service)
@@ -1517,7 +1568,7 @@ io.on('connection', async (socket: AuthenticatedSocket) => {
 
   // ─── Phase 1: CALL REQUEST (Caller initiates) ───
   socket.on('call:request', (data) => {
-    const { chatId, targetUserId, isVideo = true, callType = 'private' } = data;
+    const { chatId, targetUserId, isVideo = true, callType = 'private', callerAvatar } = data;
 
     console.log(`[Call] ${userName} requesting call to ${targetUserId || 'group'} in chat ${chatId}`);
 
@@ -1527,15 +1578,10 @@ io.on('connection', async (socket: AuthenticatedSocket) => {
       return;
     }
 
-    // For private calls: check if target user is online
+    // For private calls: Ghost Ringing support - allow call even if offline
     if (callType === 'private' && targetUserId) {
-      if (!onlineUsers.has(targetUserId)) {
-        socket.emit('call:error', { reason: 'callee_offline', message: 'Người nhận hiện không trực tuyến.' });
-        return;
-      }
-
-      // Check if target user is already in a call (busy)
-      if (userInCall.has(targetUserId)) {
+      // We still check if they are busy if they ARE online
+      if (onlineUsers.has(targetUserId) && userInCall.has(targetUserId)) {
         socket.emit('call:busy', { targetUserId, message: 'Người nhận đang trong cuộc gọi khác.' });
         return;
       }
@@ -1548,6 +1594,7 @@ io.on('connection', async (socket: AuthenticatedSocket) => {
     activeCalls.set(roomName, {
       callerId: userId,
       callerName: userName,
+      callerAvatar: callerAvatar,
       calleeId: callType === 'private' ? targetUserId : undefined,
       chatId,
       participants: new Set([userId]),
@@ -1567,6 +1614,7 @@ io.on('connection', async (socket: AuthenticatedSocket) => {
         chatId,
         callerId: userId,
         callerName: userName,
+        callerAvatar: callerAvatar,
         isVideo,
         callType,
         timestamp: new Date().toISOString(),
@@ -1583,6 +1631,7 @@ io.on('connection', async (socket: AuthenticatedSocket) => {
                 chatId,
                 callerId: userId,
                 callerName: userName,
+                callerAvatar: callerAvatar,
                 isVideo,
                 callType,
                 timestamp: new Date().toISOString(),
@@ -1603,6 +1652,7 @@ io.on('connection', async (socket: AuthenticatedSocket) => {
       isVideo,
       callerId: userId,
       callerName: userName,
+      callerAvatar: callerAvatar,
       callType,
     });
 
@@ -1902,7 +1952,7 @@ io.on('connection', async (socket: AuthenticatedSocket) => {
     cleanupCall(roomName);
   });
 
-  // ─── CHECK ACTIVE CALL ───
+  // ─── CHECK ACTIVE CALL (Chat specific) ───
   socket.on('call:check', (data) => {
     const { chatId } = data;
     // Find any active call in this chat
@@ -1922,6 +1972,45 @@ io.on('connection', async (socket: AuthenticatedSocket) => {
       });
     } else {
       socket.emit('call:active_status', { chatId, isActive: false });
+    }
+  });
+
+  // ─── CHECK ACTIVE CALL (Global Sync for "Golden 30s") ───
+  socket.on('call:check_active', () => {
+    console.log(`[Call] ⚡ ${userName} (${userId}) requested global active call sync`);
+    
+    // Find if there's any active call for this user
+    // 1. Private call where user is the callee and it's still ringing
+    // 2. Any call the user is already part of (participants set) - for rejoin after refresh
+    const activeEntry = Array.from(activeCalls.entries()).find(([_, call]) => {
+      if (call.status === 'ended') return false;
+      
+      // Case 1: Private call where this user is the callee (recipient)
+      if (call.callType === 'private' && call.calleeId === userId) return true;
+      
+      // Case 2: This user is already in the call (handled for re-joining after refresh)
+      if (call.participants.has(userId)) return true;
+      
+      return false;
+    });
+
+    if (activeEntry) {
+      const [roomName, call] = activeEntry;
+      console.log(`[Call] ✅ Found active session for ${userName} in room ${roomName}. Sending sync signal...`);
+      
+      socket.emit('call:active_sync', {
+        roomName,
+        chatId: call.chatId,
+        callerId: call.callerId,
+        callerName: call.callerName,
+        callerAvatar: call.callerAvatar,
+        isVideo: call.isVideo,
+        callType: call.callType,
+        status: call.status,
+        participantCount: call.participants.size
+      });
+    } else {
+      console.log(`[Call] ℹ️ No active call session found for ${userName}.`);
     }
   });
 

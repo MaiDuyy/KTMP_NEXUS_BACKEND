@@ -88,23 +88,63 @@ export class MessageService {
     const { content, type = 'text', replyToId, fileName, fileSize, fileType } = input;
 
     // REFACTORED: Direct Prisma query instead of HTTP to group-service
+    let workspaceId: string | null = null;
+    let participantIds: string[] = [];
+    let chatMetadata: any = null;
+
     if (type !== 'system' && chatId) {
-      const chatMetadata = await prisma.chat.findUnique({
+      chatMetadata = await prisma.chat.findUnique({
         where: { id: chatId },
         select: {
           id: true,
           isGroup: true,
-          participants: { select: { accountId: true } },
+          name: true,
+          workspaceId: true,
+          isReadOnly: true,
+          participants: { select: { accountId: true, role: true } },
         },
       });
 
-      if (chatMetadata && !chatMetadata.isGroup) {
-        const partner = chatMetadata.participants.find((p) => p.accountId !== senderId);
+      if (chatMetadata) {
+        workspaceId = chatMetadata.workspaceId;
+        participantIds = chatMetadata.participants.map((p: any) => p.accountId);
 
-        if (partner) {
-          const blockInfo = await userorgClient.checkBlockedStatus(senderId, partner.accountId);
-          if (blockInfo.isBlocked) {
-            throw new Error('Bạn không thể gửi tin nhắn cho người này vì đã bị chặn hoặc bạn đã chặn người này!');
+        // Check Read-only permission
+        if (chatMetadata.isReadOnly) {
+          const userParticipant = chatMetadata.participants.find((p: any) => p.accountId === senderId);
+          const privilegedRoles = ['CHANNEL_OWNER', 'CHANNEL_MODERATOR', 'WORKSPACE_ADMIN', 'WORKSPACE_OWNER'];
+          
+          if (!userParticipant || !privilegedRoles.includes(userParticipant.role)) {
+            // Check if user is Workspace Admin/Owner (might not be in participants list but has access to public channel)
+            let isWorkspacePrivileged = false;
+            if (workspaceId) {
+                try {
+                    const workspaceMember = await prisma.workspaceMember.findUnique({
+                        where: { workspaceId_userId: { workspaceId, userId: senderId } },
+                        select: { role: true }
+                    });
+                    if (workspaceMember && (workspaceMember.role === 'WORKSPACE_ADMIN' || workspaceMember.role === 'WORKSPACE_OWNER')) {
+                        isWorkspacePrivileged = true;
+                    }
+                } catch (e) {
+                    logger.warn({ senderId, workspaceId }, 'Failed to check workspace member role');
+                }
+            }
+
+            if (!isWorkspacePrivileged) {
+                throw new Error('Kênh này đang ở chế độ chỉ đọc. Chỉ quản trị viên mới có thể gửi tin nhắn.');
+            }
+          }
+        }
+
+        if (!chatMetadata.isGroup) {
+          const partner = chatMetadata.participants.find((p: any) => p.accountId !== senderId);
+
+          if (partner) {
+            const blockInfo = await userorgClient.checkBlockedStatus(senderId, partner.accountId);
+            if (blockInfo.isBlocked) {
+              throw new Error('Bạn không thể gửi tin nhắn cho người này vì đã bị chặn hoặc bạn đã chặn người này!');
+            }
           }
         }
       }
@@ -164,8 +204,16 @@ export class MessageService {
       message.id,
       message.content || '',
       chatId,
-      senderId
+      senderId,
+      { 
+        senderName: senderProfile?.name, 
+        chatName: chatMetadata?.name || undefined 
+      }
     );
+
+    const mentionedUserIds = mentions
+      .filter(m => m.targetType === 'USER' && m.targetId)
+      .map(m => m.targetId) as string[];
 
     const aiMentioned = mentions.some(m => m.targetType === 'AI');
     if (aiMentioned) {
@@ -180,6 +228,9 @@ export class MessageService {
     await publishEvent(EventSubjects.MESSAGE_CREATED, {
       id: message.id,
       chatId: message.chatId,
+      workspaceId,
+      participantIds,
+      mentionedUserIds, // Deduplication helper
       senderId: message.senderId,
       sender: senderPayload,
       content: message.content,
@@ -212,8 +263,22 @@ export class MessageService {
   }
 
   async recallMessage(messageId: string, userId: string) {
-    const message = await prisma.message.findUnique({ where: { id: messageId } });
+    const message = await prisma.message.findUnique({ 
+      where: { id: messageId }
+    });
     if (!message) throw new Error('Không tìm thấy tin nhắn!');
+
+    const chat = await prisma.chat.findUnique({
+      where: { id: message.chatId },
+      select: { 
+        workspaceId: true,
+        participants: { select: { accountId: true } },
+        pinnedMessages: true
+      }
+    });
+    const workspaceId = chat?.workspaceId || null;
+    const participantIds = chat?.participants.map((p:any) => p.accountId) || [];
+
     if (message.senderId !== userId) throw new Error('Chỉ người gửi mới có thể thu hồi!');
 
     const timeDiff = Date.now() - new Date(message.time).getTime();
@@ -223,9 +288,24 @@ export class MessageService {
       where: { id: messageId }, 
       data: { destroy: true, content: 'Tin nhắn đã bị thu hồi', pin: false } 
     });
+
+    // Remove from Chat.pinnedMessages if it was pinned
+    if (message.pin) {
+      const chatData = await prisma.chat.findUnique({ where: { id: message.chatId }, select: { pinnedMessages: true } });
+      let pinnedList: any[] = [];
+      try { pinnedList = Array.isArray(chatData?.pinnedMessages) ? (chatData.pinnedMessages as any[]) : []; } catch { pinnedList = []; }
+      
+      const newList = pinnedList.filter((m: any) => m.id !== messageId);
+      await prisma.chat.update({
+        where: { id: message.chatId },
+        data: { pinnedMessages: newList }
+      });
+    }
     await publishEvent(EventSubjects.MESSAGE_DELETED, { 
        id: messageId, 
        chatId: message.chatId, 
+       workspaceId: workspaceId,
+       participantIds: participantIds,
        recalledBy: userId,
        content: 'Tin nhắn đã bị thu hồi'
     });
@@ -233,42 +313,143 @@ export class MessageService {
   }
 
   async reactMessage(messageId: string, userId: string, emoji: string) {
-    const message = await prisma.message.findUnique({ where: { id: messageId } });
+    const message = await prisma.message.findUnique({ 
+      where: { id: messageId }
+    });
     if (!message) throw new Error('Không tìm thấy tin nhắn!');
 
-    const existingReaction = await prisma.reaction.findFirst({ where: { messageId, userId } });
+    const chat = await prisma.chat.findUnique({
+      where: { id: message.chatId },
+      select: { 
+        workspaceId: true,
+        participants: { select: { accountId: true } },
+        pinnedMessages: true
+      }
+    });
+    const workspaceId = chat?.workspaceId || null;
+    const participantIds = chat?.participants.map(p => p.accountId) || [];
+
+    const existingReaction = await prisma.reaction.findFirst({ 
+      where: { messageId, userId, reaction: emoji } 
+    });
     let action: 'added' | 'changed' | 'removed';
+    let currentCount = 1;
 
     if (existingReaction) {
-      if (existingReaction.reaction === emoji) {
-        await prisma.reaction.delete({ where: { id: existingReaction.id } });
-        action = 'removed';
-      } else {
-        await prisma.reaction.update({ where: { id: existingReaction.id }, data: { reaction: emoji } });
-        action = 'changed';
-      }
+      currentCount = (existingReaction.count || 1) + 1;
+      await prisma.reaction.update({ 
+        where: { id: existingReaction.id }, 
+        data: { count: currentCount } 
+      });
+      action = 'added'; // Still 'added' as in incremented
     } else {
-      await prisma.reaction.create({ data: { id: uuidv4(), messageId, userId, reaction: emoji } });
+      await prisma.reaction.create({ 
+        data: { id: uuidv4(), messageId, userId, reaction: emoji, count: 1 } 
+      });
       action = 'added';
+      currentCount = 1;
     }
 
-    await publishEvent(EventSubjects.MESSAGE_REACTION, { messageId, chatId: message.chatId, userId, emoji, action });
-    return { action, emoji };
+    // Fetch userName for the event
+    const user = await userorgClient.getUser(userId);
+    const userName = user?.name || 'User';
+
+    // Calculate total count for this emoji across all users
+    const allReactionsForEmoji = await prisma.reaction.findMany({
+      where: { messageId, reaction: emoji }
+    });
+    const totalCount = allReactionsForEmoji.reduce((sum, r) => sum + (r.count || 1), 0);
+
+    await publishEvent(EventSubjects.MESSAGE_REACTION, { 
+      messageId, 
+      chatId: message.chatId, 
+      workspaceId: workspaceId, 
+      participantIds: participantIds,
+      userId, 
+      userName,
+      emoji, 
+      action,
+      count: totalCount // Send the NEW TOTAL count
+    });
+    return { action, emoji, count: totalCount };
   }
 
   async togglePinMessage(messageId: string, userId: string) {
-    const message = await prisma.message.findUnique({ where: { id: messageId } });
+    const message = await prisma.message.findUnique({ 
+      where: { id: messageId }
+    });
     if (!message) throw new Error('Không tìm thấy tin nhắn!');
+
+    const chat = await prisma.chat.findUnique({
+      where: { id: message.chatId },
+      select: { 
+        workspaceId: true,
+        participants: { select: { accountId: true } },
+        pinnedMessages: true
+      }
+    });
+    const workspaceId = chat?.workspaceId || null;
+    const participantIds = chat?.participants.map(p => p.accountId) || [];
+
     const newPinState = !message.pin;
     const updated = await prisma.message.update({ where: { id: messageId }, data: { pin: newPinState } });
     
+    // Get userName for pinned event
+    let userName = 'Người dùng';
+    try {
+      const accountMap = await userorgClient.getUsers([userId]);
+      userName = accountMap.get(userId)?.name || 'Người dùng';
+    } catch (err) {
+      logger.error({ err }, 'Failed to fetch user name for pin event');
+    }
+
     // Publish NATS event for real-time update
 
-    publishEvent('message.pinned', {
+    await publishEvent('message.pinned', {
       chatId: updated.chatId,
+      workspaceId: workspaceId,
+      participantIds: participantIds,
       messageId: updated.id,
       pin: newPinState,
       userId,
+      userName
+    });
+
+    // Update Chat.pinnedMessages JSONB list
+    let pinnedList: any[] = [];
+    try { 
+      pinnedList = Array.isArray(chat?.pinnedMessages) ? (chat.pinnedMessages as any[]) : []; 
+    } catch { 
+      pinnedList = []; 
+    }
+
+    if (newPinState) {
+      // Get sender info for the pinned message
+      const senderAccMap = await userorgClient.getUsers([message.senderId]);
+      const senderAcc = senderAccMap.get(message.senderId);
+
+      const pinnedMsgMetadata = {
+        id: message.id,
+        content: message.content || (message.type === 'image' ? '[Hình ảnh]' : message.type === 'file' ? `[Tệp tin: ${message.fileName}]` : '[Tin nhắn]'),
+        senderName: senderAcc?.name || 'Người dùng',
+        senderAvatar: senderAcc?.avatar || null,
+        pinnedBy: userId,
+        pinnedByName: userName,
+        pinnedAt: new Date().toISOString(),
+        type: message.type
+      };
+      
+      // Remove if already exists (prevent duplicates) then unshift
+      pinnedList = pinnedList.filter((m: any) => m.id !== messageId);
+      pinnedList.unshift(pinnedMsgMetadata);
+      if (pinnedList.length > 50) pinnedList.pop();
+    } else {
+      pinnedList = pinnedList.filter((m: any) => m.id !== messageId);
+    }
+
+    await prisma.chat.update({
+      where: { id: message.chatId },
+      data: { pinnedMessages: pinnedList }
     });
 
     logger.info({ messageId, pin: newPinState }, 'Message pin toggled');
@@ -311,8 +492,17 @@ export class MessageService {
   private groupReactions(reactions: any[]) {
     return reactions.reduce((acc: any[], r) => {
       const existing = acc.find((a) => a.emoji === r.reaction);
-      if (existing) { existing.count += 1; existing.userIds.push(r.userId); }
-      else { acc.push({ emoji: r.reaction, count: 1, userIds: [r.userId] }); }
+      if (existing) { 
+        existing.count += (r.count || 1); 
+        if (!existing.users) existing.users = [];
+        const userExists = existing.users.some((u: any) => u.id === r.userId);
+        if (!userExists) {
+          existing.users.push({ id: r.userId }); 
+        }
+      }
+      else { 
+        acc.push({ emoji: r.reaction, count: (r.count || 1), users: [{ id: r.userId }] }); 
+      }
       return acc;
     }, []);
   }
@@ -362,7 +552,12 @@ export class MessageService {
           });
         }
 
-        return { chatId, lastMessage, unreadCount };
+        const chat = await prisma.chat.findUnique({
+          where: { id: chatId },
+          select: { workspaceId: true }
+        });
+
+        return { chatId, workspaceId: chat?.workspaceId || null, lastMessage, unreadCount };
       })
     );
 
@@ -405,6 +600,7 @@ export class MessageService {
 
       return {
         chatId: s.chatId,
+        workspaceId: s.workspaceId,
         lastMessage: lastMessage ? {
           id: lastMessage.id,
           content: displayContent,

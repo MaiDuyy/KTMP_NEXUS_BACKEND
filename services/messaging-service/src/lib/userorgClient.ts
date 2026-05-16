@@ -94,6 +94,14 @@ export const userorgClient = {
     },
 
     /**
+     * Lấy thông tin 1 người dùng
+     */
+    getUser: async (id: string): Promise<any | null> => {
+        const users = await userorgClient.getUsers([id]);
+        return users.get(id) || null;
+    },
+
+    /**
      * Kiểm tra trạng thái chặn giữa 2 user qua gRPC
      */
     checkBlockedStatus: async (user1Id: string, user2Id: string): Promise<{ isBlocked: boolean; blockerId: string }> => {

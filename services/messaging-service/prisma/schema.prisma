@@ -20,8 +20,11 @@ model Chat {
   avatar       String?           @db.VarChar(255)
   joinPolicy   ChatJoinPolicy    @default(PUBLIC)
   status       ChatStatus        @default(ACTIVE)
+  isReadOnly   Boolean           @default(false)
   createdAt    DateTime          @default(now())
   updatedAt    DateTime          @updatedAt
+  
+  pinnedMessages Json?             @default("[]")
   
   workspaceId  String?
   workspace    Workspace?        @relation(fields: [workspaceId], references: [id])
@@ -29,6 +32,7 @@ model Chat {
   participants ChatParticipant[]
   tasks        Task[]
   joinRequests JoinRequest[]
+  messages     Message[]
 
   @@map("chat")
 }
@@ -183,6 +187,7 @@ model Message {
   threadReplies Message[] @relation("ThreadRelation")
   reactions     Reaction[]
   mentions      Mention[]
+  chat          Chat      @relation(fields: [chatId], references: [id], onDelete: Cascade)
 
   @@index([chatId])
   @@index([replyToId])
@@ -197,6 +202,7 @@ model Reaction {
   messageId String
   userId    String
   reaction  String   @db.VarChar(10)
+  count     Int      @default(1)
   
   message   Message  @relation(fields: [messageId], references: [id], onDelete: Cascade)
 
@@ -371,6 +377,7 @@ model Channel {
   archivedBy  String?
   
   isDefault   Boolean     @default(false)
+  isReadOnly  Boolean     @default(false)
   
   creatorId   String
   createdAt   DateTime    @default(now())

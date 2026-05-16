@@ -9,10 +9,12 @@ import type { ChannelType, ChannelMemberRole } from '@prisma/client';
 interface CreateChannelInput {
   name: string; description?: string; topic?: string;
   type?: ChannelType; categoryId?: string; isDefault?: boolean;
+  isReadOnly?: boolean;
 }
 
 interface UpdateChannelInput {
   name?: string; description?: string; topic?: string; categoryId?: string; position?: number;
+  isReadOnly?: boolean;
 }
 
 interface BrowseOptions { page?: number; limit?: number; search?: string; }
@@ -62,6 +64,7 @@ export class ChannelService {
       data: {
         workspaceId, name: name.trim().toLowerCase(), description: description?.trim(),
         topic: topic?.trim(), type: channelType, categoryId, isDefault: isDefault ?? false, creatorId: userId,
+        isReadOnly: data.isReadOnly ?? (channelType === 'ANNOUNCEMENT'),
         members: { create: { userId, role: 'CHANNEL_OWNER' } },
       },
       include: { members: true, category: true },
@@ -76,6 +79,7 @@ export class ChannelService {
         workspaceId: channel.workspaceId,
         joinPolicy: channelType === 'PUBLIC' ? 'PUBLIC' : 'PRIVATE',
         status: 'ACTIVE',
+        isReadOnly: channel.isReadOnly,
         participants: {
           create: {
             accountId: userId,
@@ -117,16 +121,21 @@ export class ChannelService {
     if (data.topic !== undefined) updateData.topic = data.topic?.trim();
     if (data.categoryId !== undefined) updateData.categoryId = data.categoryId;
     if (data.position !== undefined) updateData.position = data.position;
+    if (data.isReadOnly !== undefined) updateData.isReadOnly = data.isReadOnly;
 
     const updated = await prisma.channel.update({ where: { id }, data: updateData });
     
     const notifyMemberIds = await this.getWorkspaceMemberIds(channel.workspaceId);
     
-    // Mirror name update to Chat table
-    if (updateData.name !== undefined) {
+    // Mirror updates to Chat table
+    const chatUpdateData: any = {};
+    if (updateData.name !== undefined) chatUpdateData.name = updateData.name;
+    if (updateData.isReadOnly !== undefined) chatUpdateData.isReadOnly = updateData.isReadOnly;
+
+    if (Object.keys(chatUpdateData).length > 0) {
       await prisma.chat.update({
         where: { id },
-        data: { name: updateData.name }
+        data: chatUpdateData
       }).catch(() => null);
     }
 

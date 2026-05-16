@@ -16,10 +16,10 @@ export const channelRoutes = Router();
 channelRoutes.post('/workspaces/:wsId/channels', asyncHandler(async (req: Request, res: Response) => {
   const userId = req.headers['x-user-id'] as string;
   const { wsId } = req.params;
-  const { name, description, topic, type, categoryId, isDefault } = req.body;
+  const { name, description, topic, type, categoryId, isDefault, isReadOnly } = req.body;
   if (!userId) return res.status(401).json({ success: false, message: 'Chưa đăng nhập!' });
   if (!name) return res.status(400).json({ success: false, message: 'Tên channel là bắt buộc!' });
-  const channel = await channelService.createChannel(wsId as string, { name, description, topic, type: type as ChannelType, categoryId, isDefault }, userId);
+  const channel = await channelService.createChannel(wsId as string, { name, description, topic, type: type as ChannelType, categoryId, isDefault, isReadOnly }, userId);
   res.status(201).json({ success: true, message: 'Tạo channel thành công!', channel });
 }));
 
@@ -92,9 +92,9 @@ channelRoutes.get('/channels/:id', asyncHandler(async (req: Request, res: Respon
 channelRoutes.put('/channels/:id', asyncHandler(async (req: Request, res: Response) => {
   const userId = req.headers['x-user-id'] as string;
   const { id } = req.params;
-  const { name, description, topic, categoryId, position } = req.body;
+  const { name, description, topic, categoryId, position, isReadOnly } = req.body;
   if (!userId) return res.status(401).json({ success: false, message: 'Chưa đăng nhập!' });
-  const channel = await channelService.updateChannel(id as string, { name, description, topic, categoryId, position }, userId);
+  const channel = await channelService.updateChannel(id as string, { name, description, topic, categoryId, position, isReadOnly }, userId);
   res.json({ success: true, message: 'Cập nhật channel thành công!', channel });
 }));
 

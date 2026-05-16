@@ -22,6 +22,14 @@ chatRoutes.get('/internal/:chatId/metadata', asyncHandler(async (req: Request, r
   res.json({ success: true, chat });
 }));
 
+// GET /unread-counts — Lấy tổng số tin nhắn chưa đọc theo từng workspace
+chatRoutes.get('/unread-counts', asyncHandler(async (req: Request, res: Response) => {
+  const userId = req.headers['x-user-id'] as string;
+  if (!userId) return res.status(401).json({ success: false, message: 'Chưa đăng nhập!' });
+  const counts = await chatService.getUnreadCountsPerWorkspace(userId);
+  res.json({ success: true, counts });
+}));
+
 // GET / — Lấy danh sách chat
 chatRoutes.get('/', asyncHandler(async (req: Request, res: Response) => {
   const userId = req.headers['x-user-id'] as string;
@@ -100,9 +108,9 @@ chatRoutes.post('/private', asyncHandler(async (req: Request, res: Response) => 
 chatRoutes.put('/:chatId', asyncHandler(async (req: Request, res: Response) => {
   const userId = req.headers['x-user-id'] as string;
   const { chatId } = req.params;
-  const { name, avatar, joinPolicy } = req.body;
+  const { name, avatar, joinPolicy, isReadOnly } = req.body;
   if (!userId) return res.status(401).json({ success: false, message: 'Chưa đăng nhập!' });
-  const chat = await chatService.updateChat(chatId as string, userId, { name, avatar, joinPolicy });
+  const chat = await chatService.updateChat(chatId as string, userId, { name, avatar, joinPolicy, isReadOnly });
   res.json({ success: true, message: 'Cập nhật nhóm thành công!', chat });
 }));
 

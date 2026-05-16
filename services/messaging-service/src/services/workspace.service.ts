@@ -54,7 +54,7 @@ export class WorkspaceService {
     });
 
     // Create default #general channel
-    await prisma.channel.create({
+    const channel = await prisma.channel.create({
       data: {
         workspaceId: workspace.id,
         name: 'general',
@@ -70,6 +70,24 @@ export class WorkspaceService {
         }
       }
     });
+
+    // Mirror to Chat table for messaging support
+    await prisma.chat.create({
+      data: {
+        id: channel.id,
+        isGroup: true,
+        name: channel.name,
+        workspaceId: workspace.id,
+        joinPolicy: 'PUBLIC',
+        status: 'ACTIVE',
+        participants: {
+          create: {
+            accountId: userId,
+            role: 'CHANNEL_OWNER',
+          }
+        }
+      }
+    }).catch((e) => logger.error({ err: e.message }, 'Failed to mirror default Channel to Chat'));
 
     await publishEvent(EventSubjects.WORKSPACE_CREATED, {
       id: workspace.id, name: workspace.name, slug: workspace.slug,
