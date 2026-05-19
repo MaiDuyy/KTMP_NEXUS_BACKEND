@@ -131,26 +131,25 @@ services:
       - "${IDENTITY_SERVICE_PORT:-3010}:3010"
       - "${IDENTITY_GRPC_PORT:-50051}:50051"
     environment:
-      - NODE_ENV=${NODE_ENV:-development}
+      - NODE_ENV=${NODE_ENV-development}
       - PORT=${IDENTITY_SERVICE_PORT:-3010}
       - IDENTITY_GRPC_PORT=${IDENTITY_GRPC_PORT:-50051}
-      - AUTH_DATABASE_URL=${AUTH_DATABASE_URL:-postgresql://ott_user:ott_password@postgres:5432/ott_chat?schema=auth}
-      - USERORG_DATABASE_URL=${USERORG_DATABASE_URL:-postgresql://ott_user:ott_password@postgres:5432/ott_chat?schema=userorg}
-      - RBAC_DATABASE_URL=${RBAC_DATABASE_URL:-postgresql://ott_user:ott_password@postgres:5432/ott_chat?schema=rbac}
+      - AUTH_DATABASE_URL=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_PORT}/${POSTGRES_DB}?schema=auth
+      - USERORG_DATABASE_URL=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_PORT}/${POSTGRES_DB}?schema=userorg
+      - RBAC_DATABASE_URL=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_PORT}/${POSTGRES_DB}?schema=rbac
       - JWT_SECRET=${JWT_SECRET}
-      - JWT_EXPIRES_IN=${JWT_EXPIRES_IN:-15m}
+      - JWT_EXPIRES_IN=${JWT_EXPIRES_IN}
       - JWT_REFRESH_SECRET=${JWT_REFRESH_SECRET}
-      - REFRESH_TOKEN_EXPIRES_IN=${REFRESH_TOKEN_EXPIRES_IN:-7d}
-      - NATS_URL=${NATS_URL:-nats://nats:4222}
-      - SMTP_HOST=${SMTP_HOST:-smtp.gmail.com}
-      - SMTP_PORT=${SMTP_PORT:-587}
+      - REFRESH_TOKEN_EXPIRES_IN=${REFRESH_TOKEN_EXPIRES_IN}
+      - SMTP_HOST=${SMTP_HOST}
+      - SMTP_PORT=${SMTP_PORT}
       - SMTP_USER=${SMTP_USER}
       - SMTP_PASS=${SMTP_PASS}
-      - SMTP_FROM=${SMTP_FROM:-noreply@example.com}
+      - SMTP_FROM=${SMTP_FROM}
+      - NATS_URL=${NATS_URL:-nats://nats:4222}
       - MESSAGING_GRPC_HOST=${MESSAGING_GRPC_HOST:-messaging-service}
       - MESSAGING_GRPC_PORT=${MESSAGING_GRPC_PORT:-50052}
       - IDENTITY_GRPC_HOST=${IDENTITY_GRPC_HOST:-identity-service}
-      - IDENTITY_GRPC_PORT=${IDENTITY_GRPC_PORT:-50051}
     depends_on:
       postgres:
         condition: service_healthy
