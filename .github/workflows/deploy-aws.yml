@@ -1,25 +1,25 @@
-name: Deploy Backend to AWS ECS
+name: Deploy Backend Microservices to AWS EC2
 
 on:
   push:
-    branches: [ main, develop ,dev ]
+    branches: [ main, dev ]
   workflow_dispatch:
 
 env:
-  AWS_REGION: us-east-1 # Change to your region
+  AWS_REGION: us-east-1
   ECR_REPOSITORY_PREFIX: ott-chat
-  ECS_CLUSTER: ott-chat-cluster
+  DEPLOY_DIR: /home/ec2-user/ott-chat
 
 jobs:
-  deploy:
-    name: Build and Push Microservices
+  build-and-push:
+    name: Build & Push Microservices
     runs-on: ubuntu-latest
     strategy:
       matrix:
         service: [api-gateway, ws-gateway, identity-service, messaging-service, file-service, notification-service]
 
     steps:
-    - name: Checkout
+    - name: Checkout Repository
       uses: actions/checkout@v4
 
     - name: Set up Node.js
@@ -27,13 +27,13 @@ jobs:
       with:
         node-version: '20'
 
-    - name: Build shared package
+    - name: Build Shared Package
       run: |
         cd packages/shared
         npm install --legacy-peer-deps
         npm run build
 
-    - name: Configure AWS credentials
+    - name: Configure AWS Credentials
       uses: aws-actions/configure-aws-credentials@v4
       with:
         aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
@@ -44,23 +44,92 @@ jobs:
       id: login-ecr
       uses: aws-actions/amazon-ecr-login@v2
 
-    - name: Build, tag, and push image to Amazon ECR
+    - name: Build, Tag, and Push to ECR
       id: build-image
       env:
         ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
         IMAGE_TAG: ${{ github.sha }}
         SERVICE_NAME: ${{ matrix.service }}
       run: |
-        # Build the image from the root context to include packages/shared
+        # Build Docker image using root context to ensure packages/shared is copied correctly
         docker build -t $ECR_REGISTRY/${{ env.ECR_REPOSITORY_PREFIX }}-$SERVICE_NAME:$IMAGE_TAG \
                      -t $ECR_REGISTRY/${{ env.ECR_REPOSITORY_PREFIX }}-$SERVICE_NAME:latest \
                      -f services/$SERVICE_NAME/Dockerfile .
+                     
         docker push $ECR_REGISTRY/${{ env.ECR_REPOSITORY_PREFIX }}-$SERVICE_NAME:$IMAGE_TAG
         docker push $ECR_REGISTRY/${{ env.ECR_REPOSITORY_PREFIX }}-$SERVICE_NAME:latest
-        echo "image=$ECR_REGISTRY/${{ env.ECR_REPOSITORY_PREFIX }}-$SERVICE_NAME:$IMAGE_TAG" >> $GITHUB_OUTPUT
 
-    - name: Update ECS service
-      run: |
-        aws ecs update-service --cluster ${{ env.ECS_CLUSTER }} \
-                               --service ${{ matrix.service }} \
-                               --force-new-deployment
+  deploy:
+    name: Orchestrate EC2 Deployment
+    runs-on: ubuntu-latest
+    needs: build-and-push
+    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/dev'
+
+    steps:
+    - name: Checkout Repository
+      uses: actions/checkout@v4
+
+    - name: Copy Deployment Configs to EC2 (SCP)
+      uses: appleboy/scp-action@v0.1.7
+      with:
+        host: ${{ secrets.EC2_HOST }}
+        username: ${{ secrets.EC2_USERNAME }}
+        key: ${{ secrets.SSH_PRIVATE_KEY }}
+        port: 22
+        source: "docker-compose.prod.yml,infra/nginx/nginx.conf,infra/scripts/pull-ssm-params.sh"
+        target: ${{ env.DEPLOY_DIR }}
+        strip_components: 0
+
+    - name: Configure AWS Credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ env.AWS_REGION }}
+
+    - name: Login to Amazon ECR (for Registry URL output)
+      id: login-ecr
+      uses: aws-actions/amazon-ecr-login@v2
+
+    - name: Execute Remote SSH Commands
+      uses: appleboy/ssh-action@v1.0.3
+      env:
+        ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+        AWS_REGION: ${{ env.AWS_REGION }}
+      with:
+        host: ${{ secrets.EC2_HOST }}
+        username: ${{ secrets.EC2_USERNAME }}
+        key: ${{ secrets.SSH_PRIVATE_KEY }}
+        port: 22
+        envs: ECR_REGISTRY,AWS_REGION
+        script: |
+          set -e
+          cd ${{ env.DEPLOY_DIR }}
+
+          # Structure Directories
+          mkdir -p infra/nginx
+          mkdir -p infra/scripts
+
+          # Set executable permissions on scripting
+          chmod +x infra/scripts/pull-ssm-params.sh
+
+          # Fetch Decrypted Parameters from AWS SSM
+          ./infra/scripts/pull-ssm-params.sh
+
+          # Append ECR_REGISTRY dynamically to the .env file so it is permanently stored on the host
+          echo "ECR_REGISTRY=$ECR_REGISTRY" >> .env
+
+          # Authenticate Docker against AWS ECR
+          aws ecr get-login-password --region $AWS_REGION | docker login --username AWS --password-stdin $ECR_REGISTRY
+
+          # Inject Registry Variable into Local Deployment Session
+          export ECR_REGISTRY=$ECR_REGISTRY
+
+          # Pull newest images
+          docker compose -f docker-compose.prod.yml pull
+
+          # Up updated containers
+          docker compose -f docker-compose.prod.yml up -d --remove-orphans
+
+          # Housekeeping: prune old dangling images to avoid EC2 disk exhaustion
+          docker image prune -f
