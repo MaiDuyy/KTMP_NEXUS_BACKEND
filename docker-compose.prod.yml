@@ -1,0 +1,316 @@
+version: "3.8"
+
+x-logging: &default-logging
+  driver: "json-file"
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+services:
+  # ============= Infrastructure =============
+  
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: ott-postgres-prod
+    restart: unless-stopped
+    logging: *default-logging
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-ott_admin}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-ott_password}
+      POSTGRES_DB: ${POSTGRES_DB:-ott_chat_prod}
+    volumes:
+      - postgres_prod_data:/var/lib/postgresql/data
+    networks:
+      - ott-network-prod
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER:-ott_admin} -d $${POSTGRES_DB:-ott_chat_prod}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: ott-redis-prod
+    restart: unless-stopped
+    logging: *default-logging
+    command: redis-server --appendonly yes --requirepass ${REDIS_PASSWORD:-replace_with_secure_redis_password}
+    volumes:
+      - redis_prod_data:/data
+    networks:
+      - ott-network-prod
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  nats:
+    image: nats:2.10-alpine
+    container_name: ott-nats-prod
+    restart: unless-stopped
+    logging: *default-logging
+    command: ["-js", "-m", "8222"]
+    volumes:
+      - nats_prod_data:/data
+    networks:
+      - ott-network-prod
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z localhost 4222 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ============= Backend Services =============
+
+  api-gateway:
+    image: ${ECR_REGISTRY}/ott-chat-api-gateway:latest
+    container_name: ott-api-gateway-prod
+    restart: always
+    logging: *default-logging
+    ports:
+      - "${API_GATEWAY_PORT}:3000"
+    environment:
+      - NODE_ENV=production
+      - PORT=3000
+      - JWT_SECRET=${JWT_SECRET}
+      - REDIS_URL=redis://:${REDIS_PASSWORD}@redis:${REDIS_PORT}
+      - NATS_URL=${NATS_URL}
+      - IDENTITY_GRPC_HOST=identity-service
+      - IDENTITY_GRPC_PORT=${IDENTITY_GRPC_PORT}
+      - IDENTITY_SERVICE_URL=http://identity-service:3010
+      - MESSAGING_SERVICE_URL=http://messaging-service:3020
+      - FILE_SERVICE_URL=http://file-service:3014
+      - NOTIFICATION_SERVICE_URL=http://notification-service:3019
+      - MESSAGING_GRPC_HOST=messaging-service
+      - MESSAGING_GRPC_PORT=${MESSAGING_GRPC_PORT}
+      - AI_SERVICE_URL=http://ai-service:8080
+      - SPRING_AI_URL=http://ai-knowledge:8080
+    depends_on:
+      redis:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+    networks:
+      - ott-network-prod
+
+  ws-gateway:
+    image: ${ECR_REGISTRY}/ott-chat-ws-gateway:latest
+    container_name: ott-ws-gateway-prod
+    restart: always
+    logging: *default-logging
+    ports:
+      - "${WS_GATEWAY_PORT}:3001"
+    environment:
+      - NODE_ENV=production
+      - PORT=3001
+      - JWT_SECRET=${JWT_SECRET}
+      - REDIS_URL=redis://:${REDIS_PASSWORD}@redis:${REDIS_PORT}
+      - NATS_URL=${NATS_URL}
+      - IDENTITY_GRPC_HOST=identity-service
+      - IDENTITY_GRPC_PORT=${IDENTITY_GRPC_PORT}
+      - IDENTITY_SERVICE_URL=http://identity-service:3010
+      - MESSAGING_SERVICE_URL=http://messaging-service:3020
+      - MESSAGING_GRPC_HOST=messaging-service
+      - MESSAGING_GRPC_PORT=${MESSAGING_GRPC_PORT}
+      - LIVEKIT_API_KEY=${LIVEKIT_API_KEY}
+      - LIVEKIT_API_SECRET=${LIVEKIT_API_SECRET}
+      - LIVEKIT_URL=${LIVEKIT_URL}
+    depends_on:
+      redis:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+    networks:
+      - ott-network-prod
+
+  identity-service:
+    image: ${ECR_REGISTRY}/ott-chat-identity-service:latest
+    container_name: ott-identity-service-prod
+    restart: always
+    logging: *default-logging
+    ports:
+      - "${IDENTITY_SERVICE_PORT:-3010}:3010"
+      - "${IDENTITY_GRPC_PORT:-50051}:50051"
+    environment:
+      - NODE_ENV=production
+      - PORT=${IDENTITY_SERVICE_PORT:-3010}
+      - IDENTITY_GRPC_PORT=${IDENTITY_GRPC_PORT:-50051}
+      - AUTH_DATABASE_URL=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_PORT}/${POSTGRES_DB}?schema=auth
+      - USERORG_DATABASE_URL=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_PORT}/${POSTGRES_DB}?schema=userorg
+      - RBAC_DATABASE_URL=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_PORT}/${POSTGRES_DB}?schema=rbac
+      - JWT_SECRET=${JWT_SECRET}
+      - JWT_EXPIRES_IN=${JWT_EXPIRES_IN}
+      - JWT_REFRESH_SECRET=${JWT_REFRESH_SECRET}
+      - REFRESH_TOKEN_EXPIRES_IN=${REFRESH_TOKEN_EXPIRES_IN}
+      - SMTP_HOST=${SMTP_HOST}
+      - SMTP_PORT=${SMTP_PORT}
+      - SMTP_USER=${SMTP_USER}
+      - SMTP_PASS=${SMTP_PASS}
+      - SMTP_FROM=${SMTP_FROM}
+      - NATS_URL=${NATS_URL:-nats://nats:4222}
+      - MESSAGING_GRPC_HOST=${MESSAGING_GRPC_HOST:-messaging-service}
+      - MESSAGING_GRPC_PORT=${MESSAGING_GRPC_PORT:-50052}
+      - IDENTITY_GRPC_HOST=${IDENTITY_GRPC_HOST:-identity-service}
+    command: sh -c "npx prisma db push --schema=prisma/auth.prisma --accept-data-loss && npx prisma db push --schema=prisma/userorg.prisma --accept-data-loss && npx prisma db push --schema=prisma/rbac.prisma --accept-data-loss && (npm run prisma:seed || true) && node dist/index.js"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+    networks:
+      - ott-network-prod
+
+  messaging-service:
+    image: ${ECR_REGISTRY}/ott-chat-messaging-service:latest
+    container_name: ott-messaging-service-prod
+    restart: always
+    logging: *default-logging
+    ports:
+      - "${MESSAGING_SERVICE_PORT:-3020}:3020"
+      - "${MESSAGING_GRPC_PORT:-50052}:50052"
+    environment:
+      - NODE_ENV=production
+      - PORT=${MESSAGING_SERVICE_PORT:-3020}
+      - MESSAGING_GRPC_PORT=${MESSAGING_GRPC_PORT:-50052}
+      - DATABASE_URL=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_PORT}/${POSTGRES_DB}?schema=public
+      - REDIS_URL=redis://:${REDIS_PASSWORD}@redis:${REDIS_PORT}
+      - NATS_URL=${NATS_URL:-nats://nats:4222}
+      - IDENTITY_GRPC_HOST=${IDENTITY_GRPC_HOST:-identity-service}
+      - IDENTITY_GRPC_PORT=${IDENTITY_GRPC_PORT:-50051}
+      - LIVEKIT_API_KEY=${LIVEKIT_API_KEY}
+      - LIVEKIT_API_SECRET=${LIVEKIT_API_SECRET}
+    command: sh -c "npx prisma db push --accept-data-loss && node dist/index.js"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+    networks:
+      - ott-network-prod
+
+  file-service:
+    image: ${ECR_REGISTRY}/ott-chat-file-service:latest
+    container_name: ott-file-service-prod
+    restart: always
+    logging: *default-logging
+    ports:
+      - "${FILE_SERVICE_PORT}:3014"
+    environment:
+      - NODE_ENV=production
+      - PORT=3014
+      - DATABASE_URL=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_PORT}/${POSTGRES_DB}?schema=files
+      - NATS_URL=${NATS_URL}
+      - STORAGE_PROVIDER=${STORAGE_PROVIDER}
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
+      - AWS_REGION=${AWS_REGION}
+      - AWS_S3_BUCKET=${AWS_S3_BUCKET}
+      - CLOUDFRONT_DOMAIN=${CLOUDFRONT_DOMAIN}
+    command: sh -c "npx prisma migrate deploy && node dist/index.js"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+    networks:
+      - ott-network-prod
+
+  notification-service:
+    image: ${ECR_REGISTRY}/ott-chat-notification-service:latest
+    container_name: ott-notification-service-prod
+    restart: always
+    logging: *default-logging
+    ports:
+      - "${NOTIFICATION_SERVICE_PORT}:3019"
+    environment:
+      - NODE_ENV=production
+      - PORT=3019
+      - DATABASE_URL=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_PORT}/${POSTGRES_DB}?schema=notification
+      - REDIS_URL=redis://:${REDIS_PASSWORD}@redis:${REDIS_PORT}
+      - NATS_URL=${NATS_URL}
+      - SMTP_HOST=${SMTP_HOST}
+      - SMTP_PORT=${SMTP_PORT}
+      - SMTP_USER=${SMTP_USER}
+      - SMTP_PASS=${SMTP_PASS}
+      - SMTP_FROM=${SMTP_FROM}
+    command: sh -c "npx prisma migrate deploy && node dist/index.js"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+    networks:
+      - ott-network-prod
+
+  ai-knowledge:
+    image: ${ECR_REGISTRY}/ott-chat-ai-knowledge:latest
+    container_name: ott-ai-knowledge-prod
+    restart: always
+    logging: *default-logging
+    ports:
+      - "8081:8080" # Port conflict, move to 8081
+    environment:
+      - DB_HOST=${POSTGRES_HOST}
+      - DB_PORT=${POSTGRES_PORT}
+      - DB_NAME=${POSTGRES_DB}
+      - DB_USER=${POSTGRES_USER}
+      - DB_PASSWORD=${POSTGRES_PASSWORD}
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - GOOGLE_API_KEY=${GOOGLE_API_KEY}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - ott-network-prod
+
+  ai-service:
+    build:
+      context: ../ai-service
+      dockerfile: Dockerfile
+    container_name: ott-ai-service-prod
+    restart: always
+    logging: *default-logging
+    ports:
+      - "8080:8080"
+    environment:
+      - DATABASE_URL=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:${POSTGRES_PORT:-5432}/${POSTGRES_DB}?schema=ai_knowledge
+      - GOOGLE_API_KEY=${GOOGLE_API_KEY}
+      - JWT_SECRET=${JWT_SECRET}
+      - NATS_URL=nats://nats:4222
+    depends_on:
+      postgres:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+    networks:
+      - ott-network-prod
+
+  nginx:
+    image: nginx:1.25-alpine
+    container_name: ott-nginx-prod
+    restart: unless-stopped
+    logging: *default-logging
+    ports:
+      - "80:80"
+    volumes:
+      - ./infra/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      - api-gateway
+      - ws-gateway
+    networks:
+      - ott-network-prod
+
+
+networks:
+  ott-network-prod:
+    driver: bridge
+
+volumes:
+  postgres_prod_data:
+  redis_prod_data:
+  nats_prod_data:
+
