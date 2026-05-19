@@ -246,48 +246,27 @@ services:
     networks:
       - ott-network-prod
 
-  ai-knowledge:
-    image: ${ECR_REGISTRY}/ott-chat-ai-knowledge:latest
-    container_name: ott-ai-knowledge-prod
-    restart: always
-    logging: *default-logging
-    ports:
-      - "8081:8080" # Port conflict, move to 8081
-    environment:
-      - DB_HOST=${POSTGRES_HOST}
-      - DB_PORT=${POSTGRES_PORT}
-      - DB_NAME=${POSTGRES_DB}
-      - DB_USER=${POSTGRES_USER}
-      - DB_PASSWORD=${POSTGRES_PASSWORD}
-      - OPENAI_API_KEY=${OPENAI_API_KEY}
-      - GOOGLE_API_KEY=${GOOGLE_API_KEY}
-    depends_on:
-      postgres:
-        condition: service_healthy
-    networks:
-      - ott-network-prod
+  # ai-knowledge:
+  #   image: ${ECR_REGISTRY}/ott-chat-ai-knowledge:latest
+  #   container_name: ott-ai-knowledge-prod
+  #   restart: always
+  #   logging: *default-logging
+  #   ports:
+  #     - "8081:8080" # Port conflict, move to 8081
+  #   environment:
+  #     - DB_HOST=${POSTGRES_HOST}
+  #     - DB_PORT=${POSTGRES_PORT}
+  #     - DB_NAME=${POSTGRES_DB}
+  #     - DB_USER=${POSTGRES_USER}
+  #     - DB_PASSWORD=${POSTGRES_PASSWORD}
+  #     - OPENAI_API_KEY=${OPENAI_API_KEY}
+  #     - GOOGLE_API_KEY=${GOOGLE_API_KEY}
+  #   depends_on:
+  #     postgres:
+  #       condition: service_healthy
+  #   networks:
+  #     - ott-network-prod
 
-  ai-service:
-    build:
-      context: ../ai-service
-      dockerfile: Dockerfile
-    container_name: ott-ai-service-prod
-    restart: always
-    logging: *default-logging
-    ports:
-      - "8080:8080"
-    environment:
-      - DATABASE_URL=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:${POSTGRES_PORT:-5432}/${POSTGRES_DB}?schema=ai_knowledge
-      - GOOGLE_API_KEY=${GOOGLE_API_KEY}
-      - JWT_SECRET=${JWT_SECRET}
-      - NATS_URL=nats://nats:4222
-    depends_on:
-      postgres:
-        condition: service_healthy
-      nats:
-        condition: service_healthy
-    networks:
-      - ott-network-prod
 
   nginx:
     image: nginx:1.25-alpine
