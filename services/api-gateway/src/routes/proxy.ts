@@ -25,6 +25,7 @@ const SERVICES = {
   AUDIT: process.env.IDENTITY_SERVICE_URL || 'http://localhost:3010',
   KNOWLEDGE: process.env.KNOWLEDGE_SERVICE_URL || 'http://localhost:3018',
   NOTIFICATION: process.env.NOTIFICATION_SERVICE_URL || 'http://localhost:3019',
+
   SPRING_AI: process.env.SPRING_AI_URL || 'http://localhost:8080',
   WS_GATEWAY: process.env.WS_GATEWAY_URL || 'http://localhost:3001',
 };
@@ -716,19 +717,83 @@ router.post('/audit/reports', (req, res) => forwardRequest(req, res, SERVICES.AU
 // These proxy directly to the Spring Boot ai-knowledge service (API/DB)
 // eliminating the need for the Node.js knowledge-service.
 
+// Spring: MRP (Map-Reduce-Plan) & Wiki Review Pipeline
+router.post('/mrp/compile', roleMiddleware('SUPER_ADMIN', 'ADMIN', 'WORKSPACE_ADMIN'), (req, res) => {
+  const query = new URLSearchParams(req.query as any).toString();
+  return forwardRequest(req, res, SERVICES.SPRING_AI, `/api/mrp/compile${query ? `?${query}` : ''}`);
+});
+
+router.post('/mrp/plan/:planId/approve', roleMiddleware('SUPER_ADMIN', 'ADMIN', 'WORKSPACE_ADMIN'), (req, res) => {
+  const query = new URLSearchParams(req.query as any).toString();
+  return forwardRequest(req, res, SERVICES.SPRING_AI, `/api/mrp/plan/${req.params.planId}/approve${query ? `?${query}` : ''}`);
+});
+
+router.get('/mrp/plans', roleMiddleware('SUPER_ADMIN', 'ADMIN', 'WORKSPACE_ADMIN'), (req, res) => {
+  const query = new URLSearchParams(req.query as any).toString();
+  return forwardRequest(req, res, SERVICES.SPRING_AI, `/api/mrp/plans${query ? `?${query}` : ''}`);
+});
+
+router.get('/mrp/plans/:planId', roleMiddleware('SUPER_ADMIN', 'ADMIN', 'WORKSPACE_ADMIN'), (req, res) =>
+  forwardRequest(req, res, SERVICES.SPRING_AI, `/api/mrp/plans/${req.params.planId}`));
+
+router.get('/mrp/drafts', roleMiddleware('SUPER_ADMIN', 'ADMIN', 'WORKSPACE_ADMIN', 'WORKSPACE_MEMBER', 'EMPLOYEE'), (req, res) => {
+  const query = new URLSearchParams(req.query as any).toString();
+  return forwardRequest(req, res, SERVICES.SPRING_AI, `/api/mrp/drafts${query ? `?${query}` : ''}`);
+});
+
+router.get('/mrp/drafts/workspace/:workspaceId', roleMiddleware('SUPER_ADMIN', 'ADMIN', 'WORKSPACE_ADMIN', 'WORKSPACE_MEMBER', 'EMPLOYEE'), (req, res) =>
+  forwardRequest(req, res, SERVICES.SPRING_AI, `/api/mrp/drafts/workspace/${req.params.workspaceId}`));
+
+router.post('/mrp/drafts/:draftId/approve', roleMiddleware('SUPER_ADMIN', 'ADMIN', 'WORKSPACE_ADMIN'), (req, res) =>
+  forwardRequest(req, res, SERVICES.SPRING_AI, `/api/mrp/drafts/${req.params.draftId}/approve`));
+
+router.post('/mrp/drafts/:draftId/reject', roleMiddleware('SUPER_ADMIN', 'ADMIN', 'WORKSPACE_ADMIN'), (req, res) =>
+  forwardRequest(req, res, SERVICES.SPRING_AI, `/api/mrp/drafts/${req.params.draftId}/reject`));
+
+router.post('/mrp/drafts/:draftId/request-changes', roleMiddleware('SUPER_ADMIN', 'ADMIN', 'WORKSPACE_ADMIN'), (req, res) =>
+  forwardRequest(req, res, SERVICES.SPRING_AI, `/api/mrp/drafts/${req.params.draftId}/request-changes`));
+
+router.get('/mrp/wiki', roleMiddleware('SUPER_ADMIN', 'ADMIN', 'WORKSPACE_ADMIN', 'WORKSPACE_MEMBER', 'EMPLOYEE'), (req, res) => {
+  const query = new URLSearchParams(req.query as any).toString();
+  return forwardRequest(req, res, SERVICES.SPRING_AI, `/api/mrp/wiki${query ? `?${query}` : ''}`);
+});
+
+router.get('/mrp/wiki/metadata', roleMiddleware('SUPER_ADMIN', 'ADMIN', 'WORKSPACE_ADMIN', 'WORKSPACE_MEMBER', 'EMPLOYEE'), (req, res) => {
+  const query = new URLSearchParams(req.query as any).toString();
+  return forwardRequest(req, res, SERVICES.SPRING_AI, `/api/mrp/wiki/metadata${query ? `?${query}` : ''}`);
+});
+
+router.get('/mrp/wiki/slug/:slug', roleMiddleware('SUPER_ADMIN', 'ADMIN', 'WORKSPACE_ADMIN', 'WORKSPACE_MEMBER', 'EMPLOYEE'), (req, res) => {
+  const query = new URLSearchParams(req.query as any).toString();
+  return forwardRequest(req, res, SERVICES.SPRING_AI, `/api/mrp/wiki/slug/${req.params.slug}${query ? `?${query}` : ''}`);
+});
+
+router.get('/mrp/wiki/id/:id', roleMiddleware('SUPER_ADMIN', 'ADMIN', 'WORKSPACE_ADMIN', 'WORKSPACE_MEMBER', 'EMPLOYEE'), (req, res) =>
+  forwardRequest(req, res, SERVICES.SPRING_AI, `/api/mrp/wiki/id/${req.params.id}`));
+
 // Spring: Document CRUD
-router.get('/documents', roleMiddleware('SUPER_ADMIN', 'ADMIN', 'WORKSPACE_ADMIN', 'WORKSPACE_MEMBER', 'EMPLOYEE'), (req, res) =>
-  forwardRequest(req, res, SERVICES.SPRING_AI, '/documents'));
+router.get('/documents', roleMiddleware('SUPER_ADMIN', 'ADMIN', 'WORKSPACE_ADMIN', 'WORKSPACE_MEMBER', 'EMPLOYEE'), (req, res) => {
+  const query = new URLSearchParams(req.query as any).toString();
+  return forwardRequest(req, res, SERVICES.SPRING_AI, `/documents${query ? `?${query}` : ''}`);
+});
 router.get('/documents/:id', roleMiddleware('SUPER_ADMIN', 'ADMIN', 'WORKSPACE_ADMIN', 'WORKSPACE_MEMBER', 'EMPLOYEE'), (req, res) =>
   forwardRequest(req, res, SERVICES.SPRING_AI, `/documents/${req.params.id}`));
-router.post('/documents/upload', roleMiddleware('SUPER_ADMIN', 'ADMIN', 'WORKSPACE_ADMIN'), (req, res) =>
-  forwardMultipartRequest(req, res, SERVICES.SPRING_AI, '/documents/upload'));
+router.get('/documents/:id/raw', roleMiddleware('SUPER_ADMIN', 'ADMIN', 'WORKSPACE_ADMIN', 'WORKSPACE_MEMBER', 'EMPLOYEE'), (req, res) =>
+  forwardMultipartRequest(req, res, SERVICES.SPRING_AI, `/documents/${req.params.id}/raw`));
+router.post('/documents/upload', roleMiddleware('SUPER_ADMIN', 'ADMIN', 'WORKSPACE_ADMIN'), (req, res) => {
+  const query = new URLSearchParams(req.query as any).toString();
+  return forwardMultipartRequest(req, res, SERVICES.SPRING_AI, `/documents/upload${query ? `?${query}` : ''}`);
+});
+router.post('/documents/:id/ingest', roleMiddleware('SUPER_ADMIN', 'ADMIN', 'WORKSPACE_ADMIN'), (req, res) =>
+  forwardRequest(req, res, SERVICES.SPRING_AI, `/documents/${req.params.id}/ingest`));
 router.delete('/documents/:id', roleMiddleware('SUPER_ADMIN', 'ADMIN'), (req, res) =>
   forwardRequest(req, res, SERVICES.SPRING_AI, `/documents/${req.params.id}`));
 router.patch('/documents/:id/metadata', roleMiddleware('SUPER_ADMIN', 'ADMIN'), (req, res) =>
   forwardRequest(req, res, SERVICES.SPRING_AI, `/documents/${req.params.id}/metadata`));
 router.post('/documents/:id/approve', roleMiddleware('SUPER_ADMIN', 'ADMIN'), (req, res) =>
   forwardRequest(req, res, SERVICES.SPRING_AI, `/documents/${req.params.id}/approve`));
+router.post('/documents/:id/ai-refactor', roleMiddleware('SUPER_ADMIN', 'ADMIN', 'WORKSPACE_ADMIN'), (req, res) =>
+  forwardRequest(req, res, SERVICES.SPRING_AI, `/documents/${req.params.id}/ai-refactor`));
 
 // Spring: Chunks & Stats
 router.get('/documents/:id/chunks', roleMiddleware('SUPER_ADMIN', 'ADMIN', 'WORKSPACE_ADMIN', 'WORKSPACE_MEMBER', 'EMPLOYEE'), (req, res) =>
@@ -754,8 +819,7 @@ router.delete('/chat/conversations/:id', roleMiddleware('SUPER_ADMIN', 'ADMIN', 
 router.post('/chat/messages', roleMiddleware('SUPER_ADMIN', 'ADMIN', 'WORKSPACE_MEMBER', 'EMPLOYEE'), (req, res) =>
   forwardStreamRequest(req, res, SERVICES.SPRING_AI, '/chat/messages'));
 
-// ============= AI AGENT ROUTES (Phase 2) =============
-// Streams SSE response from /agent/chat back to client
+// ============= AI AGENT ROUTES (Spring) =============
 router.post('/agent/chat', roleMiddleware('SUPER_ADMIN', 'ADMIN', 'WORKSPACE_MEMBER', 'EMPLOYEE'), (req, res) =>
   forwardStreamRequest(req, res, SERVICES.SPRING_AI, '/agent/chat'));
 router.get('/agent/health', (req, res) =>

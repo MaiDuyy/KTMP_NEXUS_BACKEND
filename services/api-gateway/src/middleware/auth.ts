@@ -158,8 +158,47 @@ export function roleMiddleware(...allowedRoles: string[]) {
       });
     }
 
-    const hasRole = allowedRoles.includes(req.user.role) || 
-      (req.user.roles && req.user.roles.some((r: string) => allowedRoles.includes(r)));
+    // Map system-wide roles to equivalent workspace roles to handle gateway routes 
+    // that check for workspace-level roles but receive system-wide tokens.
+    const userRoles = [req.user.role, ...(req.user.roles || [])];
+    
+    // Expand roles with their equivalents
+    const expandedRoles = new Set<string>();
+    for (const r of userRoles) {
+      expandedRoles.add(r);
+      if (r === 'SUPER_ADMIN') {
+        expandedRoles.add('ADMIN');
+        expandedRoles.add('WORKSPACE_OWNER');
+        expandedRoles.add('WORKSPACE_ADMIN');
+        expandedRoles.add('WORKSPACE_MEMBER');
+        expandedRoles.add('EMPLOYEE');
+      }
+      if (r === 'ADMIN') {
+        expandedRoles.add('WORKSPACE_OWNER');
+        expandedRoles.add('WORKSPACE_ADMIN');
+        expandedRoles.add('WORKSPACE_MEMBER');
+        expandedRoles.add('EMPLOYEE');
+      }
+      if (r === 'WORKSPACE_MANAGER') {
+        expandedRoles.add('WORKSPACE_ADMIN');
+        expandedRoles.add('WORKSPACE_MEMBER');
+      }
+      if (r === 'EMPLOYEE') {
+        expandedRoles.add('WORKSPACE_MEMBER');
+      }
+    }
+
+    // Also include the actual workspaceRole if set by workspaceMiddleware
+    const workspaceRole = (req as any).workspaceRole;
+    if (workspaceRole) {
+      expandedRoles.add(workspaceRole);
+      // Workspace OWNER/ADMIN implies WORKSPACE_MEMBER
+      if (workspaceRole === 'WORKSPACE_OWNER' || workspaceRole === 'WORKSPACE_ADMIN') {
+        expandedRoles.add('WORKSPACE_MEMBER');
+      }
+    }
+
+    const hasRole = allowedRoles.some(role => expandedRoles.has(role));
 
     if (!hasRole) {
       return res.status(403).json({
