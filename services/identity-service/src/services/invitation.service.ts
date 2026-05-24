@@ -264,6 +264,27 @@ export class InvitationService {
     await this.sendInvitationEmail(invitation, invitation.inviterName || 'Admin');
     logger.info({ invitationId }, 'Invitation resent');
   }
+
+  async rejectInvitation(token: string): Promise<void> {
+    const invitation = await userorgPrisma.invitation.findUnique({ where: { token } });
+    if (!invitation) throw new Error('Không tìm thấy lời mời!');
+    const status = this.getInvitationStatus(invitation);
+    if (status !== 'PENDING') throw new Error('Lời mời này không còn ở trạng thái chờ!');
+
+    await userorgPrisma.invitation.update({
+      where: { id: invitation.id },
+      data: { revokedAt: new Date() }
+    });
+
+    logger.info({ invitationId: invitation.id }, 'Invitation rejected');
+
+    await publishEvent(EventSubjects.WORKSPACE_INVITE_REJECTED, {
+      workspaceId: invitation.workspaceId,
+      email: invitation.email,
+      inviteId: invitation.id,
+      inviterId: invitation.invitedBy
+    });
+  }
 }
 
 export const invitationService = new InvitationService();

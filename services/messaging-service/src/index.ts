@@ -25,6 +25,7 @@ import { startUserSubscriber } from './subscribers/user.subscriber.js';
 import { startFriendSubscriber } from './subscribers/friend.subscriber.js';
 import { startOrganizationSubscriber } from './subscribers/organization.subscriber.js';
 import { startInvitationSubscriber } from './subscribers/invitation.subscriber.js';
+import { startDepartmentSubscriber } from './subscribers/department.subscriber.js';
 
 const app = express();
 const PORT = process.env.PORT || 3020;
@@ -102,6 +103,7 @@ async function start() {
     startFriendSubscriber();
     startOrganizationSubscriber();
     startInvitationSubscriber();
+    startDepartmentSubscriber();
     logger.info('NATS subscribers started');
 
     // Start gRPC server

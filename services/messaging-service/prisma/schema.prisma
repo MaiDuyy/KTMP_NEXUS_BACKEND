@@ -48,6 +48,7 @@ model ChatParticipant {
   notify     Boolean  @default(true)
   isMuted    Boolean  @default(false)
   hidden     Boolean  @default(false)
+  clearedAt  DateTime?
   role       ChatParticipantRole @default(CHANNEL_MEMBER)
 
   chat       Chat     @relation(fields: [chatId], references: [id], onDelete: Cascade)
@@ -297,6 +298,7 @@ model Workspace {
   
   ownerId     String
   orgId       String?
+  departmentId String?
   
   status      WorkspaceStatus @default(ACTIVE)
   isPublic         Boolean @default(false)
@@ -317,6 +319,7 @@ model Workspace {
   
   @@index([ownerId])
   @@index([slug])
+  @@index([departmentId])
   @@map("workspace")
 }
 

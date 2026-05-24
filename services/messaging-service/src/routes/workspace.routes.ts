@@ -11,16 +11,24 @@ export const workspaceRoutes = Router();
 
 workspaceRoutes.post('/', asyncHandler(async (req: Request, res: Response) => {
   const userId = req.headers['x-user-id'] as string;
-  const { name, description, icon, slug, isPublic, allowGuestAccess } = req.body;
+  const { name, description, icon, slug, isPublic, allowGuestAccess, departmentId } = req.body;
   if (!userId) return res.status(401).json({ success: false, message: 'Chưa đăng nhập!' });
   if (!name) return res.status(400).json({ success: false, message: 'Tên workspace là bắt buộc!' });
-  const workspace = await workspaceService.createWorkspace({ name, description, icon, slug, isPublic, allowGuestAccess }, userId);
+  const workspace = await workspaceService.createWorkspace({ name, description, icon, slug, isPublic, allowGuestAccess, departmentId }, userId);
   res.status(201).json({ success: true, message: 'Tạo workspace thành công!', workspace });
 }));
 
 workspaceRoutes.get('/', asyncHandler(async (req: Request, res: Response) => {
   const userId = req.headers['x-user-id'] as string;
+  const { departmentId } = req.query;
   if (!userId) return res.status(401).json({ success: false, message: 'Chưa đăng nhập!' });
+
+  if (departmentId && typeof departmentId === 'string') {
+    // Return workspaces filtered by department
+    const workspaces = await workspaceService.getWorkspacesByDepartment(departmentId, userId);
+    return res.json({ success: true, workspaces });
+  }
+
   const workspaces = await workspaceService.getUserWorkspaces(userId);
   res.json({ success: true, workspaces });
 }));
@@ -43,9 +51,9 @@ workspaceRoutes.get('/:id', asyncHandler(async (req: Request, res: Response) => 
 workspaceRoutes.put('/:id', asyncHandler(async (req: Request, res: Response) => {
   const userId = req.headers['x-user-id'] as string;
   const { id } = req.params;
-  const { name, description, icon, isPublic, allowGuestAccess } = req.body;
+  const { name, description, icon, isPublic, allowGuestAccess, departmentId } = req.body;
   if (!userId) return res.status(401).json({ success: false, message: 'Chưa đăng nhập!' });
-  const workspace = await workspaceService.updateWorkspace(id as string, { name, description, icon, isPublic, allowGuestAccess }, userId);
+  const workspace = await workspaceService.updateWorkspace(id as string, { name, description, icon, isPublic, allowGuestAccess, departmentId }, userId);
   res.json({ success: true, message: 'Cập nhật workspace thành công!', workspace });
 }));
 

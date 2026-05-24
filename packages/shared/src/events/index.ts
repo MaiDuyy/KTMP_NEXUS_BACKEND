@@ -97,16 +97,25 @@ export interface GroupCreatedEvent {
 }
 
 export interface GroupMemberAddedEvent {
-  groupId: string;
-  userId: string;
-  role: string;
+  chatId: string;
+  addedMemberIds?: string[];
+  allMemberIds?: string[];
   addedBy: string;
+  // Legacy support
+  groupId?: string;
+  userId?: string;
+  role?: string;
 }
 
 export interface GroupMemberRemovedEvent {
-  groupId: string;
+  chatId: string;
   userId: string;
   removedBy: string;
+  memberIds?: string[]; // remaining members
+  isSelfLeave?: boolean;
+  reason?: string;
+  // Legacy support
+  groupId?: string;
 }
 
 export interface MessageCreatedEvent {

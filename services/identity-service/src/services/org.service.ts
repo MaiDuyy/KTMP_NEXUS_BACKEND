@@ -1,8 +1,9 @@
 // services/identity-service/src/services/org.service.ts
 // Migrated from rbac-service — prisma → rbacPrisma
 
-import { rbacPrisma } from '../lib/prisma.js';
+import { rbacPrisma, userorgPrisma } from '../lib/prisma.js';
 import { logger } from '../lib/logger.js';
+import { publishEvent, EventSubjects } from '../lib/nats.js';
 
 // ==================== DEPARTMENT SERVICE ====================
 
@@ -19,7 +20,7 @@ export class DepartmentService {
   }
 
   async getDepartmentById(id: string) {
-    return rbacPrisma.department.findUnique({
+    const dept = await rbacPrisma.department.findUnique({
       where: { id },
       include: {
         parent: true,
@@ -27,6 +28,38 @@ export class DepartmentService {
         members: true,
       },
     });
+
+    if (!dept) return null;
+
+    // Fetch user details for each member from userorg DB
+    const userIds = dept.members.map(m => m.userId);
+    const accounts = await userorgPrisma.account.findMany({
+      where: { id: { in: userIds } },
+      select: {
+        id: true,
+        name: true,
+        email: true,
+        avatar: true,
+      },
+    });
+
+    const accountsMap = new Map(accounts.map(acc => [acc.id, acc]));
+
+    // Map members with their user info
+    const membersWithUser = dept.members.map(m => ({
+      ...m,
+      user: accountsMap.get(m.userId) ? {
+        id: accountsMap.get(m.userId)!.id,
+        name: accountsMap.get(m.userId)!.name,
+        email: accountsMap.get(m.userId)!.email,
+        avatar: accountsMap.get(m.userId)!.avatar || undefined,
+      } : undefined
+    }));
+
+    return {
+      ...dept,
+      members: membersWithUser,
+    };
   }
 
   async createDepartment(data: {
@@ -56,7 +89,7 @@ export class DepartmentService {
     logger.info({ departmentId: id }, 'Department deleted');
   }
 
-  async addMember(departmentId: string, userId: string, isPrimary = false) {
+  async addMember(departmentId: string, userId: string, role = 'MEMBER', isPrimary = false) {
     if (isPrimary) {
       await rbacPrisma.departmentMember.updateMany({
         where: { userId, isPrimary: true },
@@ -68,11 +101,17 @@ export class DepartmentService {
       where: {
         userId_departmentId: { userId, departmentId },
       },
-      update: { isPrimary },
-      create: { userId, departmentId, isPrimary },
+      update: { isPrimary, role },
+      create: { userId, departmentId, isPrimary, role },
     });
 
-    logger.info({ departmentId, userId }, 'Member added to department');
+    await publishEvent(EventSubjects.DEPARTMENT_MEMBER_ADDED, {
+      departmentId,
+      userId,
+      role,
+    });
+
+    logger.info({ departmentId, userId, role }, 'Member added/updated in department');
     return member;
   }
 
@@ -82,6 +121,12 @@ export class DepartmentService {
         userId_departmentId: { userId, departmentId },
       },
     });
+
+    await publishEvent(EventSubjects.DEPARTMENT_MEMBER_REMOVED, {
+      departmentId,
+      userId,
+    });
+
     logger.info({ departmentId, userId }, 'Member removed from department');
   }
 

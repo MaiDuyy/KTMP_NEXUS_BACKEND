@@ -14,6 +14,7 @@ interface CreateWorkspaceInput {
   slug?: string;
   isPublic?: boolean;
   allowGuestAccess?: boolean;
+  departmentId?: string;
 }
 
 interface UpdateWorkspaceInput {
@@ -22,6 +23,7 @@ interface UpdateWorkspaceInput {
   icon?: string;
   isPublic?: boolean;
   allowGuestAccess?: boolean;
+  departmentId?: string;
 }
 
 interface PaginationOptions {
@@ -48,6 +50,7 @@ export class WorkspaceService {
       data: {
         name: name.trim(), description: description?.trim(), icon, slug: workspaceSlug,
         ownerId: userId, isPublic: isPublic ?? false, allowGuestAccess: allowGuestAccess ?? false,
+        departmentId: data.departmentId || null,
         members: { create: { userId, role: 'WORKSPACE_OWNER' } },
       },
       include: { members: true },
@@ -92,6 +95,7 @@ export class WorkspaceService {
     await publishEvent(EventSubjects.WORKSPACE_CREATED, {
       id: workspace.id, name: workspace.name, slug: workspace.slug,
       createdBy: userId, createdAt: workspace.createdAt.toISOString(),
+      departmentId: workspace.departmentId || undefined,
     });
     logger.info({ workspaceId: workspace.id }, 'Workspace created with #general channel');
     return workspace;
@@ -101,7 +105,7 @@ export class WorkspaceService {
     const workspace = await prisma.workspace.findUnique({ where: { id }, include: { members: true } });
     if (!workspace) throw new Error('Không tìm thấy workspace!');
 
-    const member = workspace.members.find(m => m.userId === userId);
+    const member = workspace.members.find(m => m.userId === userId && m.leftAt === null);
     if (!member || !['WORKSPACE_OWNER', 'WORKSPACE_ADMIN'].includes(member.role)) throw new Error('Bạn không có quyền chỉnh sửa workspace này!');
 
     const updateData: any = {};
@@ -110,6 +114,7 @@ export class WorkspaceService {
     if (data.icon !== undefined) updateData.icon = data.icon;
     if (data.isPublic !== undefined) updateData.isPublic = data.isPublic;
     if (data.allowGuestAccess !== undefined) updateData.allowGuestAccess = data.allowGuestAccess;
+    if (data.departmentId !== undefined) updateData.departmentId = data.departmentId || null;
 
     const updated = await prisma.workspace.update({ where: { id }, data: updateData });
 
@@ -135,10 +140,18 @@ export class WorkspaceService {
     const workspace = await prisma.workspace.findFirst({
       where: { OR: [{ id: idOrSlug }, { slug: idOrSlug }] },
       include: {
-        members: { select: { id: true, userId: true, role: true, joinedAt: true } },
+        members: { 
+          where: { leftAt: null },
+          select: { id: true, userId: true, role: true, joinedAt: true } 
+        },
         channels: { where: { isArchived: false }, select: { id: true, name: true, type: true, isDefault: true } },
         categories: { orderBy: { position: 'asc' } },
-        _count: { select: { members: true, channels: true } },
+        _count: { 
+          select: { 
+            members: { where: { leftAt: null } }, 
+            channels: true 
+          } 
+        },
       },
     });
     if (!workspace) throw new Error('Không tìm thấy workspace!');
@@ -151,12 +164,17 @@ export class WorkspaceService {
   async getUserWorkspaces(userId: string) {
     const workspaces = await prisma.workspace.findMany({
       where: { 
-        members: { some: { userId } },
+        members: { some: { userId, leftAt: null } },
         status: 'ACTIVE'
       },
       include: {
-        _count: { select: { members: true, channels: true } },
-        members: { where: { userId }, select: { role: true } },
+        _count: { 
+          select: { 
+            members: { where: { leftAt: null } }, 
+            channels: true 
+          } 
+        },
+        members: { where: { userId, leftAt: null }, select: { role: true } },
       },
       orderBy: { updatedAt: 'desc' },
     });
@@ -165,6 +183,38 @@ export class WorkspaceService {
       id: ws.id, name: ws.name, description: ws.description, icon: ws.icon, slug: ws.slug,
       isPublic: ws.isPublic, myRole: ws.members[0]?.role,
       memberCount: ws._count.members, channelCount: ws._count.channels, updatedAt: ws.updatedAt,
+      departmentId: ws.departmentId,
+    }));
+  }
+
+  async getWorkspacesByDepartment(departmentId: string, userId: string) {
+    // Return all ACTIVE workspaces in this department where the user is a member (or workspace is public)
+    const workspaces = await prisma.workspace.findMany({
+      where: {
+        departmentId,
+        status: 'ACTIVE',
+        OR: [
+          { members: { some: { userId, leftAt: null } } },
+          { isPublic: true },
+        ],
+      },
+      include: {
+        _count: {
+          select: {
+            members: { where: { leftAt: null } },
+            channels: true,
+          },
+        },
+        members: { where: { userId, leftAt: null }, select: { role: true } },
+      },
+      orderBy: { updatedAt: 'desc' },
+    });
+
+    return workspaces.map(ws => ({
+      id: ws.id, name: ws.name, description: ws.description, icon: ws.icon, slug: ws.slug,
+      isPublic: ws.isPublic, myRole: ws.members[0]?.role ?? null,
+      memberCount: ws._count.members, channelCount: ws._count.channels, updatedAt: ws.updatedAt,
+      departmentId: ws.departmentId,
     }));
   }
 
@@ -203,36 +253,56 @@ export class WorkspaceService {
     else if (upperRole.includes('GUEST')) role = 'WORKSPACE_GUEST';
     else role = 'WORKSPACE_MEMBER';
 
-    const workspace = await prisma.workspace.findUnique({ where: { id: workspaceId }, include: { members: true } });
+    const workspace = await prisma.workspace.findUnique({
+      where: { id: workspaceId },
+      include: { members: true },  // load all (including soft-deleted) for full context
+    });
     if (!workspace) throw new Error('Không tìm thấy workspace!');
 
+    // Only active members (leftAt: null) can be inviters
+    const activeMembers = workspace.members.filter(m => m.leftAt === null);
+
     if (inviterId) {
-      const inviter = workspace.members.find(m => m.userId === inviterId);
+      const inviter = activeMembers.find(m => m.userId === inviterId);
       if (!inviter || !['WORKSPACE_OWNER', 'WORKSPACE_ADMIN'].includes(inviter.role)) throw new Error('Bạn không có quyền thêm thành viên!');
 
       const roleHierarchy = ['WORKSPACE_GUEST', 'WORKSPACE_MEMBER', 'WORKSPACE_ADMIN', 'WORKSPACE_OWNER'];
       if (roleHierarchy.indexOf(role) > roleHierarchy.indexOf(inviter.role)) throw new Error('Không thể gán role cao hơn quyền của bạn!');
     }
 
-    const existing = workspace.members.find(m => m.userId === targetUserId);
-    if (existing) throw new Error('Người dùng đã là thành viên!');
+    // Check if user is currently an active member
+    const existingActive = activeMembers.find(m => m.userId === targetUserId);
+    if (existingActive) throw new Error('Người dùng đã là thành viên!');
 
-    const member = await prisma.workspaceMember.create({
-      data: { workspaceId, userId: targetUserId, role, invitedBy: inviterId },
-    });
+    // Check if user previously left (soft-delete record exists)
+    const previousRecord = workspace.members.find(m => m.userId === targetUserId && m.leftAt !== null);
+
+    let member;
+    if (previousRecord) {
+      // Re-join: restore the record by clearing leftAt and updating role
+      member = await prisma.workspaceMember.update({
+        where: { id: previousRecord.id },
+        data: { role, leftAt: null, invitedBy: inviterId ?? previousRecord.invitedBy },
+      });
+      logger.info({ workspaceId, userId: targetUserId }, 'Member re-joined workspace (leftAt cleared)');
+    } else {
+      member = await prisma.workspaceMember.create({
+        data: { workspaceId, userId: targetUserId, role, invitedBy: inviterId },
+      });
+    }
 
     await this.autoJoinDefaultChannels(workspaceId, targetUserId);
-    
-    // Get all member IDs to notify via WS Gateway
-    const allMemberIds = workspace.members.map(m => m.userId);
+
+    // Only notify active members + the new member
+    const allMemberIds = activeMembers.map(m => m.userId);
     if (!allMemberIds.includes(targetUserId)) allMemberIds.push(targetUserId);
 
-    await publishEvent(EventSubjects.WORKSPACE_MEMBER_ADDED, { 
-      workspaceId, 
-      userId: targetUserId, 
-      role, 
+    await publishEvent(EventSubjects.WORKSPACE_MEMBER_ADDED, {
+      workspaceId,
+      userId: targetUserId,
+      role,
       invitedBy: inviterId,
-      memberIds: allMemberIds
+      memberIds: allMemberIds,
     });
     logger.info({ workspaceId, userId: targetUserId }, 'Member added to workspace');
     return member;
@@ -242,8 +312,10 @@ export class WorkspaceService {
     const workspace = await prisma.workspace.findUnique({ where: { id: workspaceId }, include: { members: true } });
     if (!workspace) throw new Error('Không tìm thấy workspace!');
 
-    const remover = workspace.members.find(m => m.userId === removerId);
-    const target = workspace.members.find(m => m.userId === targetUserId);
+    // Only consider ACTIVE members for permission checks
+    const activeMembers = workspace.members.filter(m => m.leftAt === null);
+    const remover = activeMembers.find(m => m.userId === removerId);
+    const target = activeMembers.find(m => m.userId === targetUserId);
     if (!target) throw new Error('Người dùng không phải thành viên!');
 
     if (targetUserId === removerId) {
@@ -255,13 +327,67 @@ export class WorkspaceService {
         throw new Error('Không thể xóa thành viên có quyền cao hơn hoặc bằng!');
     }
 
-    await prisma.workspaceMember.delete({ where: { id: target.id } });
-    await prisma.channelMember.deleteMany({ where: { userId: targetUserId, channel: { workspaceId } } });
+    // Notify remaining active members (excluding the leaving user)
+    const allMemberIds = activeMembers
+      .filter(m => m.userId !== targetUserId)
+      .map(m => m.userId);
+
+    // Soft-delete (consistent with leaveWorkspace/kickMember) + remove channel memberships
+    await Promise.all([
+      prisma.workspaceMember.update({
+        where: { id: target.id },
+        data: { leftAt: new Date(), leftReason: targetUserId === removerId ? 'SELF_LEFT' : 'KICKED' },
+      }),
+      prisma.channelMember.deleteMany({ where: { userId: targetUserId, channel: { workspaceId } } }),
+      this.cleanupWorkspaceChatsForUser(workspaceId, targetUserId),
+    ]);
 
     await publishEvent(EventSubjects.WORKSPACE_MEMBER_REMOVED, {
-      workspaceId, userId: targetUserId, removedBy: removerId, isSelfLeave: targetUserId === removerId,
+      workspaceId,
+      userId: targetUserId,
+      removedBy: removerId,
+      isSelfLeave: targetUserId === removerId,
+      memberIds: allMemberIds,
     });
-    logger.info({ workspaceId, userId: targetUserId }, 'Member removed from workspace');
+    logger.info({ workspaceId, userId: targetUserId }, 'Member removed from workspace (soft-deleted)');
+    return { success: true, removed: true };
+  }
+
+  async removeMemberSystem(workspaceId: string, targetUserId: string) {
+    const workspace = await prisma.workspace.findUnique({ where: { id: workspaceId }, include: { members: true } });
+    if (!workspace) throw new Error('Không tìm thấy workspace!');
+
+    const activeMembers = workspace.members.filter(m => m.leftAt === null);
+    const target = activeMembers.find(m => m.userId === targetUserId);
+    if (!target) return { success: false, message: 'Người dùng không phải thành viên!' };
+
+    // Skip workspace owner to prevent orphan workspace issues
+    if (target.role === 'WORKSPACE_OWNER') {
+      logger.info({ workspaceId, targetUserId }, 'Skipping auto-remove of workspace owner from workspace');
+      return { success: false, message: 'Skipped workspace owner' };
+    }
+
+    const allMemberIds = activeMembers
+      .filter(m => m.userId !== targetUserId)
+      .map(m => m.userId);
+
+    await Promise.all([
+      prisma.workspaceMember.update({
+        where: { id: target.id },
+        data: { leftAt: new Date(), leftReason: 'KICKED' },
+      }),
+      prisma.channelMember.deleteMany({ where: { userId: targetUserId, channel: { workspaceId } } }),
+      this.cleanupWorkspaceChatsForUser(workspaceId, targetUserId),
+    ]);
+
+    await publishEvent(EventSubjects.WORKSPACE_MEMBER_REMOVED, {
+      workspaceId,
+      userId: targetUserId,
+      removedBy: 'SYSTEM',
+      isSelfLeave: false,
+      memberIds: allMemberIds,
+    });
+    logger.info({ workspaceId, userId: targetUserId }, 'Member removed from workspace by SYSTEM (soft-deleted)');
     return { success: true, removed: true };
   }
 
@@ -352,10 +478,10 @@ export class WorkspaceService {
 
     const [members, total] = await Promise.all([
       prisma.workspaceMember.findMany({
-        where: { workspaceId }, skip, take: limit,
+        where: { workspaceId, leftAt: null }, skip, take: limit,
         orderBy: [{ role: 'desc' }, { joinedAt: 'asc' }],
       }),
-      prisma.workspaceMember.count({ where: { workspaceId } }),
+      prisma.workspaceMember.count({ where: { workspaceId, leftAt: null } }),
     ]);
 
     const userIds = members.map(m => m.userId);
@@ -480,7 +606,7 @@ export class WorkspaceService {
     });
     if (!workspace) throw new Error('Không tìm thấy workspace!');
 
-    const isMember = workspace.members.some(m => m.userId === userId);
+    const isMember = workspace.members.some(m => m.userId === userId && m.leftAt === null);
     if (!isMember) throw new Error('Bạn không có quyền truy cập workspace này!');
 
     const thirtyDaysAgo = new Date();
@@ -572,7 +698,7 @@ export class WorkspaceService {
 
   async getWorkspaceMembers(workspaceId: string) {
     const members = await prisma.workspaceMember.findMany({
-      where: { workspaceId },
+      where: { workspaceId, leftAt: null },
       select: { userId: true },
     });
     return members.map(m => m.userId);
@@ -602,13 +728,46 @@ export class WorkspaceService {
     const sharedCount = await prisma.workspace.count({
       where: {
         status: 'ACTIVE',
-        members: { some: { userId: user1Id } },
+        members: { some: { userId: user1Id, leftAt: null } },
         AND: {
-          members: { some: { userId: user2Id } }
+          members: { some: { userId: user2Id, leftAt: null } }
         }
       }
     });
     return { hasSharedActiveWorkspace: sharedCount > 0, sharedCount };
+  }
+
+  private async cleanupWorkspaceChatsForUser(workspaceId: string, userId: string) {
+    try {
+      // 1. Find all private DMs in the workspace that this user is a participant of
+      const privateDms = await prisma.chat.findMany({
+        where: {
+          workspaceId,
+          isGroup: false,
+          participants: { some: { accountId: userId } }
+        },
+        select: { id: true }
+      });
+
+      if (privateDms.length > 0) {
+        const dmIds = privateDms.map(d => d.id);
+        // Soft-delete: Hide DM for all participants of these direct messages
+        await prisma.chatParticipant.updateMany({
+          where: { chatId: { in: dmIds } },
+          data: { hidden: true }
+        });
+      }
+
+      // 2. Hard-delete the user from all channels/group chats in the workspace (isGroup: true)
+      await prisma.chatParticipant.deleteMany({
+        where: {
+          accountId: userId,
+          chat: { workspaceId, isGroup: true }
+        }
+      });
+    } catch (err: any) {
+      logger.error({ err: err.message, workspaceId, userId }, 'Failed to cleanup workspace chats for user');
+    }
   }
 
   async deleteWorkspace(id: string, userId: string) {
@@ -638,6 +797,14 @@ export class WorkspaceService {
         leftReason: 'SELF_LEFT',
       }
     });
+
+    // Remove from all channels in the workspace (same as kick/remove)
+    await prisma.channelMember.deleteMany({
+      where: { userId, channel: { workspaceId } }
+    });
+
+    // Mirror cleanup all chats/channels in the workspace (soft-delete DMs, hard-delete group/channels)
+    await this.cleanupWorkspaceChatsForUser(workspaceId, userId);
 
     const members = await this.getWorkspaceMembers(workspaceId);
     await publishEvent(EventSubjects.WORKSPACE_MEMBER_LEFT, {
@@ -669,6 +836,14 @@ export class WorkspaceService {
         leftReason: 'KICKED',
       }
     });
+
+    // Remove kicked user from all channels in the workspace
+    await prisma.channelMember.deleteMany({
+      where: { userId: targetUserId, channel: { workspaceId } }
+    });
+
+    // Mirror cleanup all chats/channels in the workspace (soft-delete DMs, hard-delete group/channels)
+    await this.cleanupWorkspaceChatsForUser(workspaceId, targetUserId);
 
     const members = await this.getWorkspaceMembers(workspaceId);
     await publishEvent(EventSubjects.WORKSPACE_MEMBER_KICKED, {
@@ -890,7 +1065,7 @@ export class WorkspaceService {
       where: { token },
     });
 
-    if (!invite) throw new Error('Lời mời không tồn tại!');
+    if (!invite) throw new Error('Không tìm thấy lời mời!');
     if (invite.status !== 'PENDING') throw new Error('Lời mời này không còn ở trạng thái chờ!');
 
     await prisma.workspaceInvite.update({

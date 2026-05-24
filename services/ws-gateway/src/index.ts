@@ -122,6 +122,11 @@ const EventSubjects = {
   FRIEND_USER_BLOCKED: 'friend.user.blocked',
   FRIEND_USER_UNBLOCKED: 'friend.user.unblocked',
 
+  // AI Knowledge events
+  DOCUMENT_STATUS_UPDATED: 'document.status.updated',
+  COMPILATION_PLAN_UPDATED: 'compilation.plan.updated',
+  WIKI_DRAFT_UPDATED: 'wiki.draft.updated',
+
   // ===== System/Gateway specific events =====
   USER_ONLINE: 'user.online',
   USER_OFFLINE: 'user.offline',
@@ -653,6 +658,53 @@ function subscribeToNatsEvents() {
       }
     }
   })();
+
+  // Document Status Updated
+  const docStatusSub = addSub(natsConnection.subscribe(EventSubjects.DOCUMENT_STATUS_UPDATED));
+  (async () => {
+    for await (const msg of docStatusSub) {
+      try {
+        const event = jsonCodec.decode(msg.data) as any;
+        const { documentId, status, userId, workspaceId } = event.payload;
+        console.log(`[WS] Document ${documentId} status updated to ${status} for workspace ${workspaceId}`);
+        // Map COMPLETED to READY for frontend compatibility
+        const mappedStatus = status === 'COMPLETED' ? 'READY' : status;
+        io.emit('document:status_changed', { documentId, status: mappedStatus });
+      } catch (err) {
+        console.error('[WS] Error processing DOCUMENT_STATUS_UPDATED:', err);
+      }
+    }
+  })();
+
+  // Compilation Plan Updated
+  const planUpdatedSub = addSub(natsConnection.subscribe(EventSubjects.COMPILATION_PLAN_UPDATED));
+  (async () => {
+    for await (const msg of planUpdatedSub) {
+      try {
+        const event = jsonCodec.decode(msg.data) as any;
+        const { planId, sourceDocumentId, workspaceId, status, userId } = event.payload;
+        console.log(`[WS] Compilation plan ${planId} updated to ${status} in workspace ${workspaceId}`);
+        io.emit('compilation_plan:status_changed', { planId, sourceDocumentId, status, workspaceId });
+      } catch (err) {
+        console.error('[WS] Error processing COMPILATION_PLAN_UPDATED:', err);
+      }
+    }
+  })();
+
+  // Wiki Draft Updated
+  const draftUpdatedSub = addSub(natsConnection.subscribe(EventSubjects.WIKI_DRAFT_UPDATED));
+  (async () => {
+    for await (const msg of draftUpdatedSub) {
+      try {
+        const event = jsonCodec.decode(msg.data) as any;
+        const { draftId, title, slug, workspaceId, status, userId } = event.payload;
+        console.log(`[WS] Wiki draft ${draftId} (${title}) updated to ${status} in workspace ${workspaceId}`);
+        io.emit('wiki_draft:status_changed', { draftId, title, slug, status, workspaceId });
+      } catch (err) {
+        console.error('[WS] Error processing WIKI_DRAFT_UPDATED:', err);
+      }
+    }
+  })();
   
   // Workspace Invite Created
   const workspaceInviteSub = addSub(natsConnection.subscribe(EventSubjects.WORKSPACE_INVITE_CREATED));
@@ -786,16 +838,65 @@ function subscribeToNatsEvents() {
   const workspaceMemberRemovedSub = addSub(natsConnection.subscribe(EventSubjects.WORKSPACE_MEMBER_REMOVED));
   (async () => {
     for await (const msg of workspaceMemberRemovedSub) {
-      const event = jsonCodec.decode(msg.data) as any;
-      const { workspaceId, userId, memberIds } = event.payload;
-      console.log(`[WS] User ${userId} removed from workspace ${workspaceId}`);
-      io.to(`user:${userId}`).emit('workspace:member:left', { workspaceId, userId, reason: 'REMOVED' });
-      if (Array.isArray(memberIds)) {
-        for (const uid of memberIds) {
-          if (uid !== userId) {
-            io.to(`user:${uid}`).emit('workspace:member:updated', { workspaceId, userId, action: 'removed' });
+      try {
+        const event = jsonCodec.decode(msg.data) as any;
+        const { workspaceId, userId, memberIds, isSelfLeave } = event.payload;
+        const reason = isSelfLeave ? 'LEFT' : 'KICKED';
+        console.log(`[WS] User ${userId} removed from workspace ${workspaceId}. Reason: ${reason}`);
+        io.to(`user:${userId}`).emit('workspace:member:left', { workspaceId, userId, reason });
+        if (Array.isArray(memberIds)) {
+          for (const uid of memberIds) {
+            if (uid !== userId) {
+              io.to(`user:${uid}`).emit('workspace:member:updated', { workspaceId, userId, action: 'removed', reason });
+            }
           }
         }
+      } catch (err) {
+        console.error('[WS] Error processing WORKSPACE_MEMBER_REMOVED:', err);
+      }
+    }
+  })();
+
+  // Workspace Member Left
+  const workspaceMemberLeftSub = addSub(natsConnection.subscribe(EventSubjects.WORKSPACE_MEMBER_LEFT));
+  (async () => {
+    for await (const msg of workspaceMemberLeftSub) {
+      try {
+        const event = jsonCodec.decode(msg.data) as any;
+        const { workspaceId, userId, memberIds } = event.payload;
+        console.log(`[WS] User ${userId} left workspace ${workspaceId}`);
+        io.to(`user:${userId}`).emit('workspace:member:left', { workspaceId, userId, reason: 'LEFT' });
+        if (Array.isArray(memberIds)) {
+          for (const uid of memberIds) {
+            if (uid !== userId) {
+              io.to(`user:${uid}`).emit('workspace:member:updated', { workspaceId, userId, action: 'removed', reason: 'LEFT' });
+            }
+          }
+        }
+      } catch (err) {
+        console.error('[WS] Error processing WORKSPACE_MEMBER_LEFT:', err);
+      }
+    }
+  })();
+
+  // Workspace Member Kicked
+  const workspaceMemberKickedSub = addSub(natsConnection.subscribe(EventSubjects.WORKSPACE_MEMBER_KICKED));
+  (async () => {
+    for await (const msg of workspaceMemberKickedSub) {
+      try {
+        const event = jsonCodec.decode(msg.data) as any;
+        const { workspaceId, userId, memberIds, kickedBy } = event.payload;
+        console.log(`[WS] User ${userId} was kicked from workspace ${workspaceId} by ${kickedBy}`);
+        io.to(`user:${userId}`).emit('workspace:member:left', { workspaceId, userId, reason: 'KICKED' });
+        if (Array.isArray(memberIds)) {
+          for (const uid of memberIds) {
+            if (uid !== userId) {
+              io.to(`user:${uid}`).emit('workspace:member:updated', { workspaceId, userId, action: 'removed', reason: 'KICKED' });
+            }
+          }
+        }
+      } catch (err) {
+        console.error('[WS] Error processing WORKSPACE_MEMBER_KICKED:', err);
       }
     }
   })();
@@ -1060,13 +1161,41 @@ function subscribeToNatsEvents() {
   const groupMemberAddedSub = addSub(natsConnection.subscribe(EventSubjects.GROUP_MEMBER_ADDED));
   (async () => {
     for await (const msg of groupMemberAddedSub) {
-      const event = jsonCodec.decode(msg.data) as any;
-      const { chatId, userId, memberIds } = event.payload;
-      console.log(`[WS] User ${userId} joined group ${chatId}`);
-      if (Array.isArray(memberIds)) {
-        for (const uid of memberIds) {
-          io.to(`user:${uid}`).emit('chat:member_updated', { chatId, userId, action: 'joined' });
+      try {
+        const event = jsonCodec.decode(msg.data) as any;
+        const { chatId, addedMemberIds, allMemberIds, addedBy, userId, memberIds, memberId } = event.payload;
+        
+        // Normalize payload to handle both old/fallback and new structure
+        const finalAddedMemberIds: string[] = Array.isArray(addedMemberIds) 
+          ? addedMemberIds 
+          : (memberId ? [memberId] : (userId ? [userId] : []));
+          
+        const finalAllMemberIds: string[] = Array.isArray(allMemberIds)
+          ? allMemberIds
+          : (Array.isArray(memberIds) ? memberIds : []);
+
+        const finalAddedBy = addedBy || userId || 'SYSTEM';
+
+        console.log(`[WS] Members ${finalAddedMemberIds.join(',')} added to group ${chatId} by ${finalAddedBy}`);
+
+        // 1. Notify newly added members that they have been added to a new chat
+        for (const uid of finalAddedMemberIds) {
+          io.to(`user:${uid}`).emit('chat:new', { 
+            chatId, 
+            isGroup: true 
+          });
         }
+
+        // 2. Notify all members (existing + new) that group members updated
+        for (const uid of finalAllMemberIds) {
+          io.to(`user:${uid}`).emit('chat:member_updated', { 
+            chatId, 
+            userId: finalAddedMemberIds[0] || finalAddedBy, 
+            action: 'joined' 
+          });
+        }
+      } catch (err) {
+        console.error('[WS] Error processing GROUP_MEMBER_ADDED event:', err);
       }
     }
   })();
@@ -1075,16 +1204,34 @@ function subscribeToNatsEvents() {
   const groupMemberRemovedSub = addSub(natsConnection.subscribe(EventSubjects.GROUP_MEMBER_REMOVED));
   (async () => {
     for await (const msg of groupMemberRemovedSub) {
-      const event = jsonCodec.decode(msg.data) as any;
-      const { chatId, userId, memberIds, reason } = event.payload;
-      console.log(`[WS] User ${userId} removed from group ${chatId}`);
-      io.to(`user:${userId}`).emit('chat:member_removed', { chatId, userId, reason });
-      if (Array.isArray(memberIds)) {
-        for (const uid of memberIds) {
-          if (uid !== userId) {
-            io.to(`user:${uid}`).emit('chat:member_updated', { chatId, userId, action: 'removed' });
+      try {
+        const event = jsonCodec.decode(msg.data) as any;
+        const { chatId, userId, memberIds, reason, isSelfLeave, memberId } = event.payload;
+        
+        const finalUserId = userId || memberId;
+        const finalIsSelfLeave = isSelfLeave !== undefined ? isSelfLeave : (reason === 'leave');
+
+        console.log(`[WS] User ${finalUserId} removed from group ${chatId}`);
+        io.to(`user:${finalUserId}`).emit('chat:member_removed', { 
+          chatId, 
+          userId: finalUserId, 
+          reason, 
+          isSelfLeave: finalIsSelfLeave 
+        });
+
+        if (Array.isArray(memberIds)) {
+          for (const uid of memberIds) {
+            if (uid !== finalUserId) {
+              io.to(`user:${uid}`).emit('chat:member_updated', { 
+                chatId, 
+                userId: finalUserId, 
+                action: 'removed' 
+              });
+            }
           }
         }
+      } catch (err) {
+        console.error('[WS] Error processing GROUP_MEMBER_REMOVED event:', err);
       }
     }
   })();
@@ -1608,17 +1755,27 @@ io.on('connection', async (socket: AuthenticatedSocket) => {
     userInCall.set(userId, roomName);
 
     if (callType === 'private' && targetUserId) {
-      // Send incoming call to specific callee via personal room
-      io.to(`user:${targetUserId}`).emit('call:incoming', {
-        roomName,
-        chatId,
-        callerId: userId,
-        callerName: userName,
-        callerAvatar: callerAvatar,
-        isVideo,
-        callType,
-        timestamp: new Date().toISOString(),
-      });
+      messagingGrpcClient.getParticipantIds(chatId)
+        .then(participantIds => {
+          if (participantIds.includes(targetUserId)) {
+            // Send incoming call to specific callee via personal room
+            io.to(`user:${targetUserId}`).emit('call:incoming', {
+              roomName,
+              chatId,
+              callerId: userId,
+              callerName: userName,
+              callerAvatar: callerAvatar,
+              isVideo,
+              callType,
+              timestamp: new Date().toISOString(),
+            });
+          } else {
+            console.log(`[Call] Suppressing private call incoming to user ${targetUserId} because they are not an active chat/workspace member.`);
+          }
+        })
+        .catch(err => {
+          console.error(`[Call] Failed to fetch participants for private call check:`, err);
+        });
     } else {
       // Group: broadcast to ALL online members of the chat via their PERSONAL rooms
       // Optimized via gRPC

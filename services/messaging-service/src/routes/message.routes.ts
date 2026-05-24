@@ -103,7 +103,7 @@ messageRoutes.get('/:chatId/pinned', asyncHandler(async (req: Request, res: Resp
   const userId = req.headers['x-user-id'] as string;
   const { chatId } = req.params;
   if (!userId) return res.status(401).json({ success: false, message: 'Chưa đăng nhập!' });
-  const pinnedMessages = await messageService.getPinnedMessages(chatId as string);
+  const pinnedMessages = await messageService.getPinnedMessages(chatId as string, userId);
   res.json({
     success: true,
     pinnedMessages: pinnedMessages.map((msg) => ({
@@ -119,7 +119,7 @@ messageRoutes.get('/:chatId/search', asyncHandler(async (req: Request, res: Resp
   const { chatId } = req.params;
   const { q } = req.query;
   if (!userId) return res.status(401).json({ success: false, message: 'Chưa đăng nhập!' });
-  const messages = await messageService.searchMessages(chatId as string, q as string);
+  const messages = await messageService.searchMessages(chatId as string, q as string, userId);
   res.json({
     success: true,
     messages: messages.map((msg) => ({ id: msg.id, content: msg.content, time: msg.time, senderId: msg.senderId, sender: (msg as any).sender })),
@@ -132,7 +132,7 @@ messageRoutes.get('/:chatId/media', asyncHandler(async (req: Request, res: Respo
   const { chatId } = req.params;
   const { type } = req.query;
   if (!userId) return res.status(401).json({ success: false, message: 'Chưa đăng nhập!' });
-  const messages = await messageService.getMediaMessages(chatId as string, type as string);
+  const messages = await messageService.getMediaMessages(chatId as string, type as string, userId);
   res.json({
     success: true,
     media: messages.map((msg) => ({

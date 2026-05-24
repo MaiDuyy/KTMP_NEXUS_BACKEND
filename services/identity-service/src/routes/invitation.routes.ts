@@ -53,6 +53,14 @@ invitationRoutes.post('/join-body', asyncHandler(async (req: Request, res: Respo
   res.json({ success: true, message: 'Tham gia thành công!' });
 }));
 
+invitationRoutes.post('/reject-body', asyncHandler(async (req: Request, res: Response) => {
+  const { token } = req.body;
+  if (!token) return res.status(400).json({ success: false, message: 'Token là bắt buộc!' });
+  
+  await invitationService.rejectInvitation(token);
+  res.json({ success: true, message: 'Đã từ chối lời mời thành công!' });
+}));
+
 invitationRoutes.post('/', asyncHandler(async (req: Request, res: Response) => {
   const userId = req.headers['x-user-id'] as string;
   const userName = (req.headers['x-user-name'] as string) || 'Admin';

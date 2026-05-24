@@ -114,6 +114,30 @@ router.delete('/notifications/:userId/all', async (req, res) => {
   }
 });
 
+// Delete notifications by category/type for user
+router.delete('/notifications/:userId/category/:type', async (req, res) => {
+  try {
+    const { userId, type } = req.params;
+    const count = await notificationService.deleteByType(userId, type as any);
+    res.json({ success: true, count });
+  } catch (error) {
+    logger.error(error, 'Failed to delete notifications by category');
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// Delete read notifications only
+router.delete('/notifications/:userId/read', async (req, res) => {
+  try {
+    const { userId } = req.params;
+    const count = await notificationService.deleteReadOnly(userId);
+    res.json({ success: true, count });
+  } catch (error) {
+    logger.error(error, 'Failed to delete read notifications');
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
 // Register push token
 router.post('/push-tokens', async (req, res) => {
   try {

@@ -20,6 +20,12 @@ export class MessageService {
     const { cursor, limit = 50 } = options;
     const take = Math.min(limit, 100);
 
+    const participant = await prisma.chatParticipant.findUnique({
+      where: { chatId_accountId: { chatId, accountId: userId } },
+      select: { clearedAt: true }
+    });
+    const clearedAt = participant?.clearedAt;
+
     const whereCondition: any = {
       chatId,
       OR: [
@@ -30,6 +36,14 @@ export class MessageService {
 
     if (cursor) {
       whereCondition.time = { lt: new Date(cursor) };
+    }
+
+    if (clearedAt) {
+      if (whereCondition.time) {
+        whereCondition.time.gt = clearedAt;
+      } else {
+        whereCondition.time = { gt: clearedAt };
+      }
     }
 
     const messages = await prisma.message.findMany({
@@ -109,6 +123,24 @@ export class MessageService {
         workspaceId = chatMetadata.workspaceId;
         participantIds = chatMetadata.participants.map((p: any) => p.accountId);
 
+        // Filter out participants who are not active workspace members if this is a workspace-scoped chat
+        if (workspaceId) {
+          try {
+            const activeMembers = await prisma.workspaceMember.findMany({
+              where: {
+                workspaceId,
+                userId: { in: participantIds },
+                leftAt: null,
+              },
+              select: { userId: true },
+            });
+            const activeMemberIds = new Set(activeMembers.map(m => m.userId));
+            participantIds = participantIds.filter(id => activeMemberIds.has(id));
+          } catch (e) {
+            logger.warn({ workspaceId }, 'Failed to filter message participants by workspace membership');
+          }
+        }
+
         // Check Read-only permission
         if (chatMetadata.isReadOnly) {
           const userParticipant = chatMetadata.participants.find((p: any) => p.accountId === senderId);
@@ -121,9 +153,11 @@ export class MessageService {
                 try {
                     const workspaceMember = await prisma.workspaceMember.findUnique({
                         where: { workspaceId_userId: { workspaceId, userId: senderId } },
-                        select: { role: true }
+                        select: { role: true, leftAt: true }
                     });
-                    if (workspaceMember && (workspaceMember.role === 'WORKSPACE_ADMIN' || workspaceMember.role === 'WORKSPACE_OWNER')) {
+                    // Must be an ACTIVE admin/owner (not left/kicked)
+                    if (workspaceMember && workspaceMember.leftAt === null &&
+                        (workspaceMember.role === 'WORKSPACE_ADMIN' || workspaceMember.role === 'WORKSPACE_OWNER')) {
                         isWorkspacePrivileged = true;
                     }
                 } catch (e) {
@@ -144,6 +178,32 @@ export class MessageService {
             const blockInfo = await userorgClient.checkBlockedStatus(senderId, partner.accountId);
             if (blockInfo.isBlocked) {
               throw new Error('Bạn không thể gửi tin nhắn cho người này vì đã bị chặn hoặc bạn đã chặn người này!');
+            }
+
+            // For workspace-scoped private DMs, verify both participants are still active workspace members
+            if (workspaceId) {
+              try {
+                const activeMembers = await prisma.workspaceMember.findMany({
+                  where: {
+                    workspaceId,
+                    userId: { in: [senderId, partner.accountId] },
+                    leftAt: null,
+                  },
+                  select: { userId: true },
+                });
+                const activeMemberIds = activeMembers.map(m => m.userId);
+                if (!activeMemberIds.includes(senderId)) {
+                  throw new Error('Bạn không còn là thành viên của không gian làm việc này!');
+                }
+                if (!activeMemberIds.includes(partner.accountId)) {
+                  throw new Error('Thành viên này đã rời khỏi không gian làm việc!');
+                }
+              } catch (e: any) {
+                if (e.message?.includes('rời khỏi') || e.message?.includes('không còn là')) {
+                  throw e;
+                }
+                logger.warn({ workspaceId }, 'Failed to check workspace membership during sendMessage');
+              }
             }
           }
         }
@@ -186,6 +246,12 @@ export class MessageService {
       },
     });
 
+    // Unhide chat only for the sender of the message if it was hidden
+    await prisma.chatParticipant.update({
+      where: { chatId_accountId: { chatId, accountId: senderId } },
+      data: { hidden: false },
+    }).catch(() => {});
+
     let senderProfile = null;
     try {
       const accountMap = await userorgClient.getUsers([senderId]);
@@ -211,9 +277,26 @@ export class MessageService {
       }
     );
 
-    const mentionedUserIds = mentions
+    let mentionedUserIds = mentions
       .filter(m => m.targetType === 'USER' && m.targetId)
       .map(m => m.targetId) as string[];
+
+    if (workspaceId && mentionedUserIds.length > 0) {
+      try {
+        const activeMentions = await prisma.workspaceMember.findMany({
+          where: {
+            workspaceId,
+            userId: { in: mentionedUserIds },
+            leftAt: null,
+          },
+          select: { userId: true },
+        });
+        const activeMentionIds = new Set(activeMentions.map(m => m.userId));
+        mentionedUserIds = mentionedUserIds.filter(id => activeMentionIds.has(id));
+      } catch (e) {
+        logger.warn({ workspaceId }, 'Failed to filter mentioned users by workspace membership');
+      }
+    }
 
     const aiMentioned = mentions.some(m => m.targetType === 'AI');
     if (aiMentioned) {
@@ -456,33 +539,83 @@ export class MessageService {
     return { pin: newPinState };
   }
 
-  async getPinnedMessages(chatId: string) {
+  async getPinnedMessages(chatId: string, userId: string) {
+    const participant = await prisma.chatParticipant.findUnique({
+      where: { chatId_accountId: { chatId, accountId: userId } },
+      select: { clearedAt: true }
+    });
+    const clearedAt = participant?.clearedAt;
+
+    const whereCondition: any = {
+      chatId,
+      pin: true,
+      destroy: false
+    };
+
+    if (clearedAt) {
+      whereCondition.time = { gt: clearedAt };
+    }
+
     const messages = await prisma.message.findMany({
-      where: { chatId, pin: true, destroy: false },
+      where: whereCondition,
       orderBy: { time: 'desc' },
     });
     return this.populateSenderInfo(messages);
   }
 
-  async searchMessages(chatId: string, query: string) {
+  async searchMessages(chatId: string, query: string, userId: string) {
     if (!query || query.trim().length < 1) throw new Error('Từ khóa phải có ít nhất 1 ký tự!');
+
+    const participant = await prisma.chatParticipant.findUnique({
+      where: { chatId_accountId: { chatId, accountId: userId } },
+      select: { clearedAt: true }
+    });
+    const clearedAt = participant?.clearedAt;
+
+    const whereCondition: any = {
+      chatId,
+      destroy: false,
+      content: { contains: query, mode: 'insensitive' },
+      type: 'text'
+    };
+
+    if (clearedAt) {
+      whereCondition.time = { gt: clearedAt };
+    }
+
     const messages = await prisma.message.findMany({
-      where: { chatId, destroy: false, content: { contains: query, mode: 'insensitive' }, type: 'text' },
+      where: whereCondition,
       orderBy: { time: 'desc' },
       take: 50,
     });
     return this.populateSenderInfo(messages);
   }
 
-  async getMediaMessages(chatId: string, type?: string) {
+  async getMediaMessages(chatId: string, type: string | undefined, userId: string) {
+    const participant = await prisma.chatParticipant.findUnique({
+      where: { chatId_accountId: { chatId, accountId: userId } },
+      select: { clearedAt: true }
+    });
+    const clearedAt = participant?.clearedAt;
+
     let typeFilter: string[] = [];
     if (type === 'image') typeFilter = ['image'];
     else if (type === 'video') typeFilter = ['video'];
     else if (type === 'file') typeFilter = ['file', 'audio'];
     else typeFilter = ['image', 'video', 'file', 'audio'];
 
+    const whereCondition: any = {
+      chatId,
+      destroy: false,
+      type: { in: typeFilter }
+    };
+
+    if (clearedAt) {
+      whereCondition.time = { gt: clearedAt };
+    }
+
     const messages = await prisma.message.findMany({
-      where: { chatId, destroy: false, type: { in: typeFilter } },
+      where: whereCondition,
       orderBy: { time: 'desc' },
       take: 100,
     });
@@ -529,8 +662,19 @@ export class MessageService {
     // 1. Lấy dữ liệu cơ bản từ DB cho tất cả chat
     const summariesRaw = await Promise.all(
       chatIds.map(async (chatId) => {
+        const participant = await prisma.chatParticipant.findUnique({
+          where: { chatId_accountId: { chatId, accountId: userId } },
+          select: { clearedAt: true }
+        });
+        const clearedAt = participant?.clearedAt || null;
+
+        const lastMessageWhere: any = { chatId };
+        if (clearedAt) {
+          lastMessageWhere.time = { gt: clearedAt };
+        }
+
         const lastMessage = await prisma.message.findFirst({
-          where: { chatId },
+          where: lastMessageWhere,
           orderBy: { time: 'desc' },
         });
 
@@ -542,13 +686,31 @@ export class MessageService {
         if (readReceipt) {
           const lastReadMsg = await prisma.message.findUnique({ where: { id: readReceipt.messageId } });
           if (lastReadMsg) {
+            const unreadWhere: any = {
+              chatId,
+              destroy: false,
+              senderId: { not: userId }
+            };
+            if (clearedAt && clearedAt > lastReadMsg.time) {
+              unreadWhere.time = { gt: clearedAt };
+            } else {
+              unreadWhere.time = { gt: lastReadMsg.time };
+            }
             unreadCount = await prisma.message.count({
-              where: { chatId, destroy: false, senderId: { not: userId }, time: { gt: lastReadMsg.time } },
+              where: unreadWhere,
             });
           }
         } else {
+          const unreadWhere: any = {
+            chatId,
+            destroy: false,
+            senderId: { not: userId }
+          };
+          if (clearedAt) {
+            unreadWhere.time = { gt: clearedAt };
+          }
           unreadCount = await prisma.message.count({
-            where: { chatId, destroy: false, senderId: { not: userId } },
+            where: unreadWhere,
           });
         }
 

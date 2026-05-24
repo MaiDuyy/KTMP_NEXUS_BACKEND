@@ -51,10 +51,37 @@ export class MentionService {
       })
     );
 
+    const chat = await prisma.chat.findUnique({
+      where: { id: chatId },
+      select: { workspaceId: true }
+    });
+    const workspaceId = chat?.workspaceId;
+
     const userMentions = mentionRecords.filter((m) => m.targetType === 'USER' && m.targetId);
     const notifiedUserIds = new Set<string>();
 
-    for (const mention of userMentions) {
+    let activeUserMentions = userMentions;
+    if (workspaceId) {
+      const targetUserIds = userMentions.map(m => m.targetId).filter(Boolean) as string[];
+      if (targetUserIds.length > 0) {
+        try {
+          const activeMembers = await prisma.workspaceMember.findMany({
+            where: {
+              workspaceId,
+              userId: { in: targetUserIds },
+              leftAt: null,
+            },
+            select: { userId: true },
+          });
+          const activeMemberIds = new Set(activeMembers.map(m => m.userId));
+          activeUserMentions = userMentions.filter(m => m.targetId && activeMemberIds.has(m.targetId));
+        } catch (e) {
+          logger.warn({ workspaceId }, 'Failed to filter target users by workspace membership in processMentions');
+        }
+      }
+    }
+
+    for (const mention of activeUserMentions) {
       if (mention.targetId) {
         await this.notifyMentionedUser(mention.targetId, { 
           messageId, 
@@ -77,9 +104,26 @@ export class MentionService {
       });
       
       // Filter out: sender AND users who already got a direct mention notification
-      const participantIds = participants
+      let participantIds = participants
         .map(p => p.accountId)
         .filter(id => id !== senderId && !notifiedUserIds.has(id));
+
+      if (workspaceId && participantIds.length > 0) {
+        try {
+          const activeMembers = await prisma.workspaceMember.findMany({
+            where: {
+              workspaceId,
+              userId: { in: participantIds },
+              leftAt: null,
+            },
+            select: { userId: true },
+          });
+          const activeMemberIds = new Set(activeMembers.map(m => m.userId));
+          participantIds = participantIds.filter(id => activeMemberIds.has(id));
+        } catch (e) {
+          logger.warn({ workspaceId }, 'Failed to filter participants by workspace membership in processMentions broadcast');
+        }
+      }
 
       if (participantIds.length > 0) {
         await publishEvent(EventSubjects.MENTION_BROADCAST, {

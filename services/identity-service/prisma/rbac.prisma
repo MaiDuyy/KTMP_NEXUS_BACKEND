@@ -102,6 +102,7 @@ model DepartmentMember {
   id           String   @id @default(uuid())
   userId       String
   departmentId String
+  role         String   @default("MEMBER")
   isPrimary    Boolean  @default(false)
   joinedAt     DateTime @default(now())
 
