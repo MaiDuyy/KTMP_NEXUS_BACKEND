@@ -708,7 +708,7 @@ export class UserService {
     // 4. Handle Department if changed
     if (data.departmentId) {
       const { departmentService } = await import('./org.service.js');
-      await departmentService.addMember(data.departmentId, userId, true);
+      await departmentService.addMember(data.departmentId, userId, 'MEMBER', true);
     }
 
     return updatedUser;

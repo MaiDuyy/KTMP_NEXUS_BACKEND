@@ -75,6 +75,9 @@ export const EventSubjects = {
   FRIEND_UNFRIENDED: 'friend.unfriended',
   FRIEND_USER_BLOCKED: 'friend.user.blocked',
   FRIEND_USER_UNBLOCKED: 'friend.user.unblocked',
+
+  DEPARTMENT_MEMBER_ADDED: 'department.member.added',
+  DEPARTMENT_MEMBER_REMOVED: 'department.member.removed',
 } as const;
 
 export type EventSubject = typeof EventSubjects[keyof typeof EventSubjects];

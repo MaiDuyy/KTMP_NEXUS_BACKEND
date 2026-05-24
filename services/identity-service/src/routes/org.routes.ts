@@ -41,8 +41,12 @@ router.delete('/departments/:id', async (req: Request, res: Response, next: Next
 
 router.post('/departments/:id/members', async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const { userId, isPrimary } = z.object({ userId: z.string().uuid(), isPrimary: z.boolean().optional() }).parse(req.body);
-    res.status(201).json({ success: true, data: await departmentService.addMember(req.params.id as string, userId, isPrimary) });
+    const { userId, role, isPrimary } = z.object({
+      userId: z.string().uuid(),
+      role: z.enum(['MEMBER', 'MANAGER']).optional(),
+      isPrimary: z.boolean().optional()
+    }).parse(req.body);
+    res.status(201).json({ success: true, data: await departmentService.addMember(req.params.id as string, userId, role, isPrimary) });
   } catch (e) { next(e); }
 });
 
