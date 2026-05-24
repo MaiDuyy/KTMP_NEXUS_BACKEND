@@ -11,6 +11,11 @@ ENV_FILE=".env"
 PATH_PREFIX="/ott-chat/prod/"
 AWS_REGION=${AWS_REGION:-"us-east-1"}
 
+if [ -f "$ENV_FILE" ]; then
+    echo "⚠️ File $ENV_FILE đã tồn tại. Bỏ qua bước tạo mới và kéo AWS SSM."
+    exit 0
+fi
+
 echo "------------------------------------------------------------"
 echo "🔐 Starting AWS SSM Parameter Store Sync..."
 echo "📂 Path Prefix: $PATH_PREFIX"
