@@ -121,7 +121,7 @@ export function setupSubscribers() {
     
     if (!participantIds || !Array.isArray(participantIds)) return;
 
-    const mentionTypeLabel = types.includes('CHANNEL') ? '@channel' : '@here';
+    const mentionTypeLabel = types.includes('ALL') ? '@all' : types.includes('CHANNEL') ? '@channel' : '@here';
 
     for (const userId of participantIds) {
       await notificationService.create({

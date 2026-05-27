@@ -170,5 +170,57 @@ export const userorgClient = {
                 resolve(response);
             });
         });
+    },
+
+    /**
+     * Kiểm tra xem user có thuộc phòng ban không
+     */
+    checkUserDepartment: async (userId: string, departmentId: string): Promise<boolean> => {
+        return new Promise((resolve) => {
+            client.CheckUserDepartment({ userId, departmentId }, (err: any, response: any) => {
+                if (err) {
+                    logger.error({ err, userId, departmentId }, '[UserOrgClient] gRPC checkUserDepartment failed');
+                    resolve(false);
+                    return;
+                }
+                resolve(!!response.belongsToDepartment);
+            });
+        });
+    },
+
+    /**
+     * Kiểm tra quyền truy cập Workspace theo thiết kế phân quyền mới
+     */
+    checkWorkspaceAccess: async (userId: string, workspaceId: string, departmentId: string | null, workspaceCreatedAt: string): Promise<boolean> => {
+        return new Promise((resolve) => {
+            client.CheckWorkspaceAccess({ userId, workspaceId, departmentId: departmentId || '', workspaceCreatedAt }, (err: any, response: any) => {
+                if (err) {
+                    logger.error({ err, userId, workspaceId }, '[UserOrgClient] gRPC checkWorkspaceAccess failed');
+                    resolve(false);
+                    return;
+                }
+                resolve(!!response.hasAccess);
+            });
+        });
+    },
+
+    /**
+     * Lấy danh sách role và scope của user từ identity-service
+     */
+    getUserRolesAndScopes: async (userId: string): Promise<{ globalRole: string; assignedWorkspaceIds: string[]; assignedDepartmentIds: string[] }> => {
+        return new Promise((resolve) => {
+            client.GetUserRolesAndScopes({ userId }, (err: any, response: any) => {
+                if (err) {
+                    logger.error({ err, userId }, '[UserOrgClient] gRPC getUserRolesAndScopes failed');
+                    resolve({ globalRole: 'EMPLOYEE', assignedWorkspaceIds: [], assignedDepartmentIds: [] });
+                    return;
+                }
+                resolve({
+                    globalRole: response.globalRole || 'EMPLOYEE',
+                    assignedWorkspaceIds: response.assignedWorkspaceIds || [],
+                    assignedDepartmentIds: response.assignedDepartmentIds || []
+                });
+            });
+        });
     }
 };

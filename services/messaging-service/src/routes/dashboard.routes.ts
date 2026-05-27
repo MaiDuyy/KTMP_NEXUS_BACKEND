@@ -3,6 +3,7 @@ import type { Request, Response } from 'express';
 import { prisma } from '../lib/prisma.js';
 import { logger } from '../lib/logger.js';
 import { asyncHandler } from '../middleware/errorHandler.js';
+import { taskService } from '../services/task.service.js';
 
 export const dashboardRoutes = Router();
 
@@ -46,10 +47,7 @@ dashboardRoutes.patch('/tasks/:taskId', asyncHandler(async (req: Request, res: R
   const { completed } = req.body;
   if (!userId) return res.status(401).json({ success: false, message: 'Chưa đăng nhập!' });
 
-  const task = await prisma.task.update({
-    where: { id: taskId },
-    data: { status: completed ? 'DONE' : 'TODO' },
-  });
+  const task = await taskService.updateTaskStatus(taskId, userId, completed ? 'DONE' : 'TODO');
 
   res.json({ success: true, task });
 }));

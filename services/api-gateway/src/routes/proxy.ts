@@ -267,6 +267,12 @@ async function forwardStreamRequest(
     if (user) {
       headers['x-user-id'] = user.id;
       headers['x-user-role'] = user.role || '';
+      if (user.roles?.length) {
+        headers['x-user-roles'] = JSON.stringify(user.roles);
+      }
+      if (user.roleLevel !== undefined) {
+        headers['x-user-role-level'] = String(user.roleLevel);
+      }
     }
 
     if ((req as any).correlationId) {
@@ -378,6 +384,8 @@ router.put('/users/account', (req, res) => forwardRequest(req, res, SERVICES.USE
 router.put('/users/status', (req, res) => forwardRequest(req, res, SERVICES.USER, '/users/status'));
 router.put('/users/online-status', (req, res) => forwardRequest(req, res, SERVICES.USER, '/users/online-status'));
 router.post('/users/heartbeat', (req, res) => forwardRequest(req, res, SERVICES.USER, '/users/heartbeat'));
+router.post('/users/provision', roleMiddleware('SUPER_ADMIN', 'ADMIN', 'WORKSPACE_OWNER', 'WORKSPACE_ADMIN'), (req, res) =>
+  forwardRequest(req, res, SERVICES.USER, '/users/provision'));
 router.get('/users/devices', (req, res) => forwardRequest(req, res, SERVICES.USER, '/users/devices'));
 router.get('/users/directory', roleMiddleware('SUPER_ADMIN', 'ADMIN', 'WORKSPACE_ADMIN', 'WORKSPACE_MEMBER', 'EMPLOYEE'), (req, res) => {
   const query = new URLSearchParams(req.query as any).toString();
@@ -430,6 +438,9 @@ router.post('/users/:id/suspend', roleMiddleware('SUPER_ADMIN', 'ADMIN', 'WORKSP
   forwardRequest(req, res, SERVICES.USER, `/users/${req.params.id}/suspend`));
 router.post('/users/:id/unsuspend', roleMiddleware('SUPER_ADMIN', 'ADMIN', 'WORKSPACE_OWNER', 'WORKSPACE_ADMIN'), (req, res) => 
   forwardRequest(req, res, SERVICES.USER, `/users/${req.params.id}/unsuspend`));
+
+router.get('/users/:userId/departments', (req, res) => 
+  forwardRequest(req, res, SERVICES.IDENTITY, `/users/${req.params.userId}/departments`));
 
 // 6. Generic ID routes (Place these LAST)
 router.get('/users/:id', (req, res) => 
@@ -598,6 +609,11 @@ router.patch('/chats/tasks/:taskId/status', (req, res) =>
 router.delete('/chats/tasks/:taskId', (req, res) => 
   forwardRequest(req, res, SERVICES.MESSAGING, `/chats/tasks/${req.params.taskId}`));
 
+// ============= POLLS ROUTES → MESSAGING SERVICE =============
+router.post('/polls', (req, res) => forwardRequest(req, res, SERVICES.MESSAGING, '/polls'));
+router.get('/polls/:pollId', (req, res) => forwardRequest(req, res, SERVICES.MESSAGING, `/polls/${req.params.pollId}`));
+router.post('/polls/:pollId/vote', (req, res) => forwardRequest(req, res, SERVICES.MESSAGING, `/polls/${req.params.pollId}/vote`));
+
 // ============= MESSAGE ROUTES → MESSAGING SERVICE =============
 
 router.get('/messages/:chatId', (req, res) => {
@@ -616,7 +632,7 @@ router.put('/messages/:messageId/pin', (req, res) =>
   forwardRequest(req, res, SERVICES.MESSAGING, `/messages/${req.params.messageId}/pin`));
 router.get('/messages/:chatId/pinned', (req, res) => 
   forwardRequest(req, res, SERVICES.MESSAGING, `/messages/${req.params.chatId}/pinned`));
-router.get('/messages/:chatId/search', (req, res) => {
+router.get('/messages/:chatId/search', roleMiddleware('SUPER_ADMIN', 'ADMIN', 'WORKSPACE_ADMIN', 'WORKSPACE_MEMBER', 'EMPLOYEE'), (req, res) => {
   const query = new URLSearchParams(req.query as any).toString();
   forwardRequest(req, res, SERVICES.MESSAGING, `/messages/${req.params.chatId}/search${query ? `?${query}` : ''}`);
 });

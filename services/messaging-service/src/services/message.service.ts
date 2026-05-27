@@ -9,7 +9,7 @@ import { userorgClient } from '../lib/userorgClient.js';
 import { mentionService } from './mention.service.js';
 
 
-const MESSAGE_TYPES = ['text', 'image', 'video', 'audio', 'file', 'sticker', 'gif', 'location', 'contact', 'system', 'call_started', 'call_participant_joined', 'call_participant_left', 'call_ended', 'call_missed', 'call_declined', 'call_cancelled'];
+const MESSAGE_TYPES = ['text', 'image', 'video', 'audio', 'file', 'sticker', 'gif', 'location', 'contact', 'system', 'call_started', 'call_participant_joined', 'call_participant_left', 'call_ended', 'call_missed', 'call_declined', 'call_cancelled', 'poll', 'task'];
 
 export class MessageService {
   async getMessages(
@@ -35,7 +35,10 @@ export class MessageService {
     };
 
     if (cursor) {
-      whereCondition.time = { lt: new Date(cursor) };
+      const cursorDate = new Date(cursor);
+      if (!isNaN(cursorDate.getTime())) {
+        whereCondition.time = { lt: cursorDate };
+      }
     }
 
     if (clearedAt) {
@@ -69,7 +72,13 @@ export class MessageService {
       senderId: msg.senderId,
       sender: msg.sender,
       replyTo: msg.replyTo
-        ? { id: msg.replyTo.id, content: msg.replyTo.content, type: msg.replyTo.type, senderId: msg.replyTo.senderId }
+        ? { 
+            id: msg.replyTo.id, 
+            content: msg.replyTo.content, 
+            type: msg.replyTo.type, 
+            senderId: msg.replyTo.senderId,
+            sender: msg.replyTo.sender
+          }
         : null,
       file: msg.fileName
         ? { name: msg.fileName, size: msg.fileSize, type: msg.fileType }
@@ -81,9 +90,15 @@ export class MessageService {
 
     const lastMessage = messages[messages.length - 1];
 
+    // Ensure nextCursor is always a valid ISO string, never a raw Date or "Invalid Date"
+    let nextCursor: string | null = null;
+    if (messages.length === take && lastMessage?.time instanceof Date && !isNaN(lastMessage.time.getTime())) {
+      nextCursor = lastMessage.time.toISOString();
+    }
+
     return {
       messages: formattedMessages.reverse(),
-      nextCursor: messages.length === take && lastMessage ? lastMessage.time : null,
+      nextCursor,
     };
   }
 
@@ -106,7 +121,26 @@ export class MessageService {
     let participantIds: string[] = [];
     let chatMetadata: any = null;
 
-    if (type !== 'system' && chatId) {
+    // Trusted internal types (system, call_*): fetch participantIds for real-time push
+    // but skip all send-permission validations (block check, readonly, participant check, etc.)
+    const INTERNAL_TYPES = ['system', 'call_started', 'call_ended', 'call_missed', 'call_declined', 'call_cancelled', 'call_participant_joined', 'call_participant_left'];
+    const isInternalType = INTERNAL_TYPES.includes(type);
+
+    if (isInternalType && chatId) {
+      const internalChatMeta = await prisma.chat.findUnique({
+        where: { id: chatId },
+        select: {
+          workspaceId: true,
+          participants: { select: { accountId: true } },
+        },
+      });
+      if (internalChatMeta) {
+        workspaceId = internalChatMeta.workspaceId;
+        participantIds = internalChatMeta.participants.map((p: any) => p.accountId);
+      }
+    }
+
+    if (!isInternalType && chatId) {
       chatMetadata = await prisma.chat.findUnique({
         where: { id: chatId },
         select: {
@@ -252,12 +286,21 @@ export class MessageService {
       data: { hidden: false },
     }).catch(() => {});
 
+    const accountIdsToFetch = [senderId];
+    if (message.replyTo?.senderId) {
+      accountIdsToFetch.push(message.replyTo.senderId);
+    }
+
     let senderProfile = null;
+    let replySenderProfile = null;
     try {
-      const accountMap = await userorgClient.getUsers([senderId]);
+      const accountMap = await userorgClient.getUsers(accountIdsToFetch);
       senderProfile = accountMap.get(senderId);
+      if (message.replyTo?.senderId) {
+        replySenderProfile = accountMap.get(message.replyTo.senderId);
+      }
     } catch (err) {
-      logger.error({ err }, 'Failed to fetch user profile for new message');
+      logger.error({ err }, 'Failed to fetch user profiles for new message');
     }
 
     const senderPayload = senderProfile ? {
@@ -265,6 +308,20 @@ export class MessageService {
       name: senderProfile.name,
       avatar: senderProfile.avatar,
     } : undefined;
+
+    const replySenderPayload = replySenderProfile ? {
+      id: replySenderProfile.id,
+      name: replySenderProfile.name,
+      avatar: replySenderProfile.avatar,
+    } : undefined;
+
+    const replyToPayload = message.replyTo ? {
+      id: message.replyTo.id,
+      content: message.replyTo.content,
+      type: message.replyTo.type,
+      senderId: message.replyTo.senderId,
+      sender: replySenderPayload
+    } : null;
 
     const mentions = await mentionService.processMentions(
       message.id,
@@ -319,7 +376,7 @@ export class MessageService {
       content: message.content,
       type: message.type,
       time: message.time.toISOString(),
-      replyTo: message.replyTo,
+      replyTo: replyToPayload,
       file: fileName ? { name: fileName, size: fileSize, type: fileType } : null,
       reactions: [],
       pin: false,
@@ -327,7 +384,7 @@ export class MessageService {
 
     logger.info({ messageId: message.id, chatId }, 'Message sent');
 
-    return { ...message, sender: senderPayload };
+    return { ...message, sender: senderPayload, replyTo: replyToPayload };
   }
 
   async deleteMessageForMe(messageId: string, userId: string) {
@@ -643,17 +700,31 @@ export class MessageService {
   private async populateSenderInfo(messages: any[]) {
     if (!messages || messages.length === 0) return messages;
     
-    // Gom tất cả ID người gửi duy nhất
-    const uniqueAccountIds = [...new Set(messages.map((m) => m.senderId))];
+    // Gom tất cả ID người gửi duy nhất (của tin nhắn chính và replyTo)
+    const ids = new Set<string>();
+    for (const m of messages) {
+      if (m.senderId) ids.add(m.senderId);
+      if (m.replyTo?.senderId) ids.add(m.replyTo.senderId);
+    }
+    const uniqueAccountIds = Array.from(ids);
     
     // Sử dụng userorgClient (đã tích hợp Redis Cache & Batching)
     const accountMap = await userorgClient.getUsers(uniqueAccountIds);
 
     return messages.map((msg) => {
       const senderAcc = accountMap.get(msg.senderId);
+      let replyTo = null;
+      if (msg.replyTo) {
+        const replySenderAcc = accountMap.get(msg.replyTo.senderId);
+        replyTo = {
+          ...msg.replyTo,
+          sender: replySenderAcc ? { id: replySenderAcc.id, name: replySenderAcc.name, avatar: replySenderAcc.avatar } : undefined,
+        };
+      }
       return {
         ...msg,
         sender: senderAcc ? { id: senderAcc.id, name: senderAcc.name, avatar: senderAcc.avatar } : undefined,
+        replyTo,
       };
     });
   }

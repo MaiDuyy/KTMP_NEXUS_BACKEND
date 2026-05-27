@@ -185,3 +185,30 @@ userRoutes.delete('/:id', asyncHandler(async (req: Request, res: Response) => {
   const result = await userService.deleteUserEnhanced(req.params.id as string, currentUserId, { anonymize: anonymize === 'true' });
   res.json({ success: true, message: anonymize === 'true' ? 'Đã anonymize tài khoản thành công!' : 'Xóa tài khoản thành công!', ...result });
 }));
+
+userRoutes.post('/provision', asyncHandler(async (req: Request, res: Response) => {
+  const currentUserId = req.headers['x-user-id'] as string;
+  if (!currentUserId) return res.status(401).json({ success: false, message: 'Chưa đăng nhập!' });
+
+  const userRole = req.headers['x-user-role'] as string;
+  if (userRole !== 'SUPER_ADMIN' && userRole !== 'ADMIN' && userRole !== 'WORKSPACE_MANAGER') {
+    return res.status(403).json({ success: false, message: 'Bạn không có quyền thực hiện chức năng này!' });
+  }
+
+  const { email, name, gender, role, departmentId, departmentRole } = req.body;
+  if (!email || !name) {
+    return res.status(400).json({ success: false, message: 'Email và tên không được để trống!' });
+  }
+
+  const result = await userService.provisionUser({
+    email,
+    name,
+    gender: gender || 'other',
+    role: role || 'EMPLOYEE',
+    departmentId,
+    departmentRole: departmentRole || 'MEMBER',
+    createdBy: currentUserId
+  });
+
+  res.status(201).json({ success: true, message: 'Thực hiện cấp tài khoản thành công!', ...result });
+}));

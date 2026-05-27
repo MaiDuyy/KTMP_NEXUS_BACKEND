@@ -109,6 +109,8 @@ messageRoutes.get('/:chatId/pinned', asyncHandler(async (req: Request, res: Resp
     pinnedMessages: pinnedMessages.map((msg) => ({
       id: msg.id, content: msg.content, type: msg.type, time: msg.time,
       senderId: msg.senderId, sender: (msg as any).sender,
+      file: (msg as any).file || null,
+      destroy: msg.destroy || false,
     })),
   });
 }));

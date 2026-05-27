@@ -33,4 +33,14 @@ export async function connectAll() {
     userorgPrisma.$connect(),
     rbacPrisma.$connect(),
   ]);
+
+  try {
+    await rbacPrisma.$executeRawUnsafe(`
+      CREATE UNIQUE INDEX IF NOT EXISTS unique_primary_dept_member 
+      ON rbac.department_member (userId) 
+      WHERE role IN ('HEAD', 'MANAGER', 'MEMBER');
+    `);
+  } catch (err: any) {
+    console.warn('Could not create raw database unique index for primary department membership:', err.message);
+  }
 }

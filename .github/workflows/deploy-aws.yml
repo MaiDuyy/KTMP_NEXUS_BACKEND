@@ -129,7 +129,7 @@ jobs:
           docker compose -f docker-compose.prod.yml pull
 
           # Up updated containers
-          docker compose -f docker-compose.prod.yml up -d --remove-orphans
+          docker compose -f docker-compose.prod.yml --env-file .env up -d  --remove-orphans
 
           # Housekeeping: prune old dangling images to avoid EC2 disk exhaustion
           docker image prune -f
