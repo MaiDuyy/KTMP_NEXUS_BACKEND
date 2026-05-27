@@ -86,6 +86,16 @@ export class UserRoleService {
       grantedBy: data.grantedBy,
     });
 
+    if (data.workspaceId) {
+      await publishEvent('workspace.role.assigned', {
+        userId: data.userId,
+        workspaceId: data.workspaceId,
+        role: role.name,
+        orgId: data.orgId,
+        timestamp: new Date().toISOString()
+      });
+    }
+
     logger.info({ userId: data.userId, roleId: data.roleId }, 'Role assigned to user');
     return userRole;
   }
@@ -117,6 +127,16 @@ export class UserRoleService {
       roleName: userRole.role.name,
       revokedBy,
     });
+
+    if (userRole.workspaceId) {
+      await publishEvent('workspace.role.revoked', {
+        userId,
+        workspaceId: userRole.workspaceId,
+        role: userRole.role.name,
+        orgId: userRole.orgId,
+        timestamp: new Date().toISOString()
+      });
+    }
 
     logger.info({ userId, roleId }, 'Role revoked from user');
   }

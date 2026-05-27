@@ -6,6 +6,7 @@ import { publishEvent, EventSubjects } from '../lib/nats.js';
 import { logger } from '../lib/logger.js';
 import { messagingGrpc } from '../lib/messagingClient.js';
 import { getQuotaByRole } from '../lib/quota.js';
+import bcrypt from 'bcryptjs';
 
 import { v4 as uuidv4 } from 'uuid';
 
@@ -248,7 +249,7 @@ export class UserService {
   async getUsersByIds(userIds: string[]) {
     return userorgPrisma.account.findMany({
       where: { id: { in: userIds } },
-      select: { id: true, name: true, avatar: true, isOnline: true, userStatus: true, status: true },
+      select: { id: true, name: true, email: true, avatar: true, isOnline: true, userStatus: true, status: true, role: true },
     });
   }
 
@@ -708,6 +709,12 @@ export class UserService {
     // 4. Handle Department if changed
     if (data.departmentId) {
       const { departmentService } = await import('./org.service.js');
+      const oldDeptMembership = await rbacPrisma.departmentMember.findFirst({
+        where: { userId, isPrimary: true }
+      });
+      if (oldDeptMembership && oldDeptMembership.departmentId !== data.departmentId) {
+        await departmentService.removeMember(oldDeptMembership.departmentId, userId).catch(() => {});
+      }
       await departmentService.addMember(data.departmentId, userId, 'MEMBER', true);
     }
 
@@ -830,6 +837,253 @@ export class UserService {
 
     logger.info({ orgId, maxWorkspaces }, 'Organization quota updated by Admin');
     return updated;
+  }
+
+  async checkUserDepartment(userId: string, departmentId: string): Promise<boolean> {
+    const member = await rbacPrisma.departmentMember.findUnique({
+      where: {
+        userId_departmentId: { userId, departmentId }
+      }
+    });
+    return !!member;
+  }
+
+  async provisionUser(data: {
+    email: string;
+    name: string;
+    gender: string;
+    role: AccountRole;
+    departmentId?: string;
+    departmentRole?: string;
+    createdBy: string;
+  }) {
+    const { email, name, gender, role, departmentId, departmentRole, createdBy } = data;
+    const emailLower = email.toLowerCase().trim();
+
+    // Check if email already exists in system
+    let existingUser = await authPrisma.account.findUnique({ where: { email: emailLower } });
+    if (existingUser) {
+      // If user exists, just assign them to department if provided
+      if (departmentId) {
+        const { departmentService } = await import('./org.service.js');
+        await departmentService.addMember(departmentId, existingUser.id, departmentRole || 'MEMBER');
+      }
+      return {
+        user: {
+          id: existingUser.id,
+          name: existingUser.name,
+          email: existingUser.email,
+          role: existingUser.role,
+        },
+        isNewUser: false,
+      };
+    }
+
+    // Create a temporary password for the welcome set password link
+    const tempPassword = uuidv4();
+    const hashedPassword = await bcrypt.hash(tempPassword, 10);
+    const userId = uuidv4();
+
+    // 1. Create in Auth Schema
+    const authAccount = await authPrisma.account.create({
+      data: {
+        id: userId,
+        name,
+        email: emailLower,
+        number: `PROV_${userId.slice(0, 8)}`,
+        password: hashedPassword,
+        gender: gender || 'other',
+        role: role || 'EMPLOYEE',
+        isVerified: true,
+        maxWorkspaces: getQuotaByRole(role || 'EMPLOYEE'),
+      },
+    });
+
+    // Get Admin's orgId
+    const creator = await userorgPrisma.account.findUnique({ where: { id: createdBy }, select: { orgId: true } });
+    const orgId = creator?.orgId || null;
+
+    // 2. Create in UserOrg Schema
+    await userorgPrisma.account.create({
+      data: {
+        id: userId,
+        name,
+        email: emailLower,
+        number: authAccount.number,
+        password: hashedPassword,
+        gender: authAccount.gender,
+        role: (role || 'EMPLOYEE') as any,
+        orgId,
+        isVerified: true,
+        maxWorkspaces: getQuotaByRole(role || 'EMPLOYEE'),
+      }
+    });
+
+    // 3. Assign RBAC Role
+    const rbacRole = await rbacPrisma.role.findUnique({ where: { name: role || 'EMPLOYEE' } });
+    if (rbacRole) {
+      await rbacPrisma.userRole.create({
+        data: {
+          userId,
+          roleId: rbacRole.id,
+          grantedBy: createdBy,
+        },
+      });
+    }
+
+    // 4. Add to Department if provided
+    if (departmentId) {
+      const { departmentService } = await import('./org.service.js');
+      await departmentService.addMember(departmentId, userId, departmentRole || 'MEMBER');
+    }
+
+    // 5. Generate welcome setup token and publish email
+    const token = uuidv4();
+    const expiresAt = new Date();
+    expiresAt.setHours(expiresAt.getHours() + 24); // 24 hours welcome link
+
+    await userorgPrisma.invitation.create({
+      data: {
+        email: emailLower,
+        token,
+        type: 'USER',
+        role: role || 'EMPLOYEE',
+        orgId,
+        invitedBy: createdBy,
+        inviterName: 'Admin',
+        expiresAt,
+      }
+    });
+
+    const baseUrl = process.env.FRONTEND_URL || 'http://localhost:3002';
+    const setupUrl = `${baseUrl}/setup-password?token=${token}`;
+
+    await publishEvent('invitation.send', {
+      to: emailLower,
+      template: 'invitation',
+      data: {
+        inviteUrl: setupUrl,
+        inviterName: 'Quản trị viên',
+        orgName: 'Hệ thống doanh nghiệp',
+        expiresAt: expiresAt.toISOString(),
+        type: 'WELCOME_PROVISION',
+      },
+    }).catch(err => logger.warn({ err: err.message }, 'Failed to publish welcome provision email event'));
+
+    logger.info({ userId, email: emailLower, orgId }, 'User provisioned by admin successfully');
+
+    return {
+      user: {
+        id: userId,
+        name,
+        email: emailLower,
+        role,
+        orgId,
+      },
+      isNewUser: true,
+      setupUrl,
+    };
+  }
+
+  async checkWorkspaceAccess(userId: string, workspaceId: string, departmentId: string | null, workspaceCreatedAtStr: string): Promise<boolean> {
+    // 1. Check if user is SUPER_ADMIN or ADMIN globally
+    const userRole = await rbacPrisma.userRole.findFirst({
+      where: {
+        userId,
+        role: {
+          name: { in: ['SUPER_ADMIN', 'ADMIN'] }
+        }
+      }
+    });
+    if (userRole) return true;
+
+    // 2. Check if user is a WORKSPACE_MANAGER of this workspace directly
+    const directRole = await rbacPrisma.userRole.findFirst({
+      where: {
+        userId,
+        workspaceId,
+        role: {
+          name: 'WORKSPACE_MANAGER'
+        }
+      }
+    });
+    if (directRole) return true;
+
+    // 3. If workspace belongs to a department, check department manager role
+    if (departmentId) {
+      const workspaceCreatedAt = new Date(workspaceCreatedAtStr);
+
+      // Check scoped UserRole as WORKSPACE_MANAGER for the department
+      const deptUserRole = await rbacPrisma.userRole.findFirst({
+        where: {
+          userId,
+          departmentId,
+          role: {
+            name: 'WORKSPACE_MANAGER'
+          }
+        }
+      });
+
+      if (deptUserRole) {
+        if (workspaceCreatedAt >= deptUserRole.grantedAt) {
+          return true;
+        }
+      }
+
+      // Check DepartmentMember table for MANAGER/HEAD role
+      const deptMember = await rbacPrisma.departmentMember.findFirst({
+        where: {
+          userId,
+          departmentId,
+          role: { in: ['MANAGER', 'HEAD'] }
+        }
+      });
+
+      if (deptMember) {
+        if (workspaceCreatedAt >= deptMember.joinedAt) {
+          return true;
+        }
+      }
+    }
+
+    return false;
+  }
+
+  async getUserRolesAndScopes(userId: string) {
+    const user = await userorgPrisma.account.findUnique({
+      where: { id: userId },
+      select: { role: true }
+    });
+
+    const userRoles = await rbacPrisma.userRole.findMany({
+      where: { userId },
+      include: { role: true }
+    });
+
+    const assignedWorkspaceIds = userRoles
+      .map(ur => ur.workspaceId)
+      .filter((id): id is string => !!id);
+
+    const assignedDepartmentIds = userRoles
+      .map(ur => ur.departmentId)
+      .filter((id): id is string => !!id);
+
+    // Also check if they are head/manager of departments in DepartmentMember
+    const deptMemberships = await rbacPrisma.departmentMember.findMany({
+      where: { userId, role: { in: ['MANAGER', 'HEAD'] } },
+      select: { departmentId: true }
+    });
+    deptMemberships.forEach(dm => {
+      if (!assignedDepartmentIds.includes(dm.departmentId)) {
+        assignedDepartmentIds.push(dm.departmentId);
+      }
+    });
+
+    return {
+      globalRole: user?.role || 'EMPLOYEE',
+      assignedWorkspaceIds,
+      assignedDepartmentIds
+    };
   }
 }
 

@@ -40,6 +40,8 @@ export const EventSubjects = {
   WORKSPACE_QUOTA_UPDATED: 'workspace.quota.updated',
   WORKSPACE_INVITE_CREATED: 'workspace.invite.created',
   WORKSPACE_INVITE_REJECTED: 'workspace.invite.rejected',
+  WORKSPACE_ROLE_ASSIGNED: 'workspace.role.assigned',
+  WORKSPACE_ROLE_REVOKED: 'workspace.role.revoked',
 
   // Admin events
   SYSTEM_BROADCAST: 'system.broadcast',

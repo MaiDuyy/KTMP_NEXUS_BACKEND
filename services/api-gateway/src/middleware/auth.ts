@@ -54,6 +54,9 @@ const PUBLIC_PATH_PREFIXES = [
   '/workspaces/invites/validate',
   '/workspaces/invites/accept',
   '/workspaces/invites/accept-body',
+  '/departments/invitations/validate',
+  '/departments/invitations/accept',
+  '/departments/invitations/reject',
 ];
 
 

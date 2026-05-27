@@ -74,4 +74,82 @@ export function startWorkspaceSubscriber() {
       }
     }
   })();
+
+  // Subscribe to workspace.updated
+  const updateSubject = 'workspace.updated';
+  const updateSub = nc.subscribe(updateSubject);
+  logger.info({ subject: updateSubject }, '[WorkspaceSubscriber] Subscribed to workspace.updated');
+
+  (async () => {
+    for await (const m of updateSub) {
+      try {
+        const data = jc.decode(m.data) as any;
+        const payload = data.payload;
+        if (!payload) continue;
+
+        const { id: workspaceId, updates, updatedBy } = payload;
+        if (!workspaceId) continue;
+
+        const { departmentId, oldDepartmentId } = updates || {};
+        if (departmentId === undefined && oldDepartmentId === undefined) continue;
+
+        logger.info({ workspaceId, departmentId, oldDepartmentId }, '[WorkspaceSubscriber] Processing workspace department update');
+
+        // Remove members of oldDepartmentId who are not in the new department
+        if (oldDepartmentId && oldDepartmentId !== departmentId) {
+          const oldDeptMembers = await rbacPrisma.departmentMember.findMany({
+            where: { departmentId: oldDepartmentId },
+            select: { userId: true },
+          });
+          const oldMemberIds = oldDeptMembers.map(m => m.userId);
+
+          let newMemberIds: string[] = [];
+          if (departmentId) {
+            const newDeptMembers = await rbacPrisma.departmentMember.findMany({
+              where: { departmentId },
+              select: { userId: true },
+            });
+            newMemberIds = newDeptMembers.map(m => m.userId);
+          }
+
+          // Fetch Workspace Manager / Owner to avoid ejecting them
+          const ownerRole = await rbacPrisma.role.findUnique({
+            where: { name: 'WORKSPACE_MANAGER' },
+            include: { userRoles: { where: { workspaceId } } }
+          });
+          const ownerIds = ownerRole?.userRoles.map(ur => ur.userId) || [];
+
+          for (const memberId of oldMemberIds) {
+            if (newMemberIds.includes(memberId)) continue;
+            if (ownerIds.includes(memberId)) continue;
+
+            try {
+              logger.info({ workspaceId, memberId }, '[WorkspaceSubscriber] Auto-removing old department member from workspace');
+              await messagingGrpc.kickMember(workspaceId, memberId, updatedBy || 'SYSTEM');
+            } catch (err: any) {
+              logger.warn({ err: err.message, workspaceId, memberId }, '[WorkspaceSubscriber] Failed to auto-remove member from workspace');
+            }
+          }
+        }
+
+        // Add members of the new department
+        if (departmentId && departmentId !== oldDepartmentId) {
+          const newDeptMembers = await rbacPrisma.departmentMember.findMany({
+            where: { departmentId },
+          });
+
+          for (const member of newDeptMembers) {
+            try {
+              logger.info({ workspaceId, memberId: member.userId }, '[WorkspaceSubscriber] Auto-adding new department member to workspace');
+              await messagingGrpc.addMember(workspaceId, member.userId, 'WORKSPACE_MEMBER', updatedBy || 'SYSTEM');
+            } catch (err: any) {
+              logger.debug({ err: err.message, workspaceId, memberId: member.userId }, '[WorkspaceSubscriber] Member already in workspace or fail');
+            }
+          }
+        }
+      } catch (err) {
+        logger.error({ err }, '[WorkspaceSubscriber] Failed to process workspace update');
+      }
+    }
+  })();
 }

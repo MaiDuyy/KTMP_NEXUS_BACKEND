@@ -6,7 +6,7 @@ import { prisma } from '../lib/prisma.js';
 import { publishEvent, EventSubjects } from '../lib/nats.js';
 import { logger } from '../lib/logger.js';
 
-export type MentionTargetType = 'USER' | 'HERE' | 'CHANNEL' | 'AI';
+export type MentionTargetType = 'USER' | 'HERE' | 'CHANNEL' | 'AI' | 'ALL';
 
 export interface ParsedMention {
   type: MentionTargetType;
@@ -27,6 +27,8 @@ export class MentionService {
 
     if (/@here\b/i.test(content)) mentions.push({ type: 'HERE', raw: '@here' });
     if (/@channel\b/i.test(content)) mentions.push({ type: 'CHANNEL', raw: '@channel' });
+    if (/@all\b/i.test(content)) mentions.push({ type: 'ALL', raw: '@all' });
+    if (/@everyone\b/i.test(content)) mentions.push({ type: 'ALL', raw: '@everyone' });
     if (/@AI\b/i.test(content)) mentions.push({ type: 'AI', raw: '@AI' });
 
     return mentions;
@@ -42,20 +44,102 @@ export class MentionService {
     const parsedMentions = this.extractMentions(content);
     if (parsedMentions.length === 0) return [];
 
+    let allowedMentions = parsedMentions;
+    const hasBroadcast = parsedMentions.some((m) => m.type === 'HERE' || m.type === 'CHANNEL' || m.type === 'ALL');
+
+    const chat = await prisma.chat.findUnique({
+      where: { id: chatId },
+      select: { 
+        workspaceId: true,
+        isGroup: true,
+        participants: {
+          where: { accountId: senderId },
+          select: { role: true }
+        }
+      }
+    });
+    const workspaceId = chat?.workspaceId;
+
+    if (hasBroadcast && chat && chat.isGroup) {
+      const senderParticipant = chat.participants[0];
+      
+      // 1. Determine if this is a Public Channel or large group (>= 50 members)
+      let isPublicOrLargeChannel = false;
+      if (workspaceId) {
+        const channel = await prisma.channel.findUnique({
+          where: { id: chatId },
+          select: { type: true }
+        });
+        if (channel && (channel.type === 'PUBLIC' || channel.type === 'ANNOUNCEMENT')) {
+          isPublicOrLargeChannel = true;
+        }
+      }
+      
+      if (!isPublicOrLargeChannel) {
+        const participantCount = await prisma.chatParticipant.count({
+          where: { chatId }
+        });
+        if (participantCount >= 50) {
+          isPublicOrLargeChannel = true;
+        }
+      }
+
+      // 2. Determine if user is a guest (CHANNEL_GUEST or WORKSPACE_GUEST)
+      let isGuest = senderParticipant?.role === 'CHANNEL_GUEST';
+      if (workspaceId && !isGuest) {
+        const workspaceMember = await prisma.workspaceMember.findUnique({
+          where: { workspaceId_userId: { workspaceId, userId: senderId } },
+          select: { role: true }
+        });
+        if (workspaceMember?.role === 'WORKSPACE_GUEST') {
+          isGuest = true;
+        }
+      }
+
+      // 3. Determine if user is allowed as admin/moderator (CHANNEL_OWNER, CHANNEL_MODERATOR, WORKSPACE_ADMIN, WORKSPACE_OWNER)
+      let isAllowedAdmin = false;
+      if (senderParticipant && ['CHANNEL_OWNER', 'CHANNEL_MODERATOR'].includes(senderParticipant.role)) {
+        isAllowedAdmin = true;
+      }
+      if (workspaceId && !isAllowedAdmin) {
+        const workspaceMember = await prisma.workspaceMember.findUnique({
+          where: { workspaceId_userId: { workspaceId, userId: senderId } },
+          select: { role: true }
+        });
+        if (workspaceMember && ['WORKSPACE_OWNER', 'WORKSPACE_ADMIN'].includes(workspaceMember.role)) {
+          isAllowedAdmin = true;
+        }
+      }
+
+      // 4. Apply filter criteria
+      let blockBroadcast = false;
+      if (isPublicOrLargeChannel) {
+        if (!isAllowedAdmin) {
+          blockBroadcast = true;
+          logger.info({ chatId, senderId }, 'User not allowed to use broadcast mention in public/large channel');
+        }
+      } else {
+        if (isGuest) {
+          blockBroadcast = true;
+          logger.info({ chatId, senderId }, 'Guest user not allowed to use broadcast mention');
+        }
+      }
+
+      if (blockBroadcast) {
+        allowedMentions = parsedMentions.filter((m) => m.type !== 'HERE' && m.type !== 'CHANNEL' && m.type !== 'ALL');
+      }
+    }
+
+    if (allowedMentions.length === 0) return [];
+
     const mentionRecords = await Promise.all(
-      parsedMentions.map(async (mention) => {
+      allowedMentions.map(async (mention) => {
         const record = await prisma.mention.create({
           data: { id: uuidv4(), messageId, targetType: mention.type, targetId: mention.targetId || null },
         });
         return { ...record, raw: mention.raw };
       })
     );
-
-    const chat = await prisma.chat.findUnique({
-      where: { id: chatId },
-      select: { workspaceId: true }
-    });
-    const workspaceId = chat?.workspaceId;
 
     const userMentions = mentionRecords.filter((m) => m.targetType === 'USER' && m.targetId);
     const notifiedUserIds = new Set<string>();
@@ -95,8 +179,8 @@ export class MentionService {
       }
     }
 
-    const hasBroadcast = mentionRecords.some((m) => m.targetType === 'HERE' || m.targetType === 'CHANNEL');
-    if (hasBroadcast) {
+    const hasAllowedBroadcast = mentionRecords.some((m) => m.targetType === 'HERE' || m.targetType === 'CHANNEL' || m.targetType === 'ALL');
+    if (hasAllowedBroadcast) {
       // Fetch participants to notify
       const participants = await prisma.chatParticipant.findMany({
         where: { chatId },

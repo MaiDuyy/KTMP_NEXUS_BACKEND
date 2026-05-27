@@ -64,7 +64,8 @@ invitationRoutes.post('/reject-body', asyncHandler(async (req: Request, res: Res
 invitationRoutes.post('/', asyncHandler(async (req: Request, res: Response) => {
   const userId = req.headers['x-user-id'] as string;
   const userName = (req.headers['x-user-name'] as string) || 'Admin';
-  const { email, type = 'USER', role, channelIds, workspaceId, expiryDays } = req.body;
+  const { email, type = 'USER', role, channelIds, workspaceId, expiryDays, departmentId, department, departmentRole } = req.body;
+  const finalDeptId = departmentId || department;
   if (!userId) return res.status(401).json({ success: false, message: 'Chưa đăng nhập!' });
   if (!email) return res.status(400).json({ success: false, message: 'Email không được để trống!' });
 
@@ -81,7 +82,7 @@ invitationRoutes.post('/', asyncHandler(async (req: Request, res: Response) => {
     if (!userAllowed) return res.status(403).json({ success: false, message: 'Tổ chức không cho phép mời user mới!' });
   }
 
-  const invitation = await invitationService.createInvitation({ email, type, role, invitedBy: userId, inviterName: userName, channelIds, workspaceId, expiryDays });
+  const invitation = await invitationService.createInvitation({ email, type, role, invitedBy: userId, inviterName: userName, channelIds, workspaceId, expiryDays, departmentId: finalDeptId, departmentRole });
   res.status(201).json({ success: true, message: 'Đã gửi lời mời thành công!', invitation });
 }));
 

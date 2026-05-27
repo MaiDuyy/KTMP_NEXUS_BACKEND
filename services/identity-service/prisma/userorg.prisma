@@ -179,6 +179,8 @@ model Invitation {
   channelIds  String[] @default([])
   workspaceId String?
   orgId       String?
+  departmentId   String?
+  departmentRole String? @default("MEMBER")
   
   invitedBy   String
   inviterName String?

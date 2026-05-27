@@ -82,7 +82,7 @@ workspaceRoutes.get('/:id/members', asyncHandler(async (req: Request, res: Respo
   const result = await workspaceService.getMembers(id as string, {
     page: page ? parseInt(page as string) : undefined,
     limit: limit ? parseInt(limit as string) : undefined,
-  });
+  }, userId);
   res.json({ success: true, ...result });
 }));
 

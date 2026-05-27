@@ -50,6 +50,8 @@ export const EventSubjects = {
   WORKSPACE_MEMBER_KICKED: 'workspace.member.kicked',
   WORKSPACE_MEMBER_LEFT: 'workspace.member.left',
   WORKSPACE_OWNER_TRANSFERRED: 'workspace.owner.transferred',
+  WORKSPACE_ROLE_ASSIGNED: 'workspace.role.assigned',
+  WORKSPACE_ROLE_REVOKED: 'workspace.role.revoked',
 
   // Channel events
   CHANNEL_CREATED: 'channel.created',
@@ -78,6 +80,8 @@ export const EventSubjects = {
 
   DEPARTMENT_MEMBER_ADDED: 'department.member.added',
   DEPARTMENT_MEMBER_REMOVED: 'department.member.removed',
+  POLL_CREATED: 'poll.created',
+  POLL_UPDATED: 'poll.updated',
 } as const;
 
 export type EventSubject = typeof EventSubjects[keyof typeof EventSubjects];

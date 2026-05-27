@@ -52,17 +52,10 @@ authRoutes.post('/register-organization', asyncHandler(async (req: Request, res:
 }));
 
 authRoutes.post('/signup', asyncHandler(async (req: Request, res: Response) => {
-  try {
-    const data = validateBody(signUpSchema, req.body);
-    const user = await authService.signUp({
-      name: data.name, email: data.email, number: data.number, password: data.password,
-      gender: data.gender, birthDate: data.birthDate, location: data.location, role: data.role
-    });
-    res.status(201).json({ success: true, message: 'Đăng ký thành công! Vui lòng kiểm tra email để xác thực tài khoản.', user });
-  } catch (error) {
-    if (error instanceof ZodError) return res.status(400).json({ success: false, message: formatZodError(error) });
-    throw error;
-  }
+  return res.status(403).json({
+    success: false,
+    message: 'Chức năng tự đăng ký tài khoản đã bị tắt đối với hệ thống doanh nghiệp nội bộ để đảm bảo bảo mật và kiểm soát thành viên. Vui lòng liên hệ Quản trị viên (Admin) hoặc nhân sự (HR) để được cấp tài khoản.',
+  });
 }));
 
 authRoutes.post('/verify-otp', asyncHandler(async (req: Request, res: Response) => {
