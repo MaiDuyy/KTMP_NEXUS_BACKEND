@@ -260,9 +260,50 @@ export class PollService {
       chatId: poll.chatId,
       options: updatedPoll.options,
       totalVotes: updatedPoll.options.reduce((sum, opt) => sum + opt.votes.length, 0),
+      endsAt: updatedPoll.endsAt ? updatedPoll.endsAt.toISOString() : null,
+      isExpired: updatedPoll.isExpired,
     });
 
     logger.info({ pollId, userId, optionId }, 'User voted successfully');
+
+    return updatedPoll;
+  }
+
+  async endPoll(pollId: string, userId: string) {
+    const poll = await prisma.poll.findUnique({
+      where: { id: pollId },
+    });
+
+    if (!poll) {
+      throw new Error('Không tìm thấy cuộc khảo sát!');
+    }
+
+    if (poll.creatorId !== userId) {
+      throw new Error('Bạn không có quyền kết thúc cuộc khảo sát này!');
+    }
+
+    // Cập nhật endsAt bằng thời gian hiện tại để kết thúc khảo sát
+    await prisma.poll.update({
+      where: { id: pollId },
+      data: {
+        endsAt: new Date(),
+      },
+    });
+
+    // Lấy trạng thái cập nhật mới nhất
+    const updatedPoll = await this.getPoll(pollId, userId);
+
+    // Phát sự kiện cập nhật kết quả khảo sát qua NATS
+    await publishEvent(EventSubjects.POLL_UPDATED, {
+      pollId,
+      chatId: poll.chatId,
+      options: updatedPoll.options,
+      totalVotes: updatedPoll.options.reduce((sum, opt) => sum + opt.votes.length, 0),
+      endsAt: updatedPoll.endsAt ? updatedPoll.endsAt.toISOString() : null,
+      isExpired: updatedPoll.isExpired,
+    });
+
+    logger.info({ pollId, userId }, 'Poll manually ended successfully');
 
     return updatedPoll;
   }
