@@ -1081,28 +1081,10 @@ export class ChatService {
     });
     if (!chat) return null;
 
-    let participants = chat.participants;
-    if (chat.workspaceId) {
-      try {
-        const activeMembers = await prisma.workspaceMember.findMany({
-          where: {
-            workspaceId: chat.workspaceId,
-            userId: { in: chat.participants.map(p => p.accountId) },
-            leftAt: null,
-          },
-          select: { userId: true },
-        });
-        const activeMemberIds = new Set(activeMembers.map(m => m.userId));
-        participants = chat.participants.filter(p => activeMemberIds.has(p.accountId));
-      } catch (e) {
-        logger.warn({ chatId, workspaceId: chat.workspaceId }, 'Failed to filter participants in getChatMetadataInternal');
-      }
-    }
-
     return {
       ...chat,
-      participants,
-      participantCount: participants.length
+      participants: chat.participants,
+      participantCount: chat.participants.length
     };
   }
 }

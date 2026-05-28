@@ -71,7 +71,10 @@ export class PollService {
     // 2. Tạo bản ghi Poll và tin nhắn hiển thị
     const pollId = uuidv4();
     const messageId = uuidv4();
-    const endsAtDate = endsAt ? new Date(endsAt) : null;
+    let endsAtDate = endsAt ? new Date(endsAt) : null;
+    if (endsAtDate && (isNaN(endsAtDate.getTime()) || endsAtDate <= new Date())) {
+      endsAtDate = null; // Auto-fallback to open-ended if invalid or past/present date
+    }
 
     const result = await prisma.$transaction(async (tx) => {
       // a. Tạo Poll
