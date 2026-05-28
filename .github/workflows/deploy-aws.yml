@@ -108,16 +108,7 @@ jobs:
 
           # Structure Directories
           mkdir -p infra/nginx
-          mkdir -p infra/scripts
-
-          # Set executable permissions on scripting
-          chmod +x infra/scripts/pull-ssm-params.sh
-
-          # Fetch Decrypted Parameters from AWS SSM
-          ./infra/scripts/pull-ssm-params.sh
-
-          # Append ECR_REGISTRY dynamically to the .env file so it is permanently stored on the host
-          echo "ECR_REGISTRY=$ECR_REGISTRY" >> .env
+          
 
           # Authenticate Docker against AWS ECR
           aws ecr get-login-password --region $AWS_REGION | docker login --username AWS --password-stdin $ECR_REGISTRY
@@ -134,6 +125,6 @@ jobs:
           # Housekeeping: prune old dangling images to avoid EC2 disk exhaustion
           docker image prune -f
 
-          docker exec -it ott-nginx-prod nginx -t
+          docker exec ott-nginx-prod nginx -t
           
-          docker exec -it ott-nginx-prod nginx -s reload
+          docker exec ott-nginx-prod nginx -s reload
