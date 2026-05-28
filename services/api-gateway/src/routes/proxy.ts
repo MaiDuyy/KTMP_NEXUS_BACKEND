@@ -613,6 +613,7 @@ router.delete('/chats/tasks/:taskId', (req, res) =>
 router.post('/polls', (req, res) => forwardRequest(req, res, SERVICES.MESSAGING, '/polls'));
 router.get('/polls/:pollId', (req, res) => forwardRequest(req, res, SERVICES.MESSAGING, `/polls/${req.params.pollId}`));
 router.post('/polls/:pollId/vote', (req, res) => forwardRequest(req, res, SERVICES.MESSAGING, `/polls/${req.params.pollId}/vote`));
+router.post('/polls/:pollId/end', (req, res) => forwardRequest(req, res, SERVICES.MESSAGING, `/polls/${req.params.pollId}/end`));
 
 // ============= MESSAGE ROUTES → MESSAGING SERVICE =============
 

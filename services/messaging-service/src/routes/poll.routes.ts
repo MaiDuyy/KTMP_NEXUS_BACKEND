@@ -64,3 +64,20 @@ pollRoutes.post('/:id/vote', asyncHandler(async (req: Request, res: Response) =>
     poll,
   });
 }));
+
+// POST /polls/:id/end - Kết thúc cuộc khảo sát thủ công (chỉ creator)
+pollRoutes.post('/:id/end', asyncHandler(async (req: Request, res: Response) => {
+  const userId = req.headers['x-user-id'] as string;
+  const id = req.params.id as string;
+
+  if (!userId) {
+    return res.status(401).json({ success: false, message: 'Chưa đăng nhập!' });
+  }
+
+  const poll = await pollService.endPoll(id, userId);
+
+  res.json({
+    success: true,
+    poll,
+  });
+}));

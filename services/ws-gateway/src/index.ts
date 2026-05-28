@@ -466,9 +466,9 @@ function subscribeToNatsEvents() {
     for await (const msg of pollUpdatedSub) {
       try {
         const event = jsonCodec.decode(msg.data) as any;
-        const { chatId, pollId, options, totalVotes } = event.payload;
-        console.log(`[WS] Poll ${pollId} updated in chat ${chatId}. Broadcasting...`);
-        io.to(`chat:${chatId}`).emit('poll:updated', { chatId, pollId, options, totalVotes });
+        const { chatId, ...rest } = event.payload;
+        console.log(`[WS] Poll ${rest.pollId} updated in chat ${chatId}. Broadcasting...`);
+        io.to(`chat:${chatId}`).emit('poll:updated', { chatId, ...rest });
       } catch (err) {
         console.error('[WS] Error processing poll.updated NATS event:', err);
       }

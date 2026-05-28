@@ -142,6 +142,7 @@ services:
       - JWT_EXPIRES_IN=${JWT_EXPIRES_IN}
       - JWT_REFRESH_SECRET=${JWT_REFRESH_SECRET}
       - REFRESH_TOKEN_EXPIRES_IN=${REFRESH_TOKEN_EXPIRES_IN}
+      - NATS_URL=${NATS_URL}
       - SMTP_HOST=${SMTP_HOST}
       - SMTP_PORT=${SMTP_PORT}
       - SMTP_USER=${SMTP_USER}
@@ -151,6 +152,7 @@ services:
       - MESSAGING_GRPC_HOST=${MESSAGING_GRPC_HOST:-messaging-service}
       - MESSAGING_GRPC_PORT=${MESSAGING_GRPC_PORT:-50052}
       - IDENTITY_GRPC_HOST=${IDENTITY_GRPC_HOST:-identity-service}
+      - IDENTITY_GRPC_PORT=${IDENTITY_GRPC_PORT:-50051}
     command: sh -c "npx prisma db push --schema=prisma/auth.prisma --accept-data-loss && npx prisma db push --schema=prisma/userorg.prisma --accept-data-loss && npx prisma db push --schema=prisma/rbac.prisma --accept-data-loss && (npm run prisma:seed || true) && node dist/index.js"
     depends_on:
       postgres:
@@ -246,27 +248,45 @@ services:
     networks:
       - ott-network-prod
 
-  # ai-knowledge:
-  #   image: ${ECR_REGISTRY}/ott-chat-ai-knowledge:latest
-  #   container_name: ott-ai-knowledge-prod
-  #   restart: always
-  #   logging: *default-logging
-  #   ports:
-  #     - "8081:8080" # Port conflict, move to 8081
-  #   environment:
-  #     - DB_HOST=${POSTGRES_HOST}
-  #     - DB_PORT=${POSTGRES_PORT}
-  #     - DB_NAME=${POSTGRES_DB}
-  #     - DB_USER=${POSTGRES_USER}
-  #     - DB_PASSWORD=${POSTGRES_PASSWORD}
-  #     - OPENAI_API_KEY=${OPENAI_API_KEY}
-  #     - GOOGLE_API_KEY=${GOOGLE_API_KEY}
-  #   depends_on:
-  #     postgres:
-  #       condition: service_healthy
-  #   networks:
-  #     - ott-network-prod
-
+  ai-knowledge:
+    image: ${ECR_REGISTRY}/ott-chat-ai-knowledge:latest
+    container_name: ott-ai-knowledge-prod
+    restart: always
+    logging: *default-logging
+    ports:
+      - "8081:8080" # Port conflict, move to 8081
+    environment:
+      - POSTGRES_HOST=${POSTGRES_HOST}
+      - POSTGRES_PORT=${POSTGRES_PORT}
+      - POSTGRES_DB=${POSTGRES_DB}
+      - POSTGRES_USER=${POSTGRES_USER}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - AI_KNOWLEDGE_DATABASE_URL=jdbc:postgresql://${POSTGRES_HOST}:${POSTGRES_PORT}/${POSTGRES_DB}?currentSchema=ai_knowledge,public
+      - EMAIL_HOST=${SMTP_HOST:-smtp.gmail.com}
+      - EMAIL_PORT=${SMTP_PORT:-587}
+      - EMAIL_ID=${SMTP_USER:-}
+      - EMAIL_PASSWORD=${SMTP_PASS:-}
+      - ACTIVE_PROFILE=prod
+      - CORS_ORIGIN=${CORS_ORIGIN:-http://localhost:3002}
+      - JWT_SECRET=${JWT_SECRET:-replace_with_secure_jwt_secret}
+      - JWT_EXPIRATION=${JWT_EXPIRES_IN_SPRING:-2700}
+      - API_KEY=${GOOGLE_API_KEY}
+      - GEMINI_MODEL=${GEMINI_MODEL:-gemini-3.1-flash-lite}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - REDIS_HOST=${REDIS_HOST:-redis}
+      - REDIS_PORT=${REDIS_PORT:-6379}
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-}
+      - MESSAGING_SERVICE_URL=http://messaging-service:3020
+      - NATS_URL=${NATS_URL:-nats://nats:4222}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+    networks:
+      - ott-network-prod
 
   nginx:
     image: nginx:1.25-alpine
