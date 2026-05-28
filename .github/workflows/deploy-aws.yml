@@ -133,3 +133,7 @@ jobs:
 
           # Housekeeping: prune old dangling images to avoid EC2 disk exhaustion
           docker image prune -f
+
+          docker exec -it ott-nginx-prod nginx -t
+          
+          docker exec -it ott-nginx-prod nginx -s reload

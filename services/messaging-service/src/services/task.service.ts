@@ -19,8 +19,20 @@ export class TaskService {
       where: { chatId, accountId: creatorId }
     });
 
-    if (!participant || (participant.role !== 'CHANNEL_OWNER' && participant.role !== 'CHANNEL_MODERATOR')) {
-      throw new Error('Chỉ chủ sở hữu kênh hoặc quản trị kênh mới có quyền tạo kế hoạch!');
+    if (!participant) {
+      throw new Error('Bạn không có trong cuộc trò chuyện này!');
+    }
+
+    const chat = await prisma.chat.findUnique({
+      where: { id: chatId },
+      select: { isGroup: true }
+    });
+
+    // Only enforce owner/moderator role in group chats
+    if (chat?.isGroup) {
+      if (participant.role !== 'CHANNEL_OWNER' && participant.role !== 'CHANNEL_MODERATOR') {
+        throw new Error('Chỉ chủ sở hữu kênh hoặc quản trị kênh mới có quyền tạo kế hoạch!');
+      }
     }
 
     const deadline = data.deadlineAt ? new Date(data.deadlineAt) : null;

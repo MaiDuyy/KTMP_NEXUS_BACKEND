@@ -33,6 +33,8 @@ interface AuthenticatedSocket extends Socket {
   userId?: string;
   userName?: string;
   role?: string;
+  roles?: string[];
+  roleLevel?: number;
   orgId?: string;
 }
 
@@ -1616,10 +1618,12 @@ io.use(async (socket: AuthenticatedSocket, next) => {
       return next(new Error('Authentication required'));
     }
 
-    const decoded = jwt.verify(token, JWT_SECRET) as { sub?: string; id?: string; name?: string; role?: string; orgId?: string };
+        const decoded = jwt.verify(token, JWT_SECRET) as { sub?: string; id?: string; name?: string; role?: string; roles?: string[]; roleLevel?: number; orgId?: string };
     socket.userId = decoded.sub || decoded.id || '';
     socket.userName = decoded.name || 'User';
     socket.role = decoded.role || 'WORKSPACE_MEMBER';
+    socket.roles = decoded.roles || [];
+    socket.roleLevel = decoded.roleLevel;
     socket.orgId = decoded.orgId;
     next();
   } catch (error) {
@@ -2285,7 +2289,13 @@ io.on('connection', async (socket: AuthenticatedSocket) => {
       if (!activeConversationId) {
         const convRes = await fetch(`${aiServiceUrl}/chat/conversations`, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'x-user-id': userId },
+          headers: {
+            'Content-Type': 'application/json',
+            'x-user-id': userId,
+            'x-user-role': socket.role || '',
+            'x-user-roles': JSON.stringify(socket.roles || [socket.role]),
+            'x-user-role-level': socket.roleLevel !== undefined ? String(socket.roleLevel) : '',
+          },
           body: JSON.stringify({ title: `Chat ${chatId}`, chatId }),
         });
         if (convRes.ok) {
@@ -2299,7 +2309,13 @@ io.on('connection', async (socket: AuthenticatedSocket) => {
       // Step 2: Call streaming RAG endpoint
       const streamRes = await fetch(`${aiServiceUrl}/chat/messages`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'x-user-id': userId },
+        headers: {
+          'Content-Type': 'application/json',
+          'x-user-id': userId,
+          'x-user-role': socket.role || '',
+          'x-user-roles': JSON.stringify(socket.roles || [socket.role]),
+          'x-user-role-level': socket.roleLevel !== undefined ? String(socket.roleLevel) : '',
+        },
         body: JSON.stringify({ conversationId: activeConversationId, message }),
       });
 
@@ -2374,6 +2390,9 @@ io.on('connection', async (socket: AuthenticatedSocket) => {
         headers: {
           'Content-Type': 'application/json',
           'x-user-id': userId,
+          'x-user-role': socket.role || '',
+          'x-user-roles': JSON.stringify(socket.roles || [socket.role]),
+          'x-user-role-level': socket.roleLevel !== undefined ? String(socket.roleLevel) : '',
         },
         body: JSON.stringify({
           conversationId: conversationId || null,
