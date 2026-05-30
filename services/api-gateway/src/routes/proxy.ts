@@ -85,6 +85,11 @@ if (user) {
       headers['x-correlation-id'] = (req as any).correlationId;
     }
 
+    const forwardedFor = req.headers['x-forwarded-for'] as string || req.ip || req.socket.remoteAddress || '';
+    if (forwardedFor) {
+      headers['x-forwarded-for'] = forwardedFor;
+    }
+
     const wsId = req.headers['x-workspace-id'] as string;
     if (wsId) {
       headers['x-workspace-id'] = wsId;
@@ -621,6 +626,9 @@ router.get('/messages/:chatId', (req, res) => {
   const query = new URLSearchParams(req.query as any).toString();
   forwardRequest(req, res, SERVICES.MESSAGING, `/messages/${req.params.chatId}${query ? `?${query}` : ''}`);
 });
+router.post('/messages/forward', (req, res) => 
+  forwardRequest(req, res, SERVICES.MESSAGING, '/messages/forward'));
+
 router.post('/messages/:chatId', (req, res) => 
   forwardRequest(req, res, SERVICES.MESSAGING, `/messages/${req.params.chatId}`));
 router.delete('/messages/:messageId', (req, res) => 

@@ -121,6 +121,14 @@ export class WorkspaceService {
                            await userorgClient.checkWorkspaceAccess(userId, workspace.id, workspace.departmentId, workspace.createdAt.toISOString());
     if (!hasAdminAccess) throw new Error('Bạn không có quyền chỉnh sửa workspace này!');
 
+    // Enforce CHANGE_DEPT_ASSIGNMENT restriction: only System Admins or Workspace Owners can change department assignment
+    if (data.departmentId !== undefined && data.departmentId !== workspace.departmentId) {
+      const isOwner = member && member.role === 'WORKSPACE_OWNER';
+      if (!isSystemAdmin && !isOwner) {
+        throw new Error('Chỉ Trưởng hệ thống hoặc Chủ sở hữu Workspace mới có quyền thay đổi phòng ban liên kết!');
+      }
+    }
+
     const updateData: any = {};
     if (data.name !== undefined) updateData.name = data.name.trim();
     if (data.description !== undefined) updateData.description = data.description?.trim();

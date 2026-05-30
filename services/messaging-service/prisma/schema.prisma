@@ -173,6 +173,10 @@ model Message {
   
   replyToId String?
   
+  // Forward support
+  isForwarded   Boolean  @default(false)
+  forwardFromId String?
+  
   // Thread support
   parentId     String?
   rootThreadId String?

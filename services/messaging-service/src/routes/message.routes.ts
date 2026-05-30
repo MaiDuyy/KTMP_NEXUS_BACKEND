@@ -30,6 +30,34 @@ messageRoutes.post('/chats/:chatId/read', asyncHandler(async (req: Request, res:
   res.json({ success: true, message: 'Marked as read' });
 }));
 
+// POST /forward — forward a message to a target chat room (placed before parameterized routes)
+messageRoutes.post('/forward', asyncHandler(async (req: Request, res: Response) => {
+  const userId = req.headers['x-user-id'] as string;
+  const { originalMessageId, targetChatId } = req.body;
+  if (!userId) return res.status(401).json({ success: false, message: 'Chưa đăng nhập!' });
+  if (!originalMessageId || !targetChatId) {
+    return res.status(400).json({ success: false, message: 'Thiếu thông tin originalMessageId hoặc targetChatId!' });
+  }
+  const message = await messageService.forwardMessage(originalMessageId, targetChatId, userId);
+  res.status(201).json({
+    success: true,
+    message: {
+      id: message.id,
+      content: message.content,
+      type: message.type,
+      time: message.time,
+      senderId: message.senderId,
+      sender: (message as any).sender,
+      replyTo: null,
+      file: message.fileName ? { name: message.fileName, size: message.fileSize, type: message.fileType } : null,
+      reactions: [],
+      isMe: true,
+      isForwarded: message.isForwarded,
+      forwardFromId: message.forwardFromId,
+    },
+  });
+}));
+
 // GET /:chatId
 messageRoutes.get('/:chatId', asyncHandler(async (req: Request, res: Response) => {
   const userId = req.headers['x-user-id'] as string;

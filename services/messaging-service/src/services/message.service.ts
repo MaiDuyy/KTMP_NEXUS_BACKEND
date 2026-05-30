@@ -280,9 +280,9 @@ export class MessageService {
       },
     });
 
-    // Unhide chat only for the sender of the message if it was hidden
-    await prisma.chatParticipant.update({
-      where: { chatId_accountId: { chatId, accountId: senderId } },
+    // Unhide chat for all participants so it reappears in their chat list on new activity
+    await prisma.chatParticipant.updateMany({
+      where: { chatId, hidden: true },
       data: { hidden: false },
     }).catch(() => {});
 
@@ -594,6 +594,170 @@ export class MessageService {
 
     logger.info({ messageId, pin: newPinState }, 'Message pin toggled');
     return { pin: newPinState };
+  }
+
+  async forwardMessage(
+    originalMessageId: string,
+    targetChatId: string,
+    senderId: string
+  ) {
+    // 1. Dual Auth Check - Check Source and Target chat access
+    const originalMessage = await prisma.message.findUnique({
+      where: { id: originalMessageId }
+    });
+    if (!originalMessage) {
+      throw new Error('Tin nhắn gốc không tồn tại!');
+    }
+
+    // Check Source: User must be participant of original message's chat room
+    const sourceParticipant = await prisma.chatParticipant.findUnique({
+      where: {
+        chatId_accountId: {
+          chatId: originalMessage.chatId,
+          accountId: senderId
+        }
+      }
+    });
+    if (!sourceParticipant) {
+      throw new Error('Bạn không có quyền truy cập tin nhắn gốc!');
+    }
+
+    // Check Target: User must be participant of target chat room
+    const targetChatMetadata = await prisma.chat.findUnique({
+      where: { id: targetChatId },
+      select: {
+        id: true,
+        isGroup: true,
+        name: true,
+        workspaceId: true,
+        isReadOnly: true,
+        participants: { select: { accountId: true, role: true } }
+      }
+    });
+    if (!targetChatMetadata) {
+      throw new Error('Phòng chat đích không tồn tại!');
+    }
+
+    const targetParticipant = targetChatMetadata.participants.find(p => p.accountId === senderId);
+    if (!targetParticipant) {
+      throw new Error('Bạn không có quyền gửi tin nhắn tới phòng chat này!');
+    }
+
+    // Check Read-only permission of target chat
+    if (targetChatMetadata.isReadOnly) {
+      const privilegedRoles = ['CHANNEL_OWNER', 'CHANNEL_MODERATOR', 'WORKSPACE_ADMIN', 'WORKSPACE_OWNER'];
+      if (!privilegedRoles.includes(targetParticipant.role)) {
+        let isWorkspacePrivileged = false;
+        if (targetChatMetadata.workspaceId) {
+          try {
+            const workspaceMember = await prisma.workspaceMember.findUnique({
+              where: { workspaceId_userId: { workspaceId: targetChatMetadata.workspaceId, userId: senderId } },
+              select: { role: true, leftAt: true }
+            });
+            if (workspaceMember && workspaceMember.leftAt === null &&
+                (workspaceMember.role === 'WORKSPACE_ADMIN' || workspaceMember.role === 'WORKSPACE_OWNER')) {
+              isWorkspacePrivileged = true;
+            }
+          } catch (e) {
+            logger.warn({ senderId, workspaceId: targetChatMetadata.workspaceId }, 'Failed to check workspace member role');
+          }
+        }
+        if (!isWorkspacePrivileged) {
+          throw new Error('Kênh này đang ở chế độ chỉ đọc. Chỉ quản trị viên mới có thể gửi tin nhắn.');
+        }
+      }
+    }
+
+    // For 1-1 target chats, check block status
+    if (!targetChatMetadata.isGroup) {
+      const partner = targetChatMetadata.participants.find(p => p.accountId !== senderId);
+      if (partner) {
+        const blockInfo = await userorgClient.checkBlockedStatus(senderId, partner.accountId);
+        if (blockInfo.isBlocked) {
+          throw new Error('Bạn không thể gửi tin nhắn cho người này vì đã bị chặn hoặc bạn đã chặn người này!');
+        }
+      }
+    }
+
+    // 2. Clone the original message parameters to target chat
+    const clonedMessage = await prisma.message.create({
+      data: {
+        id: uuidv4(),
+        chatId: targetChatId,
+        senderId,
+        content: originalMessage.content,
+        type: originalMessage.type,
+        fileName: originalMessage.fileName,
+        fileSize: originalMessage.fileSize,
+        fileType: originalMessage.fileType,
+        isForwarded: true,
+        forwardFromId: originalMessageId,
+      }
+    });
+
+    // Unhide chat for all participants in target chat so it reappears
+    await prisma.chatParticipant.updateMany({
+      where: { chatId: targetChatId, hidden: true },
+      data: { hidden: false },
+    }).catch(() => {});
+
+    // 3. Hydrate sender profile
+    let senderProfile = null;
+    try {
+      const accountMap = await userorgClient.getUsers([senderId]);
+      senderProfile = accountMap.get(senderId);
+    } catch (err) {
+      logger.error({ err }, 'Failed to fetch user profiles for forwarded message');
+    }
+
+    const senderPayload = senderProfile ? {
+      id: senderProfile.id,
+      name: senderProfile.name,
+      avatar: senderProfile.avatar,
+    } : undefined;
+
+    // Filter participantIds of target chat for real-time notification
+    let targetParticipantIds = targetChatMetadata.participants.map(p => p.accountId);
+    if (targetChatMetadata.workspaceId) {
+      try {
+        const activeMembers = await prisma.workspaceMember.findMany({
+          where: {
+            workspaceId: targetChatMetadata.workspaceId,
+            userId: { in: targetParticipantIds },
+            leftAt: null,
+          },
+          select: { userId: true },
+        });
+        const activeMemberIds = new Set(activeMembers.map(m => m.userId));
+        targetParticipantIds = targetParticipantIds.filter(id => activeMemberIds.has(id));
+      } catch (e) {
+        logger.warn({ workspaceId: targetChatMetadata.workspaceId }, 'Failed to filter message participants by workspace membership');
+      }
+    }
+
+    // 4. Real-time Pub/Sub using NATS JetStream event MESSAGE_CREATED
+    await publishEvent(EventSubjects.MESSAGE_CREATED, {
+      id: clonedMessage.id,
+      chatId: targetChatId,
+      workspaceId: targetChatMetadata.workspaceId,
+      participantIds: targetParticipantIds,
+      mentionedUserIds: [], // Forward does not trigger mentions
+      senderId,
+      sender: senderPayload,
+      content: clonedMessage.content,
+      type: clonedMessage.type,
+      time: clonedMessage.time.toISOString(),
+      replyTo: null, // Forwarded messages are not replies
+      file: clonedMessage.fileName ? { name: clonedMessage.fileName, size: clonedMessage.fileSize, type: clonedMessage.fileType } : null,
+      reactions: [],
+      pin: false,
+      isForwarded: true,
+      forwardFromId: originalMessageId,
+    });
+
+    logger.info({ messageId: clonedMessage.id, originalMessageId, targetChatId }, 'Message forwarded');
+
+    return { ...clonedMessage, sender: senderPayload, replyTo: null };
   }
 
   async getPinnedMessages(chatId: string, userId: string) {
