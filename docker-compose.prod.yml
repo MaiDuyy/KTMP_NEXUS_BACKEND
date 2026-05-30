@@ -115,6 +115,7 @@ services:
       - LIVEKIT_API_KEY=${LIVEKIT_API_KEY}
       - LIVEKIT_API_SECRET=${LIVEKIT_API_SECRET}
       - LIVEKIT_URL=${LIVEKIT_URL}
+      - SPRING_AI_URL=http://ai-knowledge:8080
     depends_on:
       redis:
         condition: service_healthy
@@ -153,6 +154,7 @@ services:
       - MESSAGING_GRPC_PORT=${MESSAGING_GRPC_PORT:-50052}
       - IDENTITY_GRPC_HOST=${IDENTITY_GRPC_HOST:-identity-service}
       - IDENTITY_GRPC_PORT=${IDENTITY_GRPC_PORT:-50051}
+      - FRONTEND_URL=${FRONTEND_URL}
     command: sh -c "npx prisma db push --schema=prisma/auth.prisma --accept-data-loss && npx prisma db push --schema=prisma/userorg.prisma --accept-data-loss && npx prisma db push --schema=prisma/rbac.prisma --accept-data-loss && (npm run prisma:seed || true) && node dist/index.js"
     depends_on:
       postgres:

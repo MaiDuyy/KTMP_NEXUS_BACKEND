@@ -149,6 +149,8 @@ interface ActiveCall {
   callerName: string;
   callerAvatar?: string;
   chatId: string;
+  chatName?: string;
+  chatAvatar?: string;
   isVideo: boolean;
   callType: 'private' | 'group';
   status: 'ringing' | 'active' | 'ended';
@@ -225,6 +227,47 @@ function removeParticipant(roomName: string, participantId: string): boolean {
   userInCall.delete(participantId);
   console.log(`[Call] ${participantId} left room ${roomName}. Remaining: ${call.participants.size}`);
   return call.participants.size === 0;
+}
+
+/** Validate and cleanup any orphaned call sessions where all participants are offline */
+function validateAndCleanupOrphanedCalls() {
+  const now = Date.now();
+  for (const [roomName, call] of activeCalls.entries()) {
+    const durationMs = now - call.createdAt.getTime();
+
+    // 1. Ringing timeout (ringing for > 60s and still no one accepted)
+    if (call.status === 'ringing' && durationMs > 60000) {
+      console.log(`[Call] Ringing timeout for room ${roomName}. Cleaning up.`);
+      cleanupCall(roomName);
+      continue;
+    }
+
+    // 2. Empty group calls (0 participants remaining in the set)
+    if (call.participants.size === 0) {
+      console.log(`[Call] Room ${roomName} has 0 participants. Cleaning up orphaned session.`);
+      cleanupCall(roomName);
+      continue;
+    }
+
+    // 3. Orphancy check (none of the participants, including caller/callee, are online)
+    let hasOnlineParticipant = false;
+    for (const pId of call.participants) {
+      if (onlineUsers.has(pId)) {
+        hasOnlineParticipant = true;
+        break;
+      }
+    }
+
+    // Also check host/caller
+    if (call.callerId && onlineUsers.has(call.callerId)) {
+      hasOnlineParticipant = true;
+    }
+
+    if (!hasOnlineParticipant) {
+      console.log(`[Call] No active participants are online for room ${roomName}. Cleaning up orphaned session.`);
+      cleanupCall(roomName);
+    }
+  }
 }
 
 /**
@@ -1221,6 +1264,13 @@ function subscribeToNatsEvents() {
             action: 'joined' 
           });
         }
+
+        // Also emit directly to the chat room for active session sync
+        io.to(`chat:${chatId}`).emit('chat:member_updated', {
+          chatId,
+          userId: finalAddedMemberIds[0] || finalAddedBy,
+          action: 'joined'
+        });
       } catch (err) {
         console.error('[WS] Error processing GROUP_MEMBER_ADDED event:', err);
       }
@@ -1257,6 +1307,13 @@ function subscribeToNatsEvents() {
             }
           }
         }
+
+        // Also emit directly to the chat room for active session sync
+        io.to(`chat:${chatId}`).emit('chat:member_updated', {
+          chatId,
+          userId: finalUserId,
+          action: 'removed'
+        });
       } catch (err) {
         console.error('[WS] Error processing GROUP_MEMBER_REMOVED event:', err);
       }
@@ -1365,6 +1422,8 @@ function subscribeToNatsEvents() {
           io.to(`user:${aid}`).emit('chat:join_request:new', { chatId, requestId, accountId });
         }
       }
+      // Also emit directly to the chat room for active session sync
+      io.to(`chat:${chatId}`).emit('chat:join_request:new', { chatId, requestId, accountId });
     }
   })();
 
@@ -1382,6 +1441,8 @@ function subscribeToNatsEvents() {
       }
       // Also notify the applicant
       io.to(`user:${accountId}`).emit('chat:join_request:status', { chatId, requestId, status });
+      // Also emit directly to the chat room for active session sync
+      io.to(`chat:${chatId}`).emit('chat:join_request:updated', { chatId, requestId, accountId, status });
     }
   })();
 
@@ -1781,7 +1842,7 @@ io.on('connection', async (socket: AuthenticatedSocket) => {
 
   // ─── Phase 1: CALL REQUEST (Caller initiates) ───
   socket.on('call:request', (data) => {
-    const { chatId, targetUserId, isVideo = true, callType = 'private', callerAvatar } = data;
+    const { chatId, targetUserId, isVideo = true, callType = 'private', callerAvatar, chatName, chatAvatar } = data;
 
     console.log(`[Call] ${userName} requesting call to ${targetUserId || 'group'} in chat ${chatId}`);
 
@@ -1808,6 +1869,8 @@ io.on('connection', async (socket: AuthenticatedSocket) => {
       callerId: userId,
       callerName: userName,
       callerAvatar: callerAvatar,
+      chatName,
+      chatAvatar,
       calleeId: callType === 'private' ? targetUserId : undefined,
       chatId,
       participants: new Set([userId]),
@@ -1831,6 +1894,8 @@ io.on('connection', async (socket: AuthenticatedSocket) => {
               callerId: userId,
               callerName: userName,
               callerAvatar: callerAvatar,
+              chatName,
+              chatAvatar,
               isVideo,
               callType,
               timestamp: new Date().toISOString(),
@@ -1855,6 +1920,8 @@ io.on('connection', async (socket: AuthenticatedSocket) => {
                 callerId: userId,
                 callerName: userName,
                 callerAvatar: callerAvatar,
+                chatName,
+                chatAvatar,
                 isVideo,
                 callType,
                 timestamp: new Date().toISOString(),
@@ -1876,6 +1943,8 @@ io.on('connection', async (socket: AuthenticatedSocket) => {
       callerId: userId,
       callerName: userName,
       callerAvatar: callerAvatar,
+      chatName,
+      chatAvatar,
       callType,
     });
 
@@ -1895,8 +1964,23 @@ io.on('connection', async (socket: AuthenticatedSocket) => {
         if (callType === 'private' && targetUserId) {
           io.to(`user:${targetUserId}`).emit('call:ended', { roomName, reason: 'missed' });
         } else {
-          socket.to(`chat:${chatId}`).emit('call:ended', { roomName, reason: 'missed' });
+          // Group call timeout: notify all members via their personal rooms
+          messagingGrpcClient.getParticipantIds(chatId)
+            .then(participantIds => {
+              participantIds.forEach(memberId => {
+                if (memberId !== userId) {
+                  io.to(`user:${memberId}`).emit('call:ended', { roomName, reason: 'missed' });
+                }
+              });
+            })
+            .catch(err => {
+              console.error(`[Call] gRPC Failed to fetch participants for group call timeout:`, err);
+            });
         }
+        
+        // Also emit to chat room for other listeners
+        io.to(`chat:${chatId}`).emit('call:ended', { roomName, reason: 'missed' });
+
         // Save missed call event to chat history
         saveCallEventMessage(chatId, userId, 'call_missed', {
           isVideo,
@@ -2193,8 +2277,22 @@ io.on('connection', async (socket: AuthenticatedSocket) => {
     if (call.callType === 'private' && call.calleeId) {
       io.to(`user:${call.calleeId}`).emit('call:ended', { roomName, reason: 'cancelled' });
     } else {
-      socket.to(`chat:${call.chatId}`).emit('call:ended', { roomName, reason: 'cancelled' });
+      // Group call: broadcast to ALL group members via their PERSONAL user rooms
+      messagingGrpcClient.getParticipantIds(call.chatId)
+        .then(participantIds => {
+          participantIds.forEach(memberId => {
+            if (memberId !== userId) {
+              io.to(`user:${memberId}`).emit('call:ended', { roomName, reason: 'cancelled' });
+            }
+          });
+        })
+        .catch(err => {
+          console.error(`[Call] gRPC Failed to fetch participants for group call cancel:`, err);
+        });
     }
+
+    // Also notify chat room for other listeners (UI active status, etc.)
+    io.to(`chat:${call.chatId}`).emit('call:ended', { roomName, reason: 'cancelled' });
 
     // Save cancelled event to chat history
     saveCallEventMessage(call.chatId, call.callerId, 'call_cancelled', {
@@ -2208,6 +2306,9 @@ io.on('connection', async (socket: AuthenticatedSocket) => {
   // ─── CHECK ACTIVE CALL (Chat specific) ───
   socket.on('call:check', (data) => {
     const { chatId } = data;
+    // Self-healing: Cleanup any orphaned call sessions first
+    validateAndCleanupOrphanedCalls();
+
     // Find any active call in this chat
     const activeEntry = Array.from(activeCalls.entries()).find(([_, call]) => call.chatId === chatId);
     
@@ -2231,6 +2332,8 @@ io.on('connection', async (socket: AuthenticatedSocket) => {
   // ─── CHECK ACTIVE CALL (Global Sync for "Golden 30s") ───
   socket.on('call:check_active', () => {
     console.log(`[Call] ⚡ ${userName} (${userId}) requested global active call sync`);
+    // Self-healing: Cleanup any orphaned call sessions first
+    validateAndCleanupOrphanedCalls();
     
     // Find if there's any active call for this user
     // 1. Private call where user is the callee and it's still ringing
@@ -2257,6 +2360,8 @@ io.on('connection', async (socket: AuthenticatedSocket) => {
         callerId: call.callerId,
         callerName: call.callerName,
         callerAvatar: call.callerAvatar,
+        chatName: call.chatName,
+        chatAvatar: call.chatAvatar,
         isVideo: call.isVideo,
         callType: call.callType,
         status: call.status,
@@ -2558,6 +2663,9 @@ process.on('SIGINT', shutdown);
 async function start() {
   await setupRedisAdapter();
   await setupNats();
+
+  // Periodically cleanup orphaned calls every 30 seconds
+  setInterval(validateAndCleanupOrphanedCalls, 30000);
 
   httpServer.listen(PORT, () => {
     console.log('='.repeat(50));

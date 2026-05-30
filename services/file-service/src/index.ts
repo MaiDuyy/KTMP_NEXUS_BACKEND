@@ -304,10 +304,6 @@ app.post('/upload/chat', upload.single('file'), async (req, res) => {
       return res.status(400).json({ success: false, message: 'Vui lòng chọn file!' });
     }
 
-    if (!ALLOWED_FILE_TYPES.includes(req.file.mimetype)) {
-      return res.status(400).json({ success: false, message: 'Loại file không được hỗ trợ!' });
-    }
-
     // Determine resource type
     let resourceType: 'image' | 'video' | 'raw' = 'raw';
     if (ALLOWED_IMAGE_TYPES.includes(req.file.mimetype)) resourceType = 'image';

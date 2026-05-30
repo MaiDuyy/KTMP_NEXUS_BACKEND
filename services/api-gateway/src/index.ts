@@ -27,7 +27,7 @@ app.use(helmet());
 
 const originsFromEnv = process.env.CORS_ORIGIN ? process.env.CORS_ORIGIN.split(',') : [];
 const allowedOrigins = ['http://localhost:3002', 'http://127.0.0.1:3002', ...originsFromEnv];
-
+console.log("=== KIỂM TRA ALLOWED ORIGINS ===", allowedOrigins);
 app.use((req, res, next) => {
   // Handle Private Network Access preflight requests
   if (req.headers['access-control-request-private-network']) {
