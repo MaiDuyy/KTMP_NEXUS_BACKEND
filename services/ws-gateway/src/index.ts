@@ -12,6 +12,9 @@ import { connect, NatsConnection, JSONCodec } from 'nats';
 import { AccessToken } from 'livekit-server-sdk';
 import { messagingGrpcClient } from './messagingClient.js';
 
+// Redis client for call status and distributed locks
+
+
 const app = express();
 const httpServer = http.createServer(app);
 
@@ -26,7 +29,7 @@ const NATS_URL = process.env.NATS_URL || 'nats://localhost:4222';
 const LIVEKIT_API_KEY = process.env.LIVEKIT_API_KEY || 'devkey';
 const LIVEKIT_API_SECRET = process.env.LIVEKIT_API_SECRET || 'secret';
 const LIVEKIT_URL = process.env.LIVEKIT_URL || 'ws://localhost:7880';
-
+const redis = new Redis(REDIS_URL);
 // ============= TYPES =============
 
 interface AuthenticatedSocket extends Socket {
@@ -193,7 +196,7 @@ async function generateLiveKitToken(userId: string, userName: string, roomName: 
 }
 
 /** Full cleanup: remove ALL participants from call, delete room */
-function cleanupCall(roomName: string) {
+async function cleanupCall(roomName: string) {
   const call = activeCalls.get(roomName);
   if (call) {
     // Notify chat that call ended
@@ -203,10 +206,24 @@ function cleanupCall(roomName: string) {
       isActive: false,
     });
 
-    // Remove every participant from userInCall
-    call.participants.forEach((uid) => userInCall.delete(uid));
-    if (call.callerId) userInCall.delete(call.callerId);
-    if (call.calleeId) userInCall.delete(call.calleeId);
+    // Remove every participant from userInCall and Redis
+    const keysToDelete: string[] = [];
+    call.participants.forEach((uid) => {
+      userInCall.delete(uid);
+      keysToDelete.push(`user:call_state:${uid}`);
+    });
+    if (call.callerId) {
+      userInCall.delete(call.callerId);
+      keysToDelete.push(`user:call_state:${call.callerId}`);
+    }
+    if (call.calleeId) {
+      userInCall.delete(call.calleeId);
+      keysToDelete.push(`user:call_state:${call.calleeId}`);
+    }
+
+    if (keysToDelete.length > 0) {
+      await redis.del(...keysToDelete).catch(err => console.error('[Redis] cleanupCall del error:', err));
+    }
   }
   
   activeCalls.delete(roomName);
@@ -1841,49 +1858,84 @@ io.on('connection', async (socket: AuthenticatedSocket) => {
   // =============================================
 
   // ─── Phase 1: CALL REQUEST (Caller initiates) ───
-  socket.on('call:request', (data) => {
+  socket.on('call:request', async (data) => {
     const { chatId, targetUserId, isVideo = true, callType = 'private', callerAvatar, chatName, chatAvatar } = data;
 
     console.log(`[Call] ${userName} requesting call to ${targetUserId || 'group'} in chat ${chatId}`);
 
-    // Check if caller is already in a call
-    if (userInCall.has(userId)) {
-      socket.emit('call:error', { reason: 'already_in_call', message: 'Bạn đang trong cuộc gọi khác.' });
+    // Check if there is already an active call in this chat
+    const activeEntry = Array.from(activeCalls.entries()).find(
+      ([_, call]) => call.chatId === chatId && call.status !== 'ended'
+    );
+    if (activeEntry) {
+      socket.emit('call:error', {
+        reason: 'call_already_active',
+        message: 'Cuộc gọi nhóm đang diễn ra.',
+        activeCall: {
+          roomName: activeEntry[0],
+          callerName: activeEntry[1].callerName
+        }
+      });
       return;
     }
 
-    // For private calls: Ghost Ringing support - allow call even if offline
-    if (callType === 'private' && targetUserId) {
-      // We still check if they are busy if they ARE online
-      if (onlineUsers.has(targetUserId) && userInCall.has(targetUserId)) {
-        socket.emit('call:busy', { targetUserId, message: 'Người nhận đang trong cuộc gọi khác.' });
-        return;
-      }
+    // Lock Caller status on Redis atomically
+    const callerStateKey = `user:call_state:${userId}`;
+    const callerLocked = await redis.set(callerStateKey, 'IN_CALL', 'EX', 3600, 'NX');
+    if (!callerLocked) {
+      socket.emit('call:error', { reason: 'already_in_call', message: 'Bạn đang trong cuộc gọi khác.' });
+      return;
     }
 
     // Generate unique room name
     const roomName = generateRoomName(chatId);
 
-    // Lock: Register the call
-    activeCalls.set(roomName, {
-      callerId: userId,
-      callerName: userName,
-      callerAvatar: callerAvatar,
-      chatName,
-      chatAvatar,
-      calleeId: callType === 'private' ? targetUserId : undefined,
-      chatId,
-      participants: new Set([userId]),
-      isVideo,
-      callType,
-      status: 'ringing',
-      createdAt: new Date(),
-    });
-
-    // Mark caller as in-call
-    userInCall.set(userId, roomName);
-
     if (callType === 'private' && targetUserId) {
+      // Private 1-1 Call
+      const calleeStateKey = `user:call_state:${targetUserId}`;
+      const calleeLocked = await redis.set(calleeStateKey, 'RINGING', 'EX', 45, 'NX');
+      if (!calleeLocked) {
+        // Callee is busy! Release caller lock
+        await redis.del(callerStateKey);
+        
+        socket.emit('call:busy', { targetUserId, message: 'Người nhận đang trong cuộc gọi khác.' });
+        
+        // Save missed call event
+        saveCallEventMessage(chatId, userId, 'call_missed', {
+          isVideo,
+          callerName: userName,
+        });
+
+        // Emit silent notification to callee
+        io.to(`user:${targetUserId}`).emit('call:silent_notification', {
+          chatId,
+          callerId: userId,
+          callerName: userName,
+          callerAvatar,
+          isVideo,
+          callType: 'private'
+        });
+        return;
+      }
+
+      // If callee is idle and successfully locked, proceed to register call
+      activeCalls.set(roomName, {
+        callerId: userId,
+        callerName: userName,
+        callerAvatar: callerAvatar,
+        chatName,
+        chatAvatar,
+        calleeId: targetUserId,
+        chatId,
+        participants: new Set([userId]),
+        isVideo,
+        callType,
+        status: 'ringing',
+        createdAt: new Date(),
+      });
+
+      userInCall.set(userId, roomName);
+
       messagingGrpcClient.getParticipantIds(chatId)
         .then(participantIds => {
           if (participantIds.includes(targetUserId)) {
@@ -1908,30 +1960,76 @@ io.on('connection', async (socket: AuthenticatedSocket) => {
           console.error(`[Call] Failed to fetch participants for private call check:`, err);
         });
     } else {
-      // Group: broadcast to ALL online members of the chat via their PERSONAL rooms
-      // Optimized via gRPC
-      messagingGrpcClient.getParticipantIds(chatId)
-        .then(participantIds => {
-          participantIds.forEach(memberId => {
-            if (memberId !== userId) {
-              io.to(`user:${memberId}`).emit('call:incoming', {
-                roomName,
-                chatId,
-                callerId: userId,
-                callerName: userName,
-                callerAvatar: callerAvatar,
-                chatName,
-                chatAvatar,
-                isVideo,
-                callType,
-                timestamp: new Date().toISOString(),
-              });
-            }
-          });
-        })
-        .catch(err => {
-          console.error(`[Call] gRPC Failed to fetch participants for group call fan-out:`, err);
+      // Group Call: Ring only IDLE members, send silent notification to busy ones
+      try {
+        const participantIds = await messagingGrpcClient.getParticipantIds(chatId);
+        
+        const invitedMembers: string[] = [];
+        for (const memberId of participantIds) {
+          if (memberId === userId) continue;
+
+          const memberStateKey = `user:call_state:${memberId}`;
+          const memberLocked = await redis.set(memberStateKey, 'RINGING', 'EX', 45, 'NX');
+          if (memberLocked) {
+            invitedMembers.push(memberId);
+          } else {
+            // Member is busy, send silent notification
+            io.to(`user:${memberId}`).emit('call:silent_notification', {
+              chatId,
+              callerId: userId,
+              callerName: userName,
+              callerAvatar,
+              isVideo,
+              callType: 'group'
+            });
+          }
+        }
+
+        // If all group members are busy, abort call initiation
+        if (invitedMembers.length === 0 && participantIds.length > 1) {
+          await redis.del(callerStateKey);
+          socket.emit('call:error', { reason: 'all_busy', message: 'Tất cả mọi người trong nhóm đều đang bận.' });
+          return;
+        }
+
+        // Register the call
+        activeCalls.set(roomName, {
+          callerId: userId,
+          callerName: userName,
+          callerAvatar: callerAvatar,
+          chatName,
+          chatAvatar,
+          chatId,
+          participants: new Set([userId]),
+          isVideo,
+          callType,
+          status: 'ringing',
+          createdAt: new Date(),
         });
+
+        userInCall.set(userId, roomName);
+
+        // Ring invited members
+        invitedMembers.forEach(memberId => {
+          io.to(`user:${memberId}`).emit('call:incoming', {
+            roomName,
+            chatId,
+            callerId: userId,
+            callerName: userName,
+            callerAvatar: callerAvatar,
+            chatName,
+            chatAvatar,
+            isVideo,
+            callType,
+            timestamp: new Date().toISOString(),
+          });
+        });
+      } catch (err) {
+        console.error(`[Call] Group call failed to fetch participants:`, err);
+        await redis.del(callerStateKey);
+        socket.emit('call:error', { reason: 'server_error', message: 'Không thể khởi tạo cuộc gọi nhóm.' });
+        return;
+      }
     }
     
     // Broadcast to chat room that an active call exists (for UI join button)
@@ -1952,7 +2050,7 @@ io.on('connection', async (socket: AuthenticatedSocket) => {
     socket.emit('call:ringing', { roomName, chatId });
 
     // Auto-cancel if no answer after 30s
-    const ringingTimeout = setTimeout(() => {
+    const ringingTimeout = setTimeout(async () => {
       const call = activeCalls.get(roomName);
       if (call && call.status === 'ringing') {
         console.log(`[Call] Ringing timeout for room ${roomName}`);
@@ -1961,22 +2059,14 @@ io.on('connection', async (socket: AuthenticatedSocket) => {
           reason: 'no_answer',
           message: 'Không có ai trả lời.',
         });
-        if (callType === 'private' && targetUserId) {
-          io.to(`user:${targetUserId}`).emit('call:ended', { roomName, reason: 'missed' });
-        } else {
-          // Group call timeout: notify all members via their personal rooms
-          messagingGrpcClient.getParticipantIds(chatId)
-            .then(participantIds => {
-              participantIds.forEach(memberId => {
-                if (memberId !== userId) {
-                  io.to(`user:${memberId}`).emit('call:ended', { roomName, reason: 'missed' });
-                }
-              });
-            })
-            .catch(err => {
-              console.error(`[Call] gRPC Failed to fetch participants for group call timeout:`, err);
-            });
-        }
+        
+        // Notify members via their personal rooms
+        const participantIds = await messagingGrpcClient.getParticipantIds(chatId).catch(() => []);
+        participantIds.forEach(memberId => {
+          if (memberId !== userId) {
+            io.to(`user:${memberId}`).emit('call:ended', { roomName, reason: 'missed' });
+          }
+        });
         
         // Also emit to chat room for other listeners
         io.to(`chat:${chatId}`).emit('call:ended', { roomName, reason: 'missed' });
@@ -1986,7 +2076,7 @@ io.on('connection', async (socket: AuthenticatedSocket) => {
           isVideo,
           callerName: userName,
         });
-        cleanupCall(roomName);
+        await cleanupCall(roomName);
       }
     }, RINGING_TIMEOUT_MS);
 
@@ -2030,6 +2120,11 @@ io.on('connection', async (socket: AuthenticatedSocket) => {
     if (call.callType === 'private') {
       call.calleeId = userId;
     }
+
+    // Set accepting user's Redis state to IN_CALL
+    await redis.set(`user:call_state:${userId}`, 'IN_CALL', 'EX', 3600).catch(() => {});
+    // Keep caller state as IN_CALL
+    await redis.set(`user:call_state:${call.callerId}`, 'IN_CALL', 'EX', 3600).catch(() => {});
 
     if (isFirstAccept) {
       saveCallEventMessage(call.chatId, call.callerId, 'call_started', {
@@ -2119,13 +2214,16 @@ io.on('connection', async (socket: AuthenticatedSocket) => {
   });
 
   // ─── Phase 2b: CALL DECLINED (Callee rejects) ───
-  socket.on('call:declined', (data) => {
+  socket.on('call:declined', async (data) => {
     const { roomName } = data;
     const call = activeCalls.get(roomName);
 
     if (!call) return;
 
     console.log(`[Call] ${userName} declined call in room ${roomName}`);
+
+    // Clear declining user's call state in Redis
+    await redis.del(`user:call_state:${userId}`).catch(() => {});
 
     // Notify all active participants (caller + any joined members) about the decline
     call.participants.forEach((pId) => {
@@ -2155,6 +2253,9 @@ io.on('connection', async (socket: AuthenticatedSocket) => {
     const call = activeCalls.get(roomName);
 
     if (!call) return;
+
+    // Clear active user's call state in Redis immediately
+    await redis.del(`user:call_state:${userId}`).catch(() => {});
 
     const duration = Math.round((Date.now() - call.createdAt.getTime()) / 1000);
 
@@ -2559,6 +2660,9 @@ io.on('connection', async (socket: AuthenticatedSocket) => {
   socket.on('disconnect', async () => {
 
     console.log(`[WS] User disconnected: ${userName} (${userId})`);
+
+    // Release disconnecting user's Redis call state immediately
+    await redis.del(`user:call_state:${userId}`).catch(() => {});
 
     // Cleanup active call on disconnect
     const roomName = userInCall.get(userId);

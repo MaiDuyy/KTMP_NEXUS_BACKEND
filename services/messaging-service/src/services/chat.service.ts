@@ -7,6 +7,7 @@ import { publishEvent, EventSubjects } from '../lib/nats.js';
 import { logger } from '../lib/logger.js';
 import { messageService } from './message.service.js';
 import { userorgClient } from '../lib/userorgClient.js';
+import { clearChatCache, clearChatMemberCache } from '../middleware/chatAccess.js';
 export class ChatService {
   /**
    * Lấy tổng số tin nhắn chưa đọc theo từng workspace
@@ -289,8 +290,33 @@ export class ChatService {
     options?: { avatar?: string; joinPolicy?: 'PUBLIC' | 'PRIVATE' | 'APPROVAL' },
     workspaceId?: string
   ) {
-    if (!name || name.trim().length < 2) {
+    const trimmedName = name ? name.trim() : '';
+    if (!trimmedName || trimmedName.length < 2) {
       throw new Error('Tên nhóm phải có ít nhất 2 ký tự!');
+    }
+
+    // Check duplicate group name in the same scope (workspace or global)
+    const existingGroup = await prisma.chat.findFirst({
+      where: {
+        isGroup: true,
+        workspaceId: workspaceId || null,
+        name: {
+          equals: trimmedName,
+          mode: 'insensitive'
+        }
+      }
+    });
+
+    if (existingGroup) {
+      const error = new Error(
+        workspaceId 
+          ? 'Tên nhóm đã tồn tại trong Workspace này.' 
+          : 'Tên nhóm đã tồn tại trên hệ thống.'
+      );
+      (error as any).statusCode = 409;
+      (error as any).errorCode = 'DUPLICATE_GROUP_NAME';
+      (error as any).field = 'groupName';
+      throw error;
     }
 
     const uniqueMemberIds = [...new Set([userId, ...(memberIds || [])])];
@@ -490,7 +516,39 @@ export class ChatService {
     }
 
     const updateData: any = {};
-    if (data.name !== undefined) updateData.name = data.name.trim();
+    if (data.name !== undefined) {
+      const trimmedName = data.name ? data.name.trim() : '';
+      if (!trimmedName || trimmedName.length < 2) {
+        throw new Error('Tên nhóm phải có ít nhất 2 ký tự!');
+      }
+
+      // Check duplicate group name excluding current group
+      const existingGroup = await prisma.chat.findFirst({
+        where: {
+          id: { not: chatId },
+          isGroup: true,
+          workspaceId: chat.workspaceId || null,
+          name: {
+            equals: trimmedName,
+            mode: 'insensitive'
+          }
+        }
+      });
+
+      if (existingGroup) {
+        const error = new Error(
+          chat.workspaceId 
+            ? 'Tên nhóm đã tồn tại trong Workspace này.' 
+            : 'Tên nhóm đã tồn tại trên hệ thống.'
+        );
+        (error as any).statusCode = 409;
+        (error as any).errorCode = 'DUPLICATE_GROUP_NAME';
+        (error as any).field = 'groupName';
+        throw error;
+      }
+
+      updateData.name = trimmedName;
+    }
     if (data.avatar !== undefined) updateData.avatar = data.avatar;
     if (data.joinPolicy !== undefined) {
       // Only Owner can change join policy
@@ -507,6 +565,8 @@ export class ChatService {
       where: { id: chatId },
       data: updateData,
     });
+
+    await clearChatCache(chatId);
 
     await publishEvent(EventSubjects.GROUP_UPDATED, {
       chatId,
@@ -594,6 +654,10 @@ export class ChatService {
       })),
     });
 
+    for (const newMemberId of newMemberIds) {
+      await clearChatMemberCache(chatId, newMemberId);
+    }
+
     await prisma.chat.update({
       where: { id: chatId },
       data: { updatedAt: new Date() },
@@ -668,6 +732,8 @@ export class ChatService {
     await prisma.chatParticipant.delete({
       where: { id: targetParticipant.id },
     });
+
+    await clearChatMemberCache(chatId, memberId);
 
     // If Owner leaves, transfer to someone else
     if (userId === memberId && targetParticipant.role === 'CHANNEL_OWNER') {
@@ -816,6 +882,8 @@ export class ChatService {
           role: 'CHANNEL_MEMBER',
         },
       });
+
+      await clearChatMemberCache(chatId, userId);
       
       await publishEvent(EventSubjects.GROUP_MEMBER_ADDED, {
         chatId,
@@ -877,6 +945,8 @@ export class ChatService {
           data: { chatId, accountId: targetAccountId, role: 'CHANNEL_MEMBER' }
         })
       ]);
+
+      await clearChatMemberCache(chatId, targetAccountId);
 
       await publishEvent(EventSubjects.GROUP_MEMBER_ADDED, {
         chatId,
