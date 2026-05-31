@@ -19,7 +19,10 @@ const PORT = process.env.PORT || 3000;
 
 app.set('trust proxy', 1);
 app.use((req, res, next) => {
-  console.log(`[Gateway] Incoming: ${req.method} ${req.url}`);
+  (req as any).startTime = Date.now();
+  if (process.env.NODE_ENV !== 'production') {
+    console.log(`[Gateway] Incoming: ${req.method} ${req.url}`);
+  }
   next();
 });
 
@@ -27,7 +30,9 @@ app.use(helmet());
 
 const originsFromEnv = process.env.CORS_ORIGIN ? process.env.CORS_ORIGIN.split(',') : [];
 const allowedOrigins = ['http://localhost:3002', 'http://127.0.0.1:3002', ...originsFromEnv];
-console.log("=== KIỂM TRA ALLOWED ORIGINS ===", allowedOrigins);
+if (process.env.NODE_ENV !== 'production') {
+  console.log("=== KIỂM TRA ALLOWED ORIGINS ===", allowedOrigins);
+}
 app.use((req, res, next) => {
   // Handle Private Network Access preflight requests
   if (req.headers['access-control-request-private-network']) {
@@ -52,8 +57,30 @@ app.use(cookieParser());
 app.use(
   pinoHttp({
     logger,
+    customLogLevel: (req, res, err) => {
+      if (err || res.statusCode >= 500) {
+        return 'error';
+      }
+      if (res.statusCode >= 400) {
+        return 'warn';
+      }
+      
+      if (process.env.NODE_ENV === 'production') {
+        const startTime = (req as any).startTime || Date.now();
+        const duration = Date.now() - startTime;
+        if (duration > 1000) {
+          return 'warn';
+        }
+        return 'silent';
+      }
+      
+      return 'info';
+    },
     autoLogging: {
-      ignore: (req) => req.url === '/healthz',
+      ignore: (req) => {
+        const ignoredPaths = ['/healthz', '/metrics', '/health'];
+        return ignoredPaths.includes(req.url || '');
+      },
     },
   })
 );
@@ -65,18 +92,18 @@ app.use('/demo', demoRoutes);
 app.use(rateLimiter);
 
 // Strict rate limiting for sensitive auth endpoints (5 req / 15 min)
-app.use('/api/auth/signin', strictRateLimiter);
-app.use('/api/auth/signup', strictRateLimiter);
-app.use('/api/auth/signin-phone', strictRateLimiter);
-app.use('/api/auth/verify-otp', strictRateLimiter);
-app.use('/api/auth/resend-otp', strictRateLimiter);
-app.use('/api/auth/register-organization', strictRateLimiter);
-app.use('/api/otp', strictRateLimiter);
+app.use(['/api/auth/signin', '/auth/signin'], strictRateLimiter);
+app.use(['/api/auth/signup', '/auth/signup'], strictRateLimiter);
+app.use(['/api/auth/signin-phone', '/auth/signin-phone'], strictRateLimiter);
+app.use(['/api/auth/verify-otp', '/auth/verify-otp'], strictRateLimiter);
+app.use(['/api/auth/resend-otp', '/auth/resend-otp'], strictRateLimiter);
+app.use(['/api/auth/register-organization', '/auth/register-organization'], strictRateLimiter);
+app.use(['/api/otp', '/otp'], strictRateLimiter);
 
 import { workspaceMiddleware } from './middleware/workspace.js';
 
 // Gateway auth: public paths bypass, protected paths enforce JWT
-app.use('/api', gatewayAuthMiddleware, workspaceMiddleware, proxyRoutes);
+app.use(['/api', '/'], gatewayAuthMiddleware, workspaceMiddleware, proxyRoutes);
 
 app.use((_req, res) => {
   res.status(404).json({
@@ -115,12 +142,12 @@ async function start() {
   }
 }
 
-process.on('unhandledRejection', (reason, promise) => {
-  console.error('[Gateway] Unhandled Rejection:', reason);
+process.on('unhandledRejection', (reason) => {
+  logger.error({ err: reason }, '[Gateway] Unhandled Rejection');
 });
 
 process.on('uncaughtException', (error) => {
-  console.error('[Gateway] Uncaught Exception:', error);
+  logger.fatal(error, '[Gateway] Uncaught Exception');
   process.exit(1);
 });
 

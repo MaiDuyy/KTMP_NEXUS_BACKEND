@@ -12,6 +12,16 @@ export function errorHandler(
 ): void {
   logger.error({ error: err.message, stack: err.stack }, 'Error occurred');
 
+  if ((err as any).statusCode) {
+    res.status((err as any).statusCode).json({
+      success: false,
+      errorCode: (err as any).errorCode,
+      message: err.message,
+      field: (err as any).field
+    });
+    return;
+  }
+
   if (err instanceof ZodError) {
     res.status(400).json({
       success: false,

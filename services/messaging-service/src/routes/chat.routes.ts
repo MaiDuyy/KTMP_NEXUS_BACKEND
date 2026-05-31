@@ -6,6 +6,7 @@ import type { Request, Response } from 'express';
 import { chatService } from '../services/chat.service.js';
 import { asyncHandler } from '../middleware/errorHandler.js';
 import { AccessToken } from 'livekit-server-sdk';
+import { checkChatAccessMiddleware } from '../middleware/chatAccess.js';
 
 export const chatRoutes = Router();
 
@@ -41,7 +42,7 @@ chatRoutes.get('/', asyncHandler(async (req: Request, res: Response) => {
 }));
 
 // GET /:chatId
-chatRoutes.get('/:chatId', asyncHandler(async (req: Request, res: Response) => {
+chatRoutes.get('/:chatId', checkChatAccessMiddleware, asyncHandler(async (req: Request, res: Response) => {
   const userId = req.headers['x-user-id'] as string;
   const { chatId } = req.params;
   if (!userId) return res.status(401).json({ success: false, message: 'Chưa đăng nhập!' });
@@ -50,7 +51,7 @@ chatRoutes.get('/:chatId', asyncHandler(async (req: Request, res: Response) => {
 }));
 
 // GET /:chatId/call/token — Generate LiveKit token
-chatRoutes.get('/:chatId/call/token', asyncHandler(async (req: Request, res: Response) => {
+chatRoutes.get('/:chatId/call/token', checkChatAccessMiddleware, asyncHandler(async (req: Request, res: Response) => {
   const userId = req.headers['x-user-id'] as string;
   const { chatId } = req.params;
   if (!userId) return res.status(401).json({ success: false, message: 'Chưa đăng nhập!' });
@@ -84,7 +85,7 @@ chatRoutes.post('/:chatId/join', asyncHandler(async (req: Request, res: Response
 }));
 
 // POST /:chatId/join-requests/:targetAccountId/approve — Duyệt/Từ chối yêu cầu tham gia
-chatRoutes.post('/:chatId/join-requests/:targetAccountId/approve', asyncHandler(async (req: Request, res: Response) => {
+chatRoutes.post('/:chatId/join-requests/:targetAccountId/approve', checkChatAccessMiddleware, asyncHandler(async (req: Request, res: Response) => {
   const userId = req.headers['x-user-id'] as string;
   const { chatId, targetAccountId } = req.params;
   const { approve } = req.body;
@@ -105,7 +106,7 @@ chatRoutes.post('/private', asyncHandler(async (req: Request, res: Response) => 
 }));
 
 // PUT /:chatId
-chatRoutes.put('/:chatId', asyncHandler(async (req: Request, res: Response) => {
+chatRoutes.put('/:chatId', checkChatAccessMiddleware, asyncHandler(async (req: Request, res: Response) => {
   const userId = req.headers['x-user-id'] as string;
   const { chatId } = req.params;
   const { name, avatar, joinPolicy, isReadOnly } = req.body;
@@ -115,7 +116,7 @@ chatRoutes.put('/:chatId', asyncHandler(async (req: Request, res: Response) => {
 }));
 
 // POST /:chatId/members
-chatRoutes.post('/:chatId/members', asyncHandler(async (req: Request, res: Response) => {
+chatRoutes.post('/:chatId/members', checkChatAccessMiddleware, asyncHandler(async (req: Request, res: Response) => {
   const userId = req.headers['x-user-id'] as string;
   const { chatId } = req.params;
   const { memberIds } = req.body;
@@ -126,7 +127,7 @@ chatRoutes.post('/:chatId/members', asyncHandler(async (req: Request, res: Respo
 }));
 
 // DELETE /:chatId/members/:memberId
-chatRoutes.delete('/:chatId/members/:memberId', asyncHandler(async (req: Request, res: Response) => {
+chatRoutes.delete('/:chatId/members/:memberId', checkChatAccessMiddleware, asyncHandler(async (req: Request, res: Response) => {
   const userId = req.headers['x-user-id'] as string;
   const { chatId, memberId } = req.params;
   if (!userId) return res.status(401).json({ success: false, message: 'Chưa đăng nhập!' });
@@ -135,7 +136,7 @@ chatRoutes.delete('/:chatId/members/:memberId', asyncHandler(async (req: Request
 }));
 
 // POST /:chatId/leave
-chatRoutes.post('/:chatId/leave', asyncHandler(async (req: Request, res: Response) => {
+chatRoutes.post('/:chatId/leave', checkChatAccessMiddleware, asyncHandler(async (req: Request, res: Response) => {
   const userId = req.headers['x-user-id'] as string;
   const { chatId } = req.params;
   if (!userId) return res.status(401).json({ success: false, message: 'Chưa đăng nhập!' });
@@ -144,7 +145,7 @@ chatRoutes.post('/:chatId/leave', asyncHandler(async (req: Request, res: Respons
 }));
 
 // PUT /:chatId/members/:memberId/role
-chatRoutes.put('/:chatId/members/:memberId/role', asyncHandler(async (req: Request, res: Response) => {
+chatRoutes.put('/:chatId/members/:memberId/role', checkChatAccessMiddleware, asyncHandler(async (req: Request, res: Response) => {
   const userId = req.headers['x-user-id'] as string;
   const { chatId, memberId } = req.params;
   const { role } = req.body;
@@ -155,7 +156,7 @@ chatRoutes.put('/:chatId/members/:memberId/role', asyncHandler(async (req: Reque
 }));
 
 // PUT /:chatId/pin
-chatRoutes.put('/:chatId/pin', asyncHandler(async (req: Request, res: Response) => {
+chatRoutes.put('/:chatId/pin', checkChatAccessMiddleware, asyncHandler(async (req: Request, res: Response) => {
   const userId = req.headers['x-user-id'] as string;
   const { chatId } = req.params;
   const { pin } = req.body;
@@ -165,7 +166,7 @@ chatRoutes.put('/:chatId/pin', asyncHandler(async (req: Request, res: Response) 
 }));
 
 // PUT /:chatId/notify
-chatRoutes.put('/:chatId/notify', asyncHandler(async (req: Request, res: Response) => {
+chatRoutes.put('/:chatId/notify', checkChatAccessMiddleware, asyncHandler(async (req: Request, res: Response) => {
   const userId = req.headers['x-user-id'] as string;
   const { chatId } = req.params;
   const { notify } = req.body;
@@ -175,7 +176,7 @@ chatRoutes.put('/:chatId/notify', asyncHandler(async (req: Request, res: Respons
 }));
 
 // PUT /:chatId/read
-chatRoutes.put('/:chatId/read', asyncHandler(async (req: Request, res: Response) => {
+chatRoutes.put('/:chatId/read', checkChatAccessMiddleware, asyncHandler(async (req: Request, res: Response) => {
   const userId = req.headers['x-user-id'] as string;
   const { chatId } = req.params;
   if (!userId) return res.status(401).json({ success: false, message: 'Chưa đăng nhập!' });
@@ -184,14 +185,14 @@ chatRoutes.put('/:chatId/read', asyncHandler(async (req: Request, res: Response)
 }));
 
 // GET /:chatId/receipts — Lấy danh sách Read Receipts
-chatRoutes.get('/:chatId/receipts', asyncHandler(async (req: Request, res: Response) => {
+chatRoutes.get('/:chatId/receipts', checkChatAccessMiddleware, asyncHandler(async (req: Request, res: Response) => {
   const { chatId } = req.params;
   const receipts = await chatService.getReadReceipts(chatId as string);
   res.json({ success: true, receipts });
 }));
 
 // DELETE /:chatId
-chatRoutes.delete('/:chatId', asyncHandler(async (req: Request, res: Response) => {
+chatRoutes.delete('/:chatId', checkChatAccessMiddleware, asyncHandler(async (req: Request, res: Response) => {
   const userId = req.headers['x-user-id'] as string;
   const { chatId } = req.params;
   if (!userId) return res.status(401).json({ success: false, message: 'Chưa đăng nhập!' });
@@ -203,7 +204,7 @@ chatRoutes.delete('/:chatId', asyncHandler(async (req: Request, res: Response) =
 import { taskService } from '../services/task.service.js';
 
 // POST /:chatId/tasks — Tạo task mới
-chatRoutes.post('/:chatId/tasks', asyncHandler(async (req: Request, res: Response) => {
+chatRoutes.post('/:chatId/tasks', checkChatAccessMiddleware, asyncHandler(async (req: Request, res: Response) => {
   const userId = req.headers['x-user-id'] as string;
   const { chatId } = req.params;
   const { title, description, deadlineAt, startAt, assigneeIds } = req.body;
@@ -213,7 +214,7 @@ chatRoutes.post('/:chatId/tasks', asyncHandler(async (req: Request, res: Respons
 }));
 
 // GET /:chatId/tasks — Lấy danh sách task trong nhóm
-chatRoutes.get('/:chatId/tasks', asyncHandler(async (req: Request, res: Response) => {
+chatRoutes.get('/:chatId/tasks', checkChatAccessMiddleware, asyncHandler(async (req: Request, res: Response) => {
   const userId = req.headers['x-user-id'] as string;
   const { chatId } = req.params;
   if (!userId) return res.status(401).json({ success: false, message: 'Chưa đăng nhập!' });

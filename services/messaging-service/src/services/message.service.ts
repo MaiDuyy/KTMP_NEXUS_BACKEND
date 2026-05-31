@@ -7,6 +7,7 @@ import { publishEvent, EventSubjects } from '../lib/nats.js';
 import { logger } from '../lib/logger.js';
 import { userorgClient } from '../lib/userorgClient.js';
 import { mentionService } from './mention.service.js';
+import { hasChatAccess } from '../middleware/chatAccess.js';
 
 
 const MESSAGE_TYPES = ['text', 'image', 'video', 'audio', 'file', 'sticker', 'gif', 'location', 'contact', 'system', 'call_started', 'call_participant_joined', 'call_participant_left', 'call_ended', 'call_missed', 'call_declined', 'call_cancelled', 'poll', 'task'];
@@ -391,6 +392,11 @@ export class MessageService {
     const message = await prisma.message.findUnique({ where: { id: messageId } });
     if (!message) throw new Error('Không tìm thấy tin nhắn!');
 
+    const hasAccess = await hasChatAccess(message.chatId, userId);
+    if (!hasAccess) {
+      throw new Error('Bạn không còn là thành viên của nhóm này nên không thể xem nội dung');
+    }
+
     let deletedBy: string[] = [];
     try { deletedBy = message.deletedBy ? JSON.parse(message.deletedBy) : []; } catch { deletedBy = []; }
     if (!deletedBy.includes(userId)) deletedBy.push(userId);
@@ -407,6 +413,11 @@ export class MessageService {
       where: { id: messageId }
     });
     if (!message) throw new Error('Không tìm thấy tin nhắn!');
+
+    const hasAccess = await hasChatAccess(message.chatId, userId);
+    if (!hasAccess) {
+      throw new Error('Bạn không còn là thành viên của nhóm này nên không thể xem nội dung');
+    }
 
     const chat = await prisma.chat.findUnique({
       where: { id: message.chatId },
@@ -457,6 +468,11 @@ export class MessageService {
       where: { id: messageId }
     });
     if (!message) throw new Error('Không tìm thấy tin nhắn!');
+
+    const hasAccess = await hasChatAccess(message.chatId, userId);
+    if (!hasAccess) {
+      throw new Error('Bạn không còn là thành viên của nhóm này nên không thể xem nội dung');
+    }
 
     const chat = await prisma.chat.findUnique({
       where: { id: message.chatId },
@@ -519,6 +535,11 @@ export class MessageService {
       where: { id: messageId }
     });
     if (!message) throw new Error('Không tìm thấy tin nhắn!');
+
+    const hasAccess = await hasChatAccess(message.chatId, userId);
+    if (!hasAccess) {
+      throw new Error('Bạn không còn là thành viên của nhóm này nên không thể xem nội dung');
+    }
 
     const chat = await prisma.chat.findUnique({
       where: { id: message.chatId },
