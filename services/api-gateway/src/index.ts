@@ -17,7 +17,7 @@ import cookieParser from 'cookie-parser';
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-app.set('trust proxy', 1);
+app.set('trust proxy', 2);
 app.use((req, res, next) => {
   (req as any).startTime = Date.now();
   if (process.env.NODE_ENV !== 'production') {
