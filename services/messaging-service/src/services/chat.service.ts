@@ -44,20 +44,88 @@ export class ChatService {
    * Lấy danh sách chat của user
    */
   async getChats(userId: string, type?: 'all' | 'private' | 'group', workspaceId?: string) {
-    const whereCondition: any = {
-      participants: {
-        some: {
-          accountId: userId,
-          hidden: false,
-        },
-      },
-      workspaceId: workspaceId || null, // Phân tách chat theo workspace
-    };
+    let whereCondition: any;
+    
+    let isAdmin = false;
+    try {
+      const { globalRole } = await userorgClient.getUserRolesAndScopes(userId);
+      const isGlobalAdmin = ['SUPER_ADMIN', 'WORKSPACE_MANAGER', 'ADMIN'].includes(globalRole);
+      
+      let isWorkspaceAdmin = false;
+      if (workspaceId) {
+        const workspaceMember = await prisma.workspaceMember.findUnique({
+          where: { workspaceId_userId: { workspaceId, userId } },
+        });
+        isWorkspaceAdmin = workspaceMember ? ['WORKSPACE_OWNER', 'WORKSPACE_ADMIN'].includes(workspaceMember.role) : false;
+      }
+      isAdmin = isGlobalAdmin || isWorkspaceAdmin;
+    } catch (err) {
+      console.error('[ChatService] Failed to check admin role in getChats', err);
+    }
 
-    if (type === 'private') {
-      whereCondition.isGroup = false;
-    } else if (type === 'group') {
-      whereCondition.isGroup = true;
+    if (isAdmin) {
+      whereCondition = {
+        workspaceId: workspaceId || null,
+        OR: [
+          {
+            participants: {
+              some: {
+                accountId: userId,
+                hidden: false,
+              },
+            },
+          },
+          {
+            isGroup: true,
+            joinPolicy: 'PUBLIC',
+          },
+        ],
+      };
+
+      if (type === 'private') {
+        whereCondition.isGroup = false;
+        whereCondition.OR = [
+          {
+            participants: {
+              some: {
+                accountId: userId,
+                hidden: false,
+              },
+            },
+          }
+        ];
+      } else if (type === 'group') {
+        whereCondition.isGroup = true;
+        whereCondition.OR = [
+          {
+            participants: {
+              some: {
+                accountId: userId,
+                hidden: false,
+              },
+            },
+          },
+          {
+            joinPolicy: 'PUBLIC',
+          },
+        ];
+      }
+    } else {
+      whereCondition = {
+        participants: {
+          some: {
+            accountId: userId,
+            hidden: false,
+          },
+        },
+        workspaceId: workspaceId || null, // Phân tách chat theo workspace
+      };
+
+      if (type === 'private') {
+        whereCondition.isGroup = false;
+      } else if (type === 'group') {
+        whereCondition.isGroup = true;
+      }
     }
 
     const chats = await prisma.chat.findMany({

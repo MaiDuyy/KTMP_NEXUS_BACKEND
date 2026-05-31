@@ -686,8 +686,11 @@ export class WorkspaceService {
       throw new Error('Xác nhận tên Workspace không chính xác!');
     }
 
+    const { globalRole } = await userorgClient.getUserRolesAndScopes(userId);
+    const isSystemAdmin = ['SUPER_ADMIN', 'ADMIN'].includes(globalRole);
+
     const member = workspace.members.find(m => m.userId === userId);
-    if (!member || member.role !== 'WORKSPACE_OWNER') {
+    if (!isSystemAdmin && (!member || member.role !== 'WORKSPACE_OWNER')) {
       throw new Error('Chỉ Owner mới có quyền giải tán Workspace!');
     }
 
@@ -1000,13 +1003,40 @@ export class WorkspaceService {
   }
 
   async deleteWorkspace(id: string, userId: string) {
-    // Keep this for legacy or super-admin hard delete
     const workspace = await prisma.workspace.findUnique({ where: { id }, include: { members: true } });
     if (!workspace) throw new Error('Không tìm thấy workspace!');
-    const member = workspace.members.find(m => m.userId === userId);
-    if (!member || member.role !== 'WORKSPACE_OWNER') throw new Error('Chỉ Owner mới có quyền xóa Workspace!');
 
-    await prisma.workspace.delete({ where: { id } });
+    const { globalRole } = await userorgClient.getUserRolesAndScopes(userId);
+    const isSystemAdmin = ['SUPER_ADMIN', 'ADMIN'].includes(globalRole);
+
+    const member = workspace.members.find(m => m.userId === userId);
+    if (!isSystemAdmin && (!member || member.role !== 'WORKSPACE_OWNER')) {
+      throw new Error('Chỉ Owner mới có quyền xóa Workspace!');
+    }
+
+    await prisma.$transaction(async (tx) => {
+      // 1. Delete all chats/messages referencing this workspace
+      const chats = await tx.chat.findMany({ where: { workspaceId: id } });
+      const chatIds = chats.map(c => c.id);
+
+      if (chatIds.length > 0) {
+        await tx.message.deleteMany({ where: { chatId: { in: chatIds } } });
+        await tx.chat.deleteMany({ where: { workspaceId: id } });
+      }
+
+      // 2. Delete channels
+      await tx.channel.deleteMany({ where: { workspaceId: id } });
+
+      // 3. Delete invites
+      await tx.workspaceInvite.deleteMany({ where: { workspaceId: id } });
+
+      // 4. Delete members
+      await tx.workspaceMember.deleteMany({ where: { workspaceId: id } });
+
+      // 5. Delete workspace itself
+      await tx.workspace.delete({ where: { id } });
+    });
+
     await publishEvent(EventSubjects.WORKSPACE_DELETED, { id, deletedBy: userId });
     logger.info({ workspaceId: id }, 'Workspace hard deleted');
     return { success: true, deleted: true };

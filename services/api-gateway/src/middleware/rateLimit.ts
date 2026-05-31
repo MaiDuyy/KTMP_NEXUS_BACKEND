@@ -15,12 +15,24 @@ declare module 'express' {
 }
 
 /**
+ * Trích xuất địa chỉ IP thực tế của client từ chuỗi proxy X-Forwarded-For
+ */
+const getClientIp = (req: any): string => {
+  const xForwardedFor = req.headers['x-forwarded-for'];
+  if (xForwardedFor) {
+    const ip = typeof xForwardedFor === 'string' ? xForwardedFor.split(',')[0] : xForwardedFor[0];
+    if (ip) return ip.trim();
+  }
+  return req.ip || req.socket?.remoteAddress || 'unknown';
+};
+
+/**
  * Cấu hình giới hạn request mặc định (Default rate limiter)
  * Quy định: 1000 requests mỗi 15 phút cho một địa chỉ IP
  */
 export const rateLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000,
-  max: 1000,
+  windowMs: parseInt(process.env.RATE_LIMIT_WINDOW_MS || '900000', 10),
+  max: parseInt(process.env.RATE_LIMIT_MAX || '1000', 10),
   standardHeaders: true,
   legacyHeaders: false,
   message: {
@@ -37,9 +49,7 @@ export const rateLimiter = rateLimit({
     
     return false;
   },
-  keyGenerator: (req) => {
-    return req.ip || req.headers['x-forwarded-for'] as string || 'unknown';
-  },
+  keyGenerator: getClientIp,
   handler: (req, res) => {
     logger.warn({ ip: req.ip, path: req.path }, 'Rate limit exceeded');
     const resetTime = (req as any).rateLimit?.resetTime;
@@ -57,8 +67,8 @@ export const rateLimiter = rateLimit({
  * Quy định: Chỉ được gọi 5 requests mỗi 15 phút
  */
 export const strictRateLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15p
-  max: 5,
+  windowMs: parseInt(process.env.STRICT_RATE_LIMIT_WINDOW_MS || '900000', 10),
+  max: parseInt(process.env.STRICT_RATE_LIMIT_MAX || '15', 10),
   standardHeaders: true,
   legacyHeaders: false,
   message: {
@@ -74,9 +84,7 @@ export const strictRateLimiter = rateLimit({
     
     return false;
   },
-  keyGenerator: (req) => {
-    return req.ip || req.headers['x-forwarded-for'] as string || 'unknown';
-  },
+  keyGenerator: getClientIp,
 });
 
 /**
@@ -94,9 +102,7 @@ export const demoRateLimiter = rateLimit({
     code: 'DEMO_RATE_LIMITED',
     hint: 'Wait 1 minute or use a different IP',
   },
-  keyGenerator: (req) => {
-    return req.ip || 'unknown';
-  },
+  keyGenerator: getClientIp,
 });
 /**
  * Hàm khởi tạo Rate Limiter kết nối với Redis (Dùng cho Production)
@@ -121,6 +127,7 @@ export function createRedisRateLimiter(windowMs: number, max: number) {
         error: 'Too many requests',
         code: 'RATE_LIMITED',
       },
+      keyGenerator: getClientIp,
     });
   } catch (error) {
     logger.warn('Redis not available, using memory store for rate limiting');
@@ -129,6 +136,7 @@ export function createRedisRateLimiter(windowMs: number, max: number) {
       max,
       standardHeaders: true,
       legacyHeaders: false,
+      keyGenerator: getClientIp,
     });
   }
 }

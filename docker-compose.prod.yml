@@ -86,6 +86,10 @@ services:
       - MESSAGING_GRPC_PORT=${MESSAGING_GRPC_PORT}
       - AI_SERVICE_URL=http://ai-service:8080
       - SPRING_AI_URL=http://ai-knowledge:8080
+      - RATE_LIMIT_WINDOW_MS=${RATE_LIMIT_WINDOW_MS:-900000}
+      - RATE_LIMIT_MAX=${RATE_LIMIT_MAX:-1000}
+      - STRICT_RATE_LIMIT_WINDOW_MS=${STRICT_RATE_LIMIT_WINDOW_MS:-900000}
+      - STRICT_RATE_LIMIT_MAX=${STRICT_RATE_LIMIT_MAX:-15}
     depends_on:
       redis:
         condition: service_healthy
