@@ -101,6 +101,8 @@ const ROLE_PERMISSIONS: Record<string, string[]> = {
 };
 
 async function main() {
+  console.log('🌱 Skipping clearing database for safe/idempotent seed...');
+  /*
   console.log('🧹 Clearing existing data from databases...');
   
   // Clear RBAC Database
@@ -121,6 +123,7 @@ async function main() {
 
   // Clear Auth Database
   await prismaAuth.account.deleteMany({}).catch(() => {});
+  */
 
   console.log('🌱 Seeding RBAC database...');
 
@@ -331,13 +334,13 @@ async function main() {
   await prismaRbac.department.upsert({
     where: { id: DEPT_ID },
     update: {
-      name: 'Phòng Công nghệ',
+      name: 'IT',
       description: 'Nghiên cứu và phát triển phần mềm',
       managerId: 'admin-0000-0000-0000-000000000000'
     },
     create: {
       id: DEPT_ID,
-      name: 'Phòng Công nghệ',
+      name: 'IT',
       description: 'Nghiên cứu và phát triển phần mềm',
       managerId: 'admin-0000-0000-0000-000000000000'
     }
