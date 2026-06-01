@@ -526,8 +526,8 @@ router.post('/workspaces/invites/join', (req, res) => forwardRequest(req, res, S
 router.post('/workspaces/invites/reject', (req, res) => forwardRequest(req, res, SERVICES.IDENTITY, '/invitations/reject-body'));
 
 // Explicit Workspace Lifecycle Routes (Go to IDENTITY)
-router.post('/workspaces/:id/dissolve', roleMiddleware('SUPER_ADMIN', 'ADMIN'), (req, res) => forwardRequest(req, res, SERVICES.IDENTITY, `/workspaces/${req.params.id}/dissolve`));
-router.post('/workspaces/:id/restore', roleMiddleware('SUPER_ADMIN', 'ADMIN'), (req, res) => forwardRequest(req, res, SERVICES.IDENTITY, `/workspaces/${req.params.id}/restore`));
+router.post('/workspaces/:id/dissolve', roleMiddleware('SUPER_ADMIN', 'ADMIN', 'WORKSPACE_MANAGER', 'EMPLOYEE'), (req, res) => forwardRequest(req, res, SERVICES.IDENTITY, `/workspaces/${req.params.id}/dissolve`));
+router.post('/workspaces/:id/restore', roleMiddleware('SUPER_ADMIN', 'ADMIN', 'WORKSPACE_MANAGER', 'EMPLOYEE'), (req, res) => forwardRequest(req, res, SERVICES.IDENTITY, `/workspaces/${req.params.id}/restore`));
 router.post('/workspaces/:id/leave', (req, res) => forwardRequest(req, res, SERVICES.IDENTITY, `/workspaces/${req.params.id}/leave`));
 
 router.all(/^\/workspaces/, (req, res) => {

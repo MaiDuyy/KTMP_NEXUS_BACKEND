@@ -35,8 +35,12 @@ workspaceRoutes.get('/', asyncHandler(async (req: Request, res: Response) => {
 
 workspaceRoutes.get('/dissolved', asyncHandler(async (req: Request, res: Response) => {
   const userId = req.headers['x-user-id'] as string;
+  const { page, limit } = req.query;
   if (!userId) return res.status(401).json({ success: false, message: 'Chưa đăng nhập!' });
-  const workspaces = await workspaceService.getDissolvedWorkspaces(userId);
+  const workspaces = await workspaceService.getDissolvedWorkspaces(userId, {
+    page: page ? parseInt(page as string) : undefined,
+    limit: limit ? parseInt(limit as string) : undefined,
+  });
   res.json({ success: true, workspaces });
 }));
 
