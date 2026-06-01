@@ -1440,11 +1440,32 @@ export class WorkspaceService {
   }
 
   async checkMembership(workspaceId: string, userId: string) {
-    return prisma.workspaceMember.findUnique({
+    const member = await prisma.workspaceMember.findUnique({
       where: {
         workspaceId_userId: { workspaceId, userId },
       },
     });
+
+    if (member) return member;
+
+    // Check if system admin dynamically to bypass membership requirement
+    try {
+      const { globalRole } = await userorgClient.getUserRolesAndScopes(userId);
+      if (['SUPER_ADMIN', 'ADMIN'].includes(globalRole)) {
+        return {
+          id: `virtual_${userId}`,
+          workspaceId,
+          userId,
+          role: 'OWNER',
+          joinedAt: new Date(),
+          leftAt: null,
+        } as any;
+      }
+    } catch (err) {
+      logger.error({ err, userId }, 'Failed to check system admin role in checkMembership');
+    }
+
+    return null;
   }
 
   async dissolveGroups(workspaceId: string) {

@@ -1081,8 +1081,16 @@ export class UserService {
       }
     });
 
+    const rolesList = userRoles.map(ur => ur.role.name);
+    let globalRole = user?.role || 'EMPLOYEE';
+    if (rolesList.includes('SUPER_ADMIN')) {
+      globalRole = 'SUPER_ADMIN';
+    } else if (rolesList.includes('ADMIN')) {
+      globalRole = 'ADMIN';
+    }
+
     return {
-      globalRole: user?.role || 'EMPLOYEE',
+      globalRole,
       assignedWorkspaceIds,
       assignedDepartmentIds
     };
