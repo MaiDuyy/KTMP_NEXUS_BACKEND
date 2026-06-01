@@ -23,7 +23,14 @@ interface TokenPayload {
 }
 
 const generateToken = (userId: string, name: string, role: AccountRole, orgId?: string, rbacRoles?: string[], roleLevel?: number): string => {
-  const payload: TokenPayload = { sub: userId, name, role, orgId };
+  let finalRole = role;
+  if (rbacRoles?.includes('SUPER_ADMIN')) {
+    finalRole = 'SUPER_ADMIN';
+  } else if (rbacRoles?.includes('ADMIN')) {
+    finalRole = 'ADMIN';
+  }
+
+  const payload: TokenPayload = { sub: userId, name, role: finalRole, orgId };
   if (rbacRoles?.length) {
     payload.roles = rbacRoles;
     payload.roleLevel = roleLevel;
@@ -50,8 +57,24 @@ const generateRefreshToken = async (
   const jti = uuidv4();
   const fId = familyId || uuidv4();
 
+  let finalRole = role;
+  try {
+    const userRoles = await rbacPrisma.userRole.findMany({
+      where: { userId },
+      include: { role: true },
+    });
+    const rolesList = userRoles.map(ur => ur.role.name);
+    if (rolesList.includes('SUPER_ADMIN')) {
+      finalRole = 'SUPER_ADMIN';
+    } else if (rolesList.includes('ADMIN')) {
+      finalRole = 'ADMIN';
+    }
+  } catch (error) {
+    logger.warn({ error, userId }, 'Failed to check RBAC roles for refresh token generation');
+  }
+
   const token = jwt.sign(
-    { sub: userId, role, jti, fid: fId } as RefreshTokenClaims,
+    { sub: userId, role: finalRole, jti, fid: fId } as RefreshTokenClaims,
     authConfig.refreshSecret as string,
     { expiresIn: authConfig.refreshTokenExpiry as SignOptions["expiresIn"] }
   );
