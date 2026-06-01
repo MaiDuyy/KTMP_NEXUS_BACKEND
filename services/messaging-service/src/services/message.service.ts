@@ -62,7 +62,7 @@ export class MessageService {
       take,
     });
 
-    const hydratedMessages = await this.populateSenderInfo(messages);
+    const hydratedMessages = await this.populateSenderInfo(messages, chatId);
 
     const formattedMessages = hydratedMessages.map((msg) => ({
       id: msg.id,
@@ -304,16 +304,94 @@ export class MessageService {
       logger.error({ err }, 'Failed to fetch user profiles for new message');
     }
 
+    // Determine roles for sender and replyTo.sender
+    let senderRole = 'EMPLOYEE';
+    let replySenderRole = 'EMPLOYEE';
+
+    if (senderProfile?.role === 'SUPER_ADMIN') {
+      senderRole = 'SUPER_ADMIN';
+    } else if (senderProfile?.role === 'ADMIN') {
+      senderRole = 'SYSTEM_ADMIN';
+    } else if (senderProfile?.role === 'WORKSPACE_MANAGER') {
+      senderRole = 'WORKSPACE_MANAGER';
+    }
+
+    if (replySenderProfile?.role === 'SUPER_ADMIN') {
+      replySenderRole = 'SUPER_ADMIN';
+    } else if (replySenderProfile?.role === 'ADMIN') {
+      replySenderRole = 'SYSTEM_ADMIN';
+    } else if (replySenderProfile?.role === 'WORKSPACE_MANAGER') {
+      replySenderRole = 'WORKSPACE_MANAGER';
+    }
+
+    if (workspaceId) {
+      try {
+        const workspace = await prisma.workspace.findUnique({
+          where: { id: workspaceId },
+          select: { departmentId: true }
+        });
+        const departmentId = workspace?.departmentId || null;
+
+        // 1. Resolve sender role
+        if (senderRole === 'EMPLOYEE') {
+          const wMember = await prisma.workspaceMember.findUnique({
+            where: { workspaceId_userId: { workspaceId, userId: senderId } },
+            select: { role: true, leftAt: true }
+          });
+          if (wMember && wMember.leftAt === null && ['WORKSPACE_ADMIN', 'WORKSPACE_OWNER'].includes(wMember.role)) {
+            senderRole = 'WORKSPACE_ADMIN';
+          } else if (wMember && wMember.leftAt === null && departmentId) {
+            const deptHeads = await prisma.$queryRaw<any[]>`
+              SELECT "role" 
+              FROM rbac.department_member 
+              WHERE "departmentId" = ${departmentId} 
+                AND "userId" = ${senderId}
+                AND "role" IN ('HEAD', 'MANAGER')
+            `;
+            if (Array.isArray(deptHeads) && deptHeads.length > 0) {
+              senderRole = 'DEPARTMENT_HEAD';
+            }
+          }
+        }
+
+        // 2. Resolve reply sender role if applicable
+        if (message.replyTo?.senderId && replySenderRole === 'EMPLOYEE') {
+          const rMember = await prisma.workspaceMember.findUnique({
+            where: { workspaceId_userId: { workspaceId, userId: message.replyTo.senderId } },
+            select: { role: true, leftAt: true }
+          });
+          if (rMember && rMember.leftAt === null && ['WORKSPACE_ADMIN', 'WORKSPACE_OWNER'].includes(rMember.role)) {
+            replySenderRole = 'WORKSPACE_ADMIN';
+          } else if (rMember && rMember.leftAt === null && departmentId) {
+            const rDeptHeads = await prisma.$queryRaw<any[]>`
+              SELECT "role" 
+              FROM rbac.department_member 
+              WHERE "departmentId" = ${departmentId} 
+                AND "userId" = ${message.replyTo.senderId}
+                AND "role" IN ('HEAD', 'MANAGER')
+            `;
+            if (Array.isArray(rDeptHeads) && rDeptHeads.length > 0) {
+              replySenderRole = 'DEPARTMENT_HEAD';
+            }
+          }
+        }
+      } catch (e) {
+        logger.warn({ e, workspaceId }, 'Failed to resolve roles for sendMessage');
+      }
+    }
+
     const senderPayload = senderProfile ? {
       id: senderProfile.id,
       name: senderProfile.name,
       avatar: senderProfile.avatar,
+      role: senderRole,
     } : undefined;
 
     const replySenderPayload = replySenderProfile ? {
       id: replySenderProfile.id,
       name: replySenderProfile.name,
       avatar: replySenderProfile.avatar,
+      role: replySenderRole,
     } : undefined;
 
     const replyToPayload = message.replyTo ? {
@@ -731,10 +809,53 @@ export class MessageService {
       logger.error({ err }, 'Failed to fetch user profiles for forwarded message');
     }
 
+    // Determine sender role for forwarded message
+    let senderRole = 'EMPLOYEE';
+    if (senderProfile?.role === 'SUPER_ADMIN') {
+      senderRole = 'SUPER_ADMIN';
+    } else if (senderProfile?.role === 'ADMIN') {
+      senderRole = 'SYSTEM_ADMIN';
+    } else if (senderProfile?.role === 'WORKSPACE_MANAGER') {
+      senderRole = 'WORKSPACE_MANAGER';
+    }
+
+    const workspaceId = targetChatMetadata.workspaceId;
+    if (workspaceId && senderRole === 'EMPLOYEE') {
+      try {
+        const workspace = await prisma.workspace.findUnique({
+          where: { id: workspaceId },
+          select: { departmentId: true }
+        });
+        const departmentId = workspace?.departmentId || null;
+
+        const wMember = await prisma.workspaceMember.findUnique({
+          where: { workspaceId_userId: { workspaceId, userId: senderId } },
+          select: { role: true, leftAt: true }
+        });
+        if (wMember && wMember.leftAt === null && ['WORKSPACE_ADMIN', 'WORKSPACE_OWNER'].includes(wMember.role)) {
+          senderRole = 'WORKSPACE_ADMIN';
+        } else if (wMember && wMember.leftAt === null && departmentId) {
+          const deptHeads = await prisma.$queryRaw<any[]>`
+            SELECT "role" 
+            FROM rbac.department_member 
+            WHERE "departmentId" = ${departmentId} 
+              AND "userId" = ${senderId}
+              AND "role" IN ('HEAD', 'MANAGER')
+          `;
+          if (Array.isArray(deptHeads) && deptHeads.length > 0) {
+            senderRole = 'DEPARTMENT_HEAD';
+          }
+        }
+      } catch (e) {
+        logger.warn({ e, workspaceId }, 'Failed to resolve sender role for forwardMessage');
+      }
+    }
+
     const senderPayload = senderProfile ? {
       id: senderProfile.id,
       name: senderProfile.name,
       avatar: senderProfile.avatar,
+      role: senderRole,
     } : undefined;
 
     // Filter participantIds of target chat for real-time notification
@@ -802,7 +923,7 @@ export class MessageService {
       where: whereCondition,
       orderBy: { time: 'desc' },
     });
-    return this.populateSenderInfo(messages);
+    return this.populateSenderInfo(messages, chatId);
   }
 
   async searchMessages(chatId: string, query: string, userId: string) {
@@ -830,7 +951,7 @@ export class MessageService {
       orderBy: { time: 'desc' },
       take: 50,
     });
-    return this.populateSenderInfo(messages);
+    return this.populateSenderInfo(messages, chatId);
   }
 
   async getMediaMessages(chatId: string, type: string | undefined, userId: string) {
@@ -861,7 +982,7 @@ export class MessageService {
       orderBy: { time: 'desc' },
       take: 100,
     });
-    return this.populateSenderInfo(messages);
+    return this.populateSenderInfo(messages, chatId);
   }
 
   private groupReactions(reactions: any[]) {
@@ -882,7 +1003,7 @@ export class MessageService {
     }, []);
   }
 
-  private async populateSenderInfo(messages: any[]) {
+  private async populateSenderInfo(messages: any[], chatId?: string) {
     if (!messages || messages.length === 0) return messages;
     
     // Gom tất cả ID người gửi duy nhất (của tin nhắn chính và replyTo)
@@ -896,19 +1017,119 @@ export class MessageService {
     // Sử dụng userorgClient (đã tích hợp Redis Cache & Batching)
     const accountMap = await userorgClient.getUsers(uniqueAccountIds);
 
+    // Xác định Workspace ID và Department ID của Chat
+    let workspaceId: string | null = null;
+    let departmentId: string | null = null;
+
+    if (chatId) {
+      try {
+        const chat = await prisma.chat.findUnique({
+          where: { id: chatId },
+          select: {
+            workspaceId: true,
+            workspace: {
+              select: {
+                departmentId: true
+              }
+            }
+          }
+        });
+        workspaceId = chat?.workspaceId || null;
+        departmentId = chat?.workspace?.departmentId || null;
+      } catch (e) {
+        logger.warn({ e, chatId }, 'Failed to fetch chat workspace and department info in populateSenderInfo');
+      }
+    }
+
+    // 1. Fetch Workspace Members
+    const adminUserIds = new Set<string>();
+    if (workspaceId && uniqueAccountIds.length > 0) {
+      try {
+        const admins = await prisma.workspaceMember.findMany({
+          where: {
+            workspaceId,
+            userId: { in: uniqueAccountIds },
+            role: { in: ['WORKSPACE_ADMIN', 'WORKSPACE_OWNER'] },
+            leftAt: null
+          },
+          select: { userId: true }
+        });
+        admins.forEach(a => adminUserIds.add(a.userId));
+      } catch (e) {
+        logger.warn({ e, workspaceId }, 'Failed to fetch workspace admins for sender role population');
+      }
+    }
+
+    // 2. Fetch Department Head/Manager Members using raw query on rbac.department_member
+    const deptHeadUserIds = new Set<string>();
+    if (departmentId && uniqueAccountIds.length > 0) {
+      try {
+        const deptHeads = await prisma.$queryRaw<any[]>`
+          SELECT "userId" 
+          FROM rbac.department_member 
+          WHERE "departmentId" = ${departmentId} 
+            AND "userId" = ANY(${uniqueAccountIds})
+            AND "role" IN ('HEAD', 'MANAGER')
+        `;
+        if (Array.isArray(deptHeads)) {
+          deptHeads.forEach(d => deptHeadUserIds.add(d.userId));
+        }
+      } catch (e) {
+        logger.warn({ e, departmentId }, 'Failed to query department managers for sender role population');
+      }
+    }
+
     return messages.map((msg) => {
       const senderAcc = accountMap.get(msg.senderId);
+      
+      let senderRole = 'EMPLOYEE';
+      if (senderAcc?.role === 'SUPER_ADMIN') {
+        senderRole = 'SUPER_ADMIN';
+      } else if (senderAcc?.role === 'ADMIN') {
+        senderRole = 'SYSTEM_ADMIN';
+      } else if (senderAcc?.role === 'WORKSPACE_MANAGER') {
+        senderRole = 'WORKSPACE_MANAGER';
+      } else if (adminUserIds.has(msg.senderId)) {
+        senderRole = 'WORKSPACE_ADMIN';
+      } else if (deptHeadUserIds.has(msg.senderId)) {
+        senderRole = 'DEPARTMENT_HEAD';
+      }
+
       let replyTo = null;
       if (msg.replyTo) {
         const replySenderAcc = accountMap.get(msg.replyTo.senderId);
+        
+        let replyRole = 'EMPLOYEE';
+        if (replySenderAcc?.role === 'SUPER_ADMIN') {
+          replyRole = 'SUPER_ADMIN';
+        } else if (replySenderAcc?.role === 'ADMIN') {
+          replyRole = 'SYSTEM_ADMIN';
+        } else if (replySenderAcc?.role === 'WORKSPACE_MANAGER') {
+          replyRole = 'WORKSPACE_MANAGER';
+        } else if (adminUserIds.has(msg.replyTo.senderId)) {
+          replyRole = 'WORKSPACE_ADMIN';
+        } else if (deptHeadUserIds.has(msg.replyTo.senderId)) {
+          replyRole = 'DEPARTMENT_HEAD';
+        }
+
         replyTo = {
           ...msg.replyTo,
-          sender: replySenderAcc ? { id: replySenderAcc.id, name: replySenderAcc.name, avatar: replySenderAcc.avatar } : undefined,
+          sender: replySenderAcc ? { 
+            id: replySenderAcc.id, 
+            name: replySenderAcc.name, 
+            avatar: replySenderAcc.avatar,
+            role: replyRole
+          } : undefined,
         };
       }
       return {
         ...msg,
-        sender: senderAcc ? { id: senderAcc.id, name: senderAcc.name, avatar: senderAcc.avatar } : undefined,
+        sender: senderAcc ? { 
+          id: senderAcc.id, 
+          name: senderAcc.name, 
+          avatar: senderAcc.avatar,
+          role: senderRole
+        } : undefined,
         replyTo,
       };
     });

@@ -34,7 +34,8 @@ export function errorHandler(
   }
 
   if (err.message.includes('không có quyền') || err.message.includes('chỉ') ||
-      err.message.includes('bị đình chỉ')) {
+      err.message.includes('bị đình chỉ') || err.message.includes('giới hạn') ||
+      err.message.includes('đã đạt')) {
     res.status(403).json({ success: false, message: err.message });
     return;
   }
