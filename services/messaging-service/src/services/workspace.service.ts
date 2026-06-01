@@ -284,16 +284,37 @@ export class WorkspaceService {
     }));
   }
 
-  async getDissolvedWorkspaces(userId: string) {
+  async getDissolvedWorkspaces(userId: string, options: PaginationOptions = {}) {
+    const { page, limit } = options;
+
+    const { globalRole } = await userorgClient.getUserRolesAndScopes(userId);
+    const isSystemAdminOrManager = ['SUPER_ADMIN', 'ADMIN', 'WORKSPACE_MANAGER'].includes(globalRole);
+
+    let whereClause: any = { status: 'DISSOLVED' };
+    if (!isSystemAdminOrManager) {
+      whereClause.ownerId = userId;
+    }
+
+    let skip: number | undefined;
+    let take: number | undefined;
+
+    if (page && limit) {
+      skip = (page - 1) * limit;
+      take = limit;
+    } else if (limit) {
+      take = limit;
+    } else {
+      take = 100; // Safeguard against returning massive datasets
+    }
+
     const workspaces = await prisma.workspace.findMany({
-      where: { 
-        ownerId: userId,
-        status: 'DISSOLVED'
-      },
+      where: whereClause,
       include: {
         _count: { select: { members: true, channels: true } }
       },
       orderBy: { dissolvedAt: 'desc' },
+      skip,
+      take,
     });
 
     return workspaces.map(ws => ({
