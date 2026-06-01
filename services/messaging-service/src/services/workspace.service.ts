@@ -792,8 +792,11 @@ export class WorkspaceService {
     });
     if (!workspace) throw new Error('Không tìm thấy workspace!');
 
+    const { globalRole } = await userorgClient.getUserRolesAndScopes(userId);
+    const isSystemAdmin = ['SUPER_ADMIN', 'ADMIN'].includes(globalRole);
+
     const isMember = workspace.members.some(m => m.userId === userId && m.leftAt === null);
-    if (!isMember) throw new Error('Bạn không có quyền truy cập workspace này!');
+    if (!isMember && !isSystemAdmin) throw new Error('Bạn không có quyền truy cập workspace này!');
 
     // Count active members
     const memberCount = workspace.members.filter(m => m.leftAt === null).length;

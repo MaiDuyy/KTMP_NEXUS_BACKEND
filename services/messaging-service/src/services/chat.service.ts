@@ -47,8 +47,10 @@ export class ChatService {
     let whereCondition: any;
     
     let isAdmin = false;
+    let isSystemAdmin = false;
     try {
       const { globalRole } = await userorgClient.getUserRolesAndScopes(userId);
+      isSystemAdmin = ['SUPER_ADMIN', 'ADMIN'].includes(globalRole);
       const isGlobalAdmin = ['SUPER_ADMIN', 'WORKSPACE_MANAGER', 'ADMIN'].includes(globalRole);
       
       let isWorkspaceAdmin = false;
@@ -241,8 +243,12 @@ export class ChatService {
     // Check user is participant
     const isParticipant = chat.participants.some((p) => p.accountId === userId);
     if (!isParticipant) {
-      // Fail-safe for public workspace channels: allow ACTIVE workspace members to view
-      if (chat.workspaceId && chat.joinPolicy === 'PUBLIC') {
+      const { globalRole } = await userorgClient.getUserRolesAndScopes(userId);
+      const isSystemAdmin = ['SUPER_ADMIN', 'ADMIN'].includes(globalRole);
+
+      if (isSystemAdmin && chat.isGroup && chat.workspaceId && chat.joinPolicy === 'PUBLIC') {
+        // Allow system admin to view all public workspace channels and groups (kênh/nhóm)
+      } else if (chat.workspaceId && chat.joinPolicy === 'PUBLIC') {
         const workspaceMember = await prisma.workspaceMember.findUnique({
           where: { workspaceId_userId: { workspaceId: chat.workspaceId, userId } }
         });
@@ -257,22 +263,27 @@ export class ChatService {
 
     // For workspace-scoped private DMs, verify both participants are still active workspace members
     if (!chat.isGroup && chat.workspaceId) {
-      const partner = chat.participants.find(p => p.accountId !== userId);
-      if (partner) {
-        const activeMembers = await prisma.workspaceMember.findMany({
-          where: {
-            workspaceId: chat.workspaceId,
-            userId: { in: [userId, partner.accountId] },
-            leftAt: null,
-          },
-          select: { userId: true },
-        });
-        const activeMemberIds = activeMembers.map(m => m.userId);
-        if (!activeMemberIds.includes(userId)) {
-          throw new Error('Bạn không còn là thành viên của không gian làm việc này!');
-        }
-        if (!activeMemberIds.includes(partner.accountId)) {
-          throw new Error('Thành viên này đã rời khỏi không gian làm việc!');
+      const { globalRole } = await userorgClient.getUserRolesAndScopes(userId);
+      const isSystemAdmin = ['SUPER_ADMIN', 'ADMIN'].includes(globalRole);
+
+      if (!isSystemAdmin) {
+        const partner = chat.participants.find(p => p.accountId !== userId);
+        if (partner) {
+          const activeMembers = await prisma.workspaceMember.findMany({
+            where: {
+              workspaceId: chat.workspaceId,
+              userId: { in: [userId, partner.accountId] },
+              leftAt: null,
+            },
+            select: { userId: true },
+          });
+          const activeMemberIds = activeMembers.map(m => m.userId);
+          if (!activeMemberIds.includes(userId)) {
+            throw new Error('Bạn không còn là thành viên của không gian làm việc này!');
+          }
+          if (!activeMemberIds.includes(partner.accountId)) {
+            throw new Error('Thành viên này đã rời khỏi không gian làm việc!');
+          }
         }
       }
     }
@@ -319,6 +330,13 @@ export class ChatService {
       }
     }
 
+    const { globalRole } = await userorgClient.getUserRolesAndScopes(userId);
+    const isSystemAdmin = ['SUPER_ADMIN', 'ADMIN'].includes(globalRole);
+    let myRole = myParticipant?.role;
+    if (!myRole && isSystemAdmin && chat.isGroup && chat.workspaceId && chat.joinPolicy === 'PUBLIC') {
+      myRole = 'CHANNEL_OWNER';
+    }
+
     return {
       id: chat.id,
       name: chat.name,
@@ -332,7 +350,7 @@ export class ChatService {
       isFriend,
       pin: myParticipant?.pin || false,
       notify: myParticipant?.notify ?? true,
-      myRole: myParticipant?.role,
+      myRole,
       participants: chat.participants.map((p) => {
         const acc = accountMap.get(p.accountId);
         return {
