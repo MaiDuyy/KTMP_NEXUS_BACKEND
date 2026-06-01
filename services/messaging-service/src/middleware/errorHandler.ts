@@ -46,6 +46,27 @@ export function errorHandler(
     return;
   }
 
+  if (
+    err.message.includes('đã đạt') ||
+    err.message.includes('giới hạn') ||
+    err.message.includes('tồn tại') ||
+    err.message.includes('bắt buộc') ||
+    err.message.includes('ký tự') ||
+    err.message.includes('chưa đăng nhập') ||
+    err.message.includes('Chưa đăng nhập')
+  ) {
+    let statusCode = 400;
+    if (err.message.includes('đã đạt') || err.message.includes('giới hạn')) {
+      statusCode = 403;
+    } else if (err.message.includes('tồn tại')) {
+      statusCode = 409;
+    } else if (err.message.includes('chưa đăng nhập') || err.message.includes('Chưa đăng nhập')) {
+      statusCode = 401;
+    }
+    res.status(statusCode).json({ success: false, message: err.message });
+    return;
+  }
+
   res.status(500).json({
     success: false,
     message: process.env.NODE_ENV === 'development' ? err.message : 'Lỗi server!',

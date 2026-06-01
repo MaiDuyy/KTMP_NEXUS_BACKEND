@@ -37,7 +37,7 @@ export class UserService {
             isVerified: authUser.isVerified,
             createdAt: authUser.createdAt,
             updatedAt: authUser.updatedAt,
-            maxWorkspaces: getQuotaByRole(authUser.role || 'EMPLOYEE'),
+            maxWorkspaces: null,
           }
         });
         user = await userorgPrisma.account.findUnique({
@@ -577,6 +577,7 @@ export class UserService {
           isOnline: true,
           createdAt: true,
           lastSeen: true,
+          maxWorkspaces: true,
         }
       }),
       userorgPrisma.account.count({ where })
@@ -629,7 +630,7 @@ export class UserService {
       where: { id: userId },
       data: { 
         role: role as any,
-        maxWorkspaces: newQuota // Automatically set quota for the new role
+        maxWorkspaces: null // Automatically set to null to inherit org quota
       }
     });
 
@@ -638,7 +639,7 @@ export class UserService {
       where: { id: userId },
       data: { 
         role: role as any,
-        maxWorkspaces: newQuota
+        maxWorkspaces: null
       }
     }).catch(() => {});
 
@@ -788,7 +789,12 @@ export class UserService {
       return { allowed: false, used: 0, limit: 0, orgId: '' };
     }
 
-    const used = await messagingGrpc.getWorkspaceCount(userId);
+    let used = 0;
+    try {
+      used = await messagingGrpc.getWorkspaceCount(userId);
+    } catch (err: any) {
+      logger.error({ err, userId }, 'Failed to fetch workspace count from messaging-service via gRPC inside validateWorkspaceQuota. Falling back to used = 0');
+    }
     
     // Quota priority:
     // 1. User-level override (maxWorkspaces)
@@ -893,9 +899,7 @@ export class UserService {
         number: `PROV_${userId.slice(0, 8)}`,
         password: hashedPassword,
         gender: gender || 'other',
-        role: role || 'EMPLOYEE',
-        isVerified: true,
-        maxWorkspaces: getQuotaByRole(role || 'EMPLOYEE'),
+        maxWorkspaces: null,
       },
     });
 
@@ -913,9 +917,7 @@ export class UserService {
         password: hashedPassword,
         gender: authAccount.gender,
         role: (role || 'EMPLOYEE') as any,
-        orgId,
-        isVerified: true,
-        maxWorkspaces: getQuotaByRole(role || 'EMPLOYEE'),
+        maxWorkspaces: null,
       }
     });
 

@@ -192,7 +192,7 @@ export class AuthService {
         role: role || 'EMPLOYEE',
         isVerified: false,
         isOnline: false,
-        maxWorkspaces: getQuotaByRole(role || 'EMPLOYEE'),
+        maxWorkspaces: null,
       },
     });
 
@@ -210,7 +210,7 @@ export class AuthService {
         location: newAccount.location,
         role: newAccount.role as any,
         isVerified: false,
-        maxWorkspaces: getQuotaByRole(newAccount.role || 'EMPLOYEE'),
+        maxWorkspaces: null,
       }
     }).catch(err => {
       logger.error({ err, userId: newAccount.id }, 'Failed to sync user to userorg schema');
@@ -394,7 +394,7 @@ export class AuthService {
         gender: gender || 'other',
         role: accountRole,
         isVerified: true,
-        maxWorkspaces: getQuotaByRole(accountRole),
+        maxWorkspaces: null,
       },
     });
 
@@ -410,7 +410,7 @@ export class AuthService {
         role: accountRole as any,
         orgId: orgId || null,
         isVerified: true,
-        maxWorkspaces: getQuotaByRole(accountRole),
+        maxWorkspaces: null,
       }
     });
 
@@ -540,7 +540,7 @@ export class AuthService {
         gender,
         role: 'WORKSPACE_MANAGER',
         isVerified: true, // Auto-verify for organization creator? Or send OTP?
-        maxWorkspaces: getQuotaByRole('WORKSPACE_MANAGER'),
+        maxWorkspaces: null,
       },
     });
 
@@ -555,7 +555,7 @@ export class AuthService {
         role: 'WORKSPACE_MANAGER',
         orgId: organization.id,
         isVerified: true,
-        maxWorkspaces: getQuotaByRole('WORKSPACE_MANAGER'),
+        maxWorkspaces: null,
       },
     });
 
@@ -629,7 +629,7 @@ export class AuthService {
       where: { id: userId },
       data: { 
         role: 'WORKSPACE_MANAGER',
-        maxWorkspaces: getQuotaByRole('WORKSPACE_MANAGER')
+        maxWorkspaces: null
       },
     });
 
@@ -638,7 +638,7 @@ export class AuthService {
       data: { 
         role: 'WORKSPACE_MANAGER', 
         orgId: organization.id,
-        maxWorkspaces: getQuotaByRole('WORKSPACE_MANAGER')
+        maxWorkspaces: null
       },
     });
 
