@@ -896,10 +896,31 @@ function subscribeToNatsEvents() {
   const workspaceCreatedSub = addSub(natsConnection.subscribe(EventSubjects.WORKSPACE_CREATED));
   (async () => {
     for await (const msg of workspaceCreatedSub) {
-      const event = jsonCodec.decode(msg.data) as any;
-      const { userId, workspace } = event.payload;
-      console.log(`[WS] Workspace ${workspace?.id} created by user ${userId}`);
-      io.to(`user:${userId}`).emit('workspace:created', { workspace });
+      try {
+        const event = jsonCodec.decode(msg.data) as any;
+        const { id, name, slug, createdBy, createdAt, departmentId } = event.payload;
+        console.log(`[WS] Workspace ${id} created by user ${createdBy}`);
+        
+        const workspaceData = {
+          id,
+          name,
+          slug,
+          createdBy,
+          createdAt,
+          departmentId,
+          myRole: 'OWNER',
+          memberCount: 1,
+          channelCount: 1,
+        };
+
+        // Notify the creator
+        io.to(`user:${createdBy}`).emit('workspace:created', { workspace: workspaceData });
+        
+        // Also notify all SUPER_ADMIN users
+        io.to('role:SUPER_ADMIN').emit('workspace:created', { workspace: workspaceData });
+      } catch (err) {
+        console.error('[WS] Error processing WORKSPACE_CREATED:', err);
+      }
     }
   })();
 
@@ -2171,7 +2192,7 @@ io.on('connection', async (socket: AuthenticatedSocket) => {
     });
 
     // Confirm to caller that the call is ringing
-    socket.emit('call:ringing', { roomName, chatId });
+    socket.emit('call:ringing', { roomName, chatId, callerId: userId, callerName: userName, callType });
 
     // Auto-cancel if no answer after 30s
     const ringingTimeout = setTimeout(async () => {
