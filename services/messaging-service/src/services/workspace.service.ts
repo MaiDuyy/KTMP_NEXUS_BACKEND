@@ -288,10 +288,10 @@ export class WorkspaceService {
     const { page, limit } = options;
 
     const { globalRole } = await userorgClient.getUserRolesAndScopes(userId);
-    const isSystemAdminOrManager = ['SUPER_ADMIN', 'ADMIN', 'WORKSPACE_MANAGER'].includes(globalRole);
+    const isSystemAdmin = ['SUPER_ADMIN', 'ADMIN'].includes(globalRole);
 
     let whereClause: any = { status: 'DISSOLVED' };
-    if (!isSystemAdminOrManager) {
+    if (!isSystemAdmin) {
       whereClause.ownerId = userId;
     }
 
@@ -760,9 +760,20 @@ export class WorkspaceService {
   }
 
   async restoreWorkspace(id: string, userId: string) {
-    const workspace = await prisma.workspace.findUnique({ where: { id } });
+    const workspace = await prisma.workspace.findUnique({ 
+      where: { id },
+      include: { members: true }
+    });
     if (!workspace) throw new Error('Không tìm thấy workspace!');
-    if (workspace.ownerId !== userId) throw new Error('Chỉ Owner mới có quyền khôi phục Workspace!');
+
+    const { globalRole } = await userorgClient.getUserRolesAndScopes(userId);
+    const isSystemAdmin = ['SUPER_ADMIN', 'ADMIN'].includes(globalRole);
+
+    const isCreator = workspace.ownerId === userId;
+
+    if (!isSystemAdmin && !isCreator) {
+      throw new Error('Chỉ Owner mới có quyền khôi phục Workspace!');
+    }
     if (workspace.status !== 'DISSOLVED') throw new Error('Workspace không ở trạng thái bị giải tán!');
 
     return await prisma.$transaction(async (tx) => {

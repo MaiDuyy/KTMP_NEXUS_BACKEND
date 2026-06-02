@@ -191,6 +191,7 @@ export class ChatService {
         notify: myParticipant?.notify ?? true,
         readed: myParticipant?.readed ?? false,
         isReadOnly: chat.isReadOnly,
+        workspaceId: chat.workspaceId,
         lastMessage: summary?.lastMessage || null,
         unreadCount: summary?.unreadCount || 0,
         participantIds: otherParticipants.map((p) => p.accountId),
