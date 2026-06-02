@@ -38,9 +38,10 @@ export function startInvitationSubscriber() {
               await workspaceService.addMember(workspaceId, userId, targetRole, invitedBy);
               logger.info({ userId, workspaceId, role: targetRole }, '[InvitationSubscriber] Added user to workspace');
             } catch (err: any) {
-              // If already a member, ignore
-              if (err.message?.includes('already a member')) {
-                logger.warn({ userId, workspaceId }, '[InvitationSubscriber] User already a member of workspace');
+              // Gracefully skip if user is already an active member
+              // (can happen when identity-service already called addMember via gRPC before this NATS event)
+              if (err.message?.includes('đã là thành viên') || err.message?.includes('already a member')) {
+                logger.warn({ userId, workspaceId }, '[InvitationSubscriber] User already an active member of workspace, skipping');
               } else {
                 throw err;
               }

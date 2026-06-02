@@ -2,7 +2,7 @@
 // Migrated from userorg-service — prisma → userorgPrisma
 
 import crypto from 'crypto';
-import { userorgPrisma } from '../lib/prisma.js';
+import { userorgPrisma, rbacPrisma } from '../lib/prisma.js';
 import { publishEvent, EventSubjects } from '../lib/nats.js';
 import { logger } from '../lib/logger.js';
 import { messagingGrpc } from '../lib/messagingClient.js';
@@ -41,8 +41,9 @@ export class InvitationService {
   async createInvitation(data: {
     email: string; type: InvitationType; invitedBy: string; inviterName: string;
     role?: string; channelIds?: string[]; workspaceId?: string; expiryDays?: number;
+    departmentId?: string; departmentRole?: string;
   }): Promise<InvitationWithStatus> {
-    const { email, type, invitedBy, inviterName, role, channelIds = [], workspaceId, expiryDays = this.defaultExpiryDays } = data;
+    const { email, type, invitedBy, inviterName, role, channelIds = [], workspaceId, expiryDays = this.defaultExpiryDays, departmentId, departmentRole } = data;
 
     const existingInvitation = await userorgPrisma.invitation.findFirst({
       where: { email: email.toLowerCase(), acceptedAt: null, revokedAt: null, expiresAt: { gt: new Date() } },
@@ -64,7 +65,7 @@ export class InvitationService {
     expiresAt.setDate(expiresAt.getDate() + expiryDays);
 
     const invitation = await userorgPrisma.invitation.create({
-      data: { email: email.toLowerCase(), token, type, role: role || 'EMPLOYEE', channelIds, workspaceId, orgId, invitedBy, inviterName, expiresAt },
+      data: { email: email.toLowerCase(), token, type, role: role || 'EMPLOYEE', channelIds, workspaceId, orgId, invitedBy, inviterName, expiresAt, departmentId, departmentRole: departmentRole || 'MEMBER' },
     });
 
     logger.info({ email, type, invitedBy }, 'Invitation created');
@@ -138,10 +139,45 @@ export class InvitationService {
       }
     }
 
+    let department = null;
+    try {
+      let deptId = invitation.departmentId;
+      if (!deptId) {
+        const account = await userorgPrisma.account.findFirst({
+          where: { email: invitation.email.toLowerCase().trim() },
+          select: { id: true }
+        });
+        if (account) {
+          const deptMember = await rbacPrisma.departmentMember.findFirst({
+            where: { userId: account.id },
+            select: { departmentId: true }
+          });
+          if (deptMember) {
+            deptId = deptMember.departmentId;
+          }
+        }
+      }
+      if (deptId) {
+        const dept = await rbacPrisma.department.findUnique({
+          where: { id: deptId }
+        });
+        if (dept) {
+          department = {
+            id: dept.id,
+            name: dept.name,
+            description: dept.description,
+          };
+        }
+      }
+    } catch (error: any) {
+      logger.warn({ error: error.message, email: invitation.email }, 'Failed to fetch department info in validation');
+    }
+
     return { 
       ...invitation, 
       status: this.getInvitationStatus(invitation),
-      workspace
+      workspace,
+      department
     };
   }
 
@@ -170,6 +206,8 @@ export class InvitationService {
       channelIds: invitation.channelIds,
       type: invitation.type,
       invitedBy: invitation.invitedBy,
+      departmentId: invitation.departmentId || undefined,
+      departmentRole: (invitation as any).departmentRole || 'MEMBER',
     });
 
     return result;
@@ -263,6 +301,27 @@ export class InvitationService {
     if (status !== 'PENDING') throw new Error(`Không thể gửi lại lời mời với trạng thái: ${status}`);
     await this.sendInvitationEmail(invitation, invitation.inviterName || 'Admin');
     logger.info({ invitationId }, 'Invitation resent');
+  }
+
+  async rejectInvitation(token: string): Promise<void> {
+    const invitation = await userorgPrisma.invitation.findUnique({ where: { token } });
+    if (!invitation) throw new Error('Không tìm thấy lời mời!');
+    const status = this.getInvitationStatus(invitation);
+    if (status !== 'PENDING') throw new Error('Lời mời này không còn ở trạng thái chờ!');
+
+    await userorgPrisma.invitation.update({
+      where: { id: invitation.id },
+      data: { revokedAt: new Date() }
+    });
+
+    logger.info({ invitationId: invitation.id }, 'Invitation rejected');
+
+    await publishEvent(EventSubjects.WORKSPACE_INVITE_REJECTED, {
+      workspaceId: invitation.workspaceId,
+      email: invitation.email,
+      inviteId: invitation.id,
+      inviterId: invitation.invitedBy
+    });
   }
 }
 

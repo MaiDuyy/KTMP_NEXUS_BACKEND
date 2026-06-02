@@ -2,6 +2,7 @@
 
 import type { Request, Response, NextFunction } from 'express';
 import { logger } from '../lib/logger.js';
+import { ZodError } from 'zod';
 
 export function errorHandler(
   err: Error,
@@ -10,6 +11,25 @@ export function errorHandler(
   _next: NextFunction
 ): void {
   logger.error({ error: err.message, stack: err.stack }, 'Error occurred');
+
+  if ((err as any).statusCode) {
+    res.status((err as any).statusCode).json({
+      success: false,
+      errorCode: (err as any).errorCode,
+      message: err.message,
+      field: (err as any).field
+    });
+    return;
+  }
+
+  if (err instanceof ZodError) {
+    res.status(400).json({
+      success: false,
+      message: 'Dữ liệu yêu cầu không hợp lệ',
+      errors: err.errors
+    });
+    return;
+  }
 
   if (err.message.includes('không tìm thấy') || err.message.includes('Không tìm thấy')) {
     res.status(404).json({ success: false, message: err.message });
@@ -23,6 +43,27 @@ export function errorHandler(
 
   if (err.message.includes('không có quyền') || err.message.includes('chỉ')) {
     res.status(403).json({ success: false, message: err.message });
+    return;
+  }
+
+  if (
+    err.message.includes('đã đạt') ||
+    err.message.includes('giới hạn') ||
+    err.message.includes('tồn tại') ||
+    err.message.includes('bắt buộc') ||
+    err.message.includes('ký tự') ||
+    err.message.includes('chưa đăng nhập') ||
+    err.message.includes('Chưa đăng nhập')
+  ) {
+    let statusCode = 400;
+    if (err.message.includes('đã đạt') || err.message.includes('giới hạn')) {
+      statusCode = 403;
+    } else if (err.message.includes('tồn tại')) {
+      statusCode = 409;
+    } else if (err.message.includes('chưa đăng nhập') || err.message.includes('Chưa đăng nhập')) {
+      statusCode = 401;
+    }
+    res.status(statusCode).json({ success: false, message: err.message });
     return;
   }
 

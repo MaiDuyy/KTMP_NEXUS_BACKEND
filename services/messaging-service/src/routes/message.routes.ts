@@ -6,6 +6,7 @@ import type { Request, Response } from 'express';
 import { messageService } from '../services/message.service.js';
 import { readReceiptService } from '../services/readreceipt.service.js';
 import { asyncHandler } from '../middleware/errorHandler.js';
+import { checkChatAccessMiddleware } from '../middleware/chatAccess.js';
 
 export const messageRoutes = Router();
 
@@ -21,7 +22,7 @@ messageRoutes.get('/summary', asyncHandler(async (req: Request, res: Response) =
 }));
 
 // POST /chats/:chatId/read — mark as read (internal endpoint from old chat-service)
-messageRoutes.post('/chats/:chatId/read', asyncHandler(async (req: Request, res: Response) => {
+messageRoutes.post('/chats/:chatId/read', checkChatAccessMiddleware, asyncHandler(async (req: Request, res: Response) => {
   const userId = req.headers['x-user-id'] as string;
   const { chatId } = req.params;
   if (!userId) return res.status(401).json({ success: false, message: 'Chưa đăng nhập!' });
@@ -30,8 +31,36 @@ messageRoutes.post('/chats/:chatId/read', asyncHandler(async (req: Request, res:
   res.json({ success: true, message: 'Marked as read' });
 }));
 
+// POST /forward — forward a message to a target chat room (placed before parameterized routes)
+messageRoutes.post('/forward', asyncHandler(async (req: Request, res: Response) => {
+  const userId = req.headers['x-user-id'] as string;
+  const { originalMessageId, targetChatId } = req.body;
+  if (!userId) return res.status(401).json({ success: false, message: 'Chưa đăng nhập!' });
+  if (!originalMessageId || !targetChatId) {
+    return res.status(400).json({ success: false, message: 'Thiếu thông tin originalMessageId hoặc targetChatId!' });
+  }
+  const message = await messageService.forwardMessage(originalMessageId, targetChatId, userId);
+  res.status(201).json({
+    success: true,
+    message: {
+      id: message.id,
+      content: message.content,
+      type: message.type,
+      time: message.time,
+      senderId: message.senderId,
+      sender: (message as any).sender,
+      replyTo: null,
+      file: message.fileName ? { name: message.fileName, size: message.fileSize, type: message.fileType } : null,
+      reactions: [],
+      isMe: true,
+      isForwarded: message.isForwarded,
+      forwardFromId: message.forwardFromId,
+    },
+  });
+}));
+
 // GET /:chatId
-messageRoutes.get('/:chatId', asyncHandler(async (req: Request, res: Response) => {
+messageRoutes.get('/:chatId', checkChatAccessMiddleware, asyncHandler(async (req: Request, res: Response) => {
   const userId = req.headers['x-user-id'] as string;
   const { chatId } = req.params;
   const { cursor, limit } = req.query;
@@ -43,7 +72,7 @@ messageRoutes.get('/:chatId', asyncHandler(async (req: Request, res: Response) =
 }));
 
 // POST /:chatId
-messageRoutes.post('/:chatId', asyncHandler(async (req: Request, res: Response) => {
+messageRoutes.post('/:chatId', checkChatAccessMiddleware, asyncHandler(async (req: Request, res: Response) => {
   const userId = req.headers['x-user-id'] as string;
   const { chatId } = req.params;
   const { content, type, replyToId, fileName, fileSize, fileType } = req.body;
@@ -99,27 +128,29 @@ messageRoutes.put('/:messageId/pin', asyncHandler(async (req: Request, res: Resp
 }));
 
 // GET /:chatId/pinned
-messageRoutes.get('/:chatId/pinned', asyncHandler(async (req: Request, res: Response) => {
+messageRoutes.get('/:chatId/pinned', checkChatAccessMiddleware, asyncHandler(async (req: Request, res: Response) => {
   const userId = req.headers['x-user-id'] as string;
   const { chatId } = req.params;
   if (!userId) return res.status(401).json({ success: false, message: 'Chưa đăng nhập!' });
-  const pinnedMessages = await messageService.getPinnedMessages(chatId as string);
+  const pinnedMessages = await messageService.getPinnedMessages(chatId as string, userId);
   res.json({
     success: true,
     pinnedMessages: pinnedMessages.map((msg) => ({
       id: msg.id, content: msg.content, type: msg.type, time: msg.time,
       senderId: msg.senderId, sender: (msg as any).sender,
+      file: (msg as any).file || null,
+      destroy: msg.destroy || false,
     })),
   });
 }));
 
 // GET /:chatId/search
-messageRoutes.get('/:chatId/search', asyncHandler(async (req: Request, res: Response) => {
+messageRoutes.get('/:chatId/search', checkChatAccessMiddleware, asyncHandler(async (req: Request, res: Response) => {
   const userId = req.headers['x-user-id'] as string;
   const { chatId } = req.params;
   const { q } = req.query;
   if (!userId) return res.status(401).json({ success: false, message: 'Chưa đăng nhập!' });
-  const messages = await messageService.searchMessages(chatId as string, q as string);
+  const messages = await messageService.searchMessages(chatId as string, q as string, userId);
   res.json({
     success: true,
     messages: messages.map((msg) => ({ id: msg.id, content: msg.content, time: msg.time, senderId: msg.senderId, sender: (msg as any).sender })),
@@ -127,12 +158,12 @@ messageRoutes.get('/:chatId/search', asyncHandler(async (req: Request, res: Resp
 }));
 
 // GET /:chatId/media
-messageRoutes.get('/:chatId/media', asyncHandler(async (req: Request, res: Response) => {
+messageRoutes.get('/:chatId/media', checkChatAccessMiddleware, asyncHandler(async (req: Request, res: Response) => {
   const userId = req.headers['x-user-id'] as string;
   const { chatId } = req.params;
   const { type } = req.query;
   if (!userId) return res.status(401).json({ success: false, message: 'Chưa đăng nhập!' });
-  const messages = await messageService.getMediaMessages(chatId as string, type as string);
+  const messages = await messageService.getMediaMessages(chatId as string, type as string, userId);
   res.json({
     success: true,
     media: messages.map((msg) => ({

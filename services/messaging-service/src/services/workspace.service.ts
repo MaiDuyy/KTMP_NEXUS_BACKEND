@@ -14,6 +14,7 @@ interface CreateWorkspaceInput {
   slug?: string;
   isPublic?: boolean;
   allowGuestAccess?: boolean;
+  departmentId?: string;
 }
 
 interface UpdateWorkspaceInput {
@@ -22,6 +23,7 @@ interface UpdateWorkspaceInput {
   icon?: string;
   isPublic?: boolean;
   allowGuestAccess?: boolean;
+  departmentId?: string;
 }
 
 interface PaginationOptions {
@@ -48,6 +50,7 @@ export class WorkspaceService {
       data: {
         name: name.trim(), description: description?.trim(), icon, slug: workspaceSlug,
         ownerId: userId, isPublic: isPublic ?? false, allowGuestAccess: allowGuestAccess ?? false,
+        departmentId: data.departmentId || null,
         members: { create: { userId, role: 'WORKSPACE_OWNER' } },
       },
       include: { members: true },
@@ -92,6 +95,7 @@ export class WorkspaceService {
     await publishEvent(EventSubjects.WORKSPACE_CREATED, {
       id: workspace.id, name: workspace.name, slug: workspace.slug,
       createdBy: userId, createdAt: workspace.createdAt.toISOString(),
+      departmentId: workspace.departmentId || undefined,
     });
     logger.info({ workspaceId: workspace.id }, 'Workspace created with #general channel');
     return workspace;
@@ -101,8 +105,29 @@ export class WorkspaceService {
     const workspace = await prisma.workspace.findUnique({ where: { id }, include: { members: true } });
     if (!workspace) throw new Error('Không tìm thấy workspace!');
 
-    const member = workspace.members.find(m => m.userId === userId);
-    if (!member || !['WORKSPACE_OWNER', 'WORKSPACE_ADMIN'].includes(member.role)) throw new Error('Bạn không có quyền chỉnh sửa workspace này!');
+    const { globalRole, assignedWorkspaceIds, assignedDepartmentIds } = await userorgClient.getUserRolesAndScopes(userId);
+    const isSystemAdmin = ['SUPER_ADMIN', 'ADMIN'].includes(globalRole);
+    const isSystemWorkspaceManager = globalRole === 'WORKSPACE_MANAGER';
+    
+    const member = workspace.members.find(m => m.userId === userId && m.leftAt === null);
+    
+    const isAssigned = assignedWorkspaceIds.includes(workspace.id) || 
+                       (workspace.departmentId && assignedDepartmentIds.includes(workspace.departmentId));
+
+    const hasAdminAccess = (member && ['WORKSPACE_OWNER', 'WORKSPACE_ADMIN'].includes(member.role)) || 
+                           isSystemAdmin || 
+                           (isSystemWorkspaceManager && (member !== undefined || isAssigned)) ||
+                           isAssigned ||
+                           await userorgClient.checkWorkspaceAccess(userId, workspace.id, workspace.departmentId, workspace.createdAt.toISOString());
+    if (!hasAdminAccess) throw new Error('Bạn không có quyền chỉnh sửa workspace này!');
+
+    // Enforce CHANGE_DEPT_ASSIGNMENT restriction: only System Admins or Workspace Owners can change department assignment
+    if (data.departmentId !== undefined && data.departmentId !== workspace.departmentId) {
+      const isOwner = member && member.role === 'WORKSPACE_OWNER';
+      if (!isSystemAdmin && !isOwner) {
+        throw new Error('Chỉ Trưởng hệ thống hoặc Chủ sở hữu Workspace mới có quyền thay đổi phòng ban liên kết!');
+      }
+    }
 
     const updateData: any = {};
     if (data.name !== undefined) updateData.name = data.name.trim();
@@ -110,6 +135,9 @@ export class WorkspaceService {
     if (data.icon !== undefined) updateData.icon = data.icon;
     if (data.isPublic !== undefined) updateData.isPublic = data.isPublic;
     if (data.allowGuestAccess !== undefined) updateData.allowGuestAccess = data.allowGuestAccess;
+    if (data.departmentId !== undefined) updateData.departmentId = data.departmentId || null;
+
+    const oldDepartmentId = workspace.departmentId;
 
     const updated = await prisma.workspace.update({ where: { id }, data: updateData });
 
@@ -123,6 +151,8 @@ export class WorkspaceService {
         description: updated.description,
         icon: updated.icon,
         isPublic: updated.isPublic,
+        departmentId: updated.departmentId,
+        oldDepartmentId: oldDepartmentId,
       },
       updatedBy: userId,
     }).catch(err => logger.warn({ err: err.message }, 'NATS publish workspace.updated failed (non-fatal)'));
@@ -135,49 +165,156 @@ export class WorkspaceService {
     const workspace = await prisma.workspace.findFirst({
       where: { OR: [{ id: idOrSlug }, { slug: idOrSlug }] },
       include: {
-        members: { select: { id: true, userId: true, role: true, joinedAt: true } },
+        members: { 
+          where: { leftAt: null },
+          select: { id: true, userId: true, role: true, joinedAt: true } 
+        },
         channels: { where: { isArchived: false }, select: { id: true, name: true, type: true, isDefault: true } },
         categories: { orderBy: { position: 'asc' } },
-        _count: { select: { members: true, channels: true } },
+        _count: { 
+          select: { 
+            members: { where: { leftAt: null } }, 
+            channels: true 
+          } 
+        },
       },
     });
     if (!workspace) throw new Error('Không tìm thấy workspace!');
 
     const isMember = workspace.members.some(m => m.userId === userId);
-    if (!isMember && !workspace.isPublic) throw new Error('Bạn không có quyền xem workspace này!');
+    if (!isMember && !workspace.isPublic) {
+      const hasRbacAccess = await userorgClient.checkWorkspaceAccess(
+        userId,
+        workspace.id,
+        workspace.departmentId,
+        workspace.createdAt.toISOString()
+      );
+      if (!hasRbacAccess) {
+        throw new Error('Bạn không có quyền xem workspace này!');
+      }
+    }
     return workspace;
   }
 
   async getUserWorkspaces(userId: string) {
+    const { globalRole, assignedWorkspaceIds, assignedDepartmentIds } = await userorgClient.getUserRolesAndScopes(userId);
+
+    const isSystemAdmin = ['SUPER_ADMIN', 'ADMIN'].includes(globalRole);
+
+    let whereClause: any = { status: 'ACTIVE' };
+
+    if (!isSystemAdmin) {
+      whereClause.OR = [
+        { members: { some: { userId, leftAt: null } } },
+        { id: { in: assignedWorkspaceIds } }
+      ];
+      
+      if (assignedDepartmentIds.length > 0) {
+        whereClause.OR.push({ departmentId: { in: assignedDepartmentIds } });
+      }
+    }
+
     const workspaces = await prisma.workspace.findMany({
-      where: { 
-        members: { some: { userId } },
-        status: 'ACTIVE'
+      where: whereClause,
+      include: {
+        _count: { 
+          select: { 
+            members: { where: { leftAt: null } }, 
+            channels: true 
+          } 
+        },
+        members: { where: { userId, leftAt: null }, select: { role: true } },
+      },
+      orderBy: { updatedAt: 'desc' },
+    });
+
+    return workspaces.map(ws => {
+      let myRole = ws.members[0]?.role || null;
+      
+      const isAssigned = assignedWorkspaceIds.includes(ws.id) || 
+                         (ws.departmentId && assignedDepartmentIds.includes(ws.departmentId));
+      
+      const isSystemWorkspaceManager = globalRole === 'WORKSPACE_MANAGER';
+      
+      const shouldHaveAdmin = isSystemAdmin || 
+                              (isSystemWorkspaceManager && (ws.members.length > 0 || isAssigned)) ||
+                              isAssigned;
+
+      if (shouldHaveAdmin && myRole !== 'WORKSPACE_OWNER') {
+        myRole = 'WORKSPACE_ADMIN';
+      }
+
+      return {
+        id: ws.id, name: ws.name, description: ws.description, icon: ws.icon, slug: ws.slug,
+        isPublic: ws.isPublic, myRole,
+        memberCount: ws._count.members, channelCount: ws._count.channels, updatedAt: ws.updatedAt,
+        departmentId: ws.departmentId,
+      };
+    });
+  }
+
+  async getWorkspacesByDepartment(departmentId: string, userId: string) {
+    // Return all ACTIVE workspaces in this department where the user is a member (or workspace is public)
+    const workspaces = await prisma.workspace.findMany({
+      where: {
+        departmentId,
+        status: 'ACTIVE',
+        OR: [
+          { members: { some: { userId, leftAt: null } } },
+          { isPublic: true },
+        ],
       },
       include: {
-        _count: { select: { members: true, channels: true } },
-        members: { where: { userId }, select: { role: true } },
+        _count: {
+          select: {
+            members: { where: { leftAt: null } },
+            channels: true,
+          },
+        },
+        members: { where: { userId, leftAt: null }, select: { role: true } },
       },
       orderBy: { updatedAt: 'desc' },
     });
 
     return workspaces.map(ws => ({
       id: ws.id, name: ws.name, description: ws.description, icon: ws.icon, slug: ws.slug,
-      isPublic: ws.isPublic, myRole: ws.members[0]?.role,
+      isPublic: ws.isPublic, myRole: ws.members[0]?.role ?? null,
       memberCount: ws._count.members, channelCount: ws._count.channels, updatedAt: ws.updatedAt,
+      departmentId: ws.departmentId,
     }));
   }
 
-  async getDissolvedWorkspaces(userId: string) {
+  async getDissolvedWorkspaces(userId: string, options: PaginationOptions = {}) {
+    const { page, limit } = options;
+
+    const { globalRole } = await userorgClient.getUserRolesAndScopes(userId);
+    const isSystemAdmin = ['SUPER_ADMIN', 'ADMIN'].includes(globalRole);
+
+    let whereClause: any = { status: 'DISSOLVED' };
+    if (!isSystemAdmin) {
+      whereClause.ownerId = userId;
+    }
+
+    let skip: number | undefined;
+    let take: number | undefined;
+
+    if (page && limit) {
+      skip = (page - 1) * limit;
+      take = limit;
+    } else if (limit) {
+      take = limit;
+    } else {
+      take = 100; // Safeguard against returning massive datasets
+    }
+
     const workspaces = await prisma.workspace.findMany({
-      where: { 
-        ownerId: userId,
-        status: 'DISSOLVED'
-      },
+      where: whereClause,
       include: {
         _count: { select: { members: true, channels: true } }
       },
       orderBy: { dissolvedAt: 'desc' },
+      skip,
+      take,
     });
 
     return workspaces.map(ws => ({
@@ -203,36 +340,78 @@ export class WorkspaceService {
     else if (upperRole.includes('GUEST')) role = 'WORKSPACE_GUEST';
     else role = 'WORKSPACE_MEMBER';
 
-    const workspace = await prisma.workspace.findUnique({ where: { id: workspaceId }, include: { members: true } });
+    const workspace = await prisma.workspace.findUnique({
+      where: { id: workspaceId },
+      include: { members: true },  // load all (including soft-deleted) for full context
+    });
     if (!workspace) throw new Error('Không tìm thấy workspace!');
 
-    if (inviterId) {
-      const inviter = workspace.members.find(m => m.userId === inviterId);
-      if (!inviter || !['WORKSPACE_OWNER', 'WORKSPACE_ADMIN'].includes(inviter.role)) throw new Error('Bạn không có quyền thêm thành viên!');
-
-      const roleHierarchy = ['WORKSPACE_GUEST', 'WORKSPACE_MEMBER', 'WORKSPACE_ADMIN', 'WORKSPACE_OWNER'];
-      if (roleHierarchy.indexOf(role) > roleHierarchy.indexOf(inviter.role)) throw new Error('Không thể gán role cao hơn quyền của bạn!');
+    if (workspace.departmentId) {
+      const belongs = await userorgClient.checkUserDepartment(targetUserId, workspace.departmentId);
+      if (!belongs) {
+        throw new Error('Người dùng không thuộc phòng ban liên kết với Workspace này!');
+      }
     }
 
-    const existing = workspace.members.find(m => m.userId === targetUserId);
-    if (existing) throw new Error('Người dùng đã là thành viên!');
+    // Only active members (leftAt: null) can be inviters
+    const activeMembers = workspace.members.filter(m => m.leftAt === null);
 
-    const member = await prisma.workspaceMember.create({
-      data: { workspaceId, userId: targetUserId, role, invitedBy: inviterId },
-    });
+    if (inviterId) {
+      const inviter = activeMembers.find(m => m.userId === inviterId);
+      
+      const { globalRole, assignedWorkspaceIds, assignedDepartmentIds } = await userorgClient.getUserRolesAndScopes(inviterId);
+      const isSystemAdmin = ['SUPER_ADMIN', 'ADMIN'].includes(globalRole);
+      const isSystemWorkspaceManager = globalRole === 'WORKSPACE_MANAGER';
+      const isAssigned = assignedWorkspaceIds.includes(workspace.id) || 
+                         (workspace.departmentId && assignedDepartmentIds.includes(workspace.departmentId));
+
+      const hasManagerAccess = (inviter && ['WORKSPACE_OWNER', 'WORKSPACE_ADMIN'].includes(inviter.role)) ||
+                               isSystemAdmin ||
+                               (isSystemWorkspaceManager && (inviter !== undefined || isAssigned)) ||
+                               isAssigned ||
+                               await userorgClient.checkWorkspaceAccess(inviterId, workspace.id, workspace.departmentId, workspace.createdAt.toISOString());
+      if (!hasManagerAccess) throw new Error('Bạn không có quyền thêm thành viên!');
+
+      const roleHierarchy = ['WORKSPACE_GUEST', 'WORKSPACE_MEMBER', 'WORKSPACE_ADMIN', 'WORKSPACE_OWNER'];
+      const inviterMaxRole = (inviter && ['WORKSPACE_OWNER', 'WORKSPACE_ADMIN'].includes(inviter.role)) || hasManagerAccess
+        ? 'WORKSPACE_ADMIN'
+        : 'WORKSPACE_MEMBER';
+      if (roleHierarchy.indexOf(role) > roleHierarchy.indexOf(inviterMaxRole)) throw new Error('Không thể gán role cao hơn quyền của bạn!');
+    }
+
+    // Check if user is currently an active member
+    const existingActive = activeMembers.find(m => m.userId === targetUserId);
+    if (existingActive) throw new Error('Người dùng đã là thành viên!');
+
+    // Check if user previously left (soft-delete record exists)
+    const previousRecord = workspace.members.find(m => m.userId === targetUserId && m.leftAt !== null);
+
+    let member;
+    if (previousRecord) {
+      // Re-join: restore the record by clearing leftAt and updating role
+      member = await prisma.workspaceMember.update({
+        where: { id: previousRecord.id },
+        data: { role, leftAt: null, invitedBy: inviterId ?? previousRecord.invitedBy },
+      });
+      logger.info({ workspaceId, userId: targetUserId }, 'Member re-joined workspace (leftAt cleared)');
+    } else {
+      member = await prisma.workspaceMember.create({
+        data: { workspaceId, userId: targetUserId, role, invitedBy: inviterId },
+      });
+    }
 
     await this.autoJoinDefaultChannels(workspaceId, targetUserId);
-    
-    // Get all member IDs to notify via WS Gateway
-    const allMemberIds = workspace.members.map(m => m.userId);
+
+    // Only notify active members + the new member
+    const allMemberIds = activeMembers.map(m => m.userId);
     if (!allMemberIds.includes(targetUserId)) allMemberIds.push(targetUserId);
 
-    await publishEvent(EventSubjects.WORKSPACE_MEMBER_ADDED, { 
-      workspaceId, 
-      userId: targetUserId, 
-      role, 
+    await publishEvent(EventSubjects.WORKSPACE_MEMBER_ADDED, {
+      workspaceId,
+      userId: targetUserId,
+      role,
       invitedBy: inviterId,
-      memberIds: allMemberIds
+      memberIds: allMemberIds,
     });
     logger.info({ workspaceId, userId: targetUserId }, 'Member added to workspace');
     return member;
@@ -242,26 +421,97 @@ export class WorkspaceService {
     const workspace = await prisma.workspace.findUnique({ where: { id: workspaceId }, include: { members: true } });
     if (!workspace) throw new Error('Không tìm thấy workspace!');
 
-    const remover = workspace.members.find(m => m.userId === removerId);
-    const target = workspace.members.find(m => m.userId === targetUserId);
+    // Only consider ACTIVE members for permission checks
+    const activeMembers = workspace.members.filter(m => m.leftAt === null);
+    const remover = activeMembers.find(m => m.userId === removerId);
+    const target = activeMembers.find(m => m.userId === targetUserId);
     if (!target) throw new Error('Người dùng không phải thành viên!');
 
     if (targetUserId === removerId) {
       if (target.role === 'WORKSPACE_OWNER') throw new Error('Owner không thể rời workspace! Vui lòng chuyển quyền trước.');
     } else {
-      if (!remover || !['WORKSPACE_OWNER', 'WORKSPACE_ADMIN'].includes(remover.role)) throw new Error('Bạn không có quyền xóa thành viên!');
+      const { globalRole, assignedWorkspaceIds, assignedDepartmentIds } = await userorgClient.getUserRolesAndScopes(removerId);
+      const isSystemAdmin = ['SUPER_ADMIN', 'ADMIN'].includes(globalRole);
+      const isSystemWorkspaceManager = globalRole === 'WORKSPACE_MANAGER';
+      const isAssigned = assignedWorkspaceIds.includes(workspace.id) || 
+                         (workspace.departmentId && assignedDepartmentIds.includes(workspace.departmentId));
+
+      const hasManagerAccess = (remover && ['WORKSPACE_OWNER', 'WORKSPACE_ADMIN'].includes(remover.role)) ||
+                               isSystemAdmin ||
+                               (isSystemWorkspaceManager && (remover !== undefined || isAssigned)) ||
+                               isAssigned ||
+                               await userorgClient.checkWorkspaceAccess(removerId, workspace.id, workspace.departmentId, workspace.createdAt.toISOString());
+      if (!hasManagerAccess) throw new Error('Bạn không có quyền xóa thành viên!');
+
       const roleHierarchy = ['WORKSPACE_GUEST', 'WORKSPACE_MEMBER', 'WORKSPACE_ADMIN', 'WORKSPACE_OWNER'];
-      if (roleHierarchy.indexOf(target.role) >= roleHierarchy.indexOf(remover.role))
+      const removerMaxRole = (remover && ['WORKSPACE_OWNER', 'WORKSPACE_ADMIN'].includes(remover.role)) || hasManagerAccess
+        ? 'WORKSPACE_ADMIN'
+        : 'WORKSPACE_MEMBER';
+      if (roleHierarchy.indexOf(target.role) >= roleHierarchy.indexOf(removerMaxRole))
         throw new Error('Không thể xóa thành viên có quyền cao hơn hoặc bằng!');
     }
 
-    await prisma.workspaceMember.delete({ where: { id: target.id } });
-    await prisma.channelMember.deleteMany({ where: { userId: targetUserId, channel: { workspaceId } } });
+    // Notify remaining active members (excluding the leaving user)
+    const allMemberIds = activeMembers
+      .filter(m => m.userId !== targetUserId)
+      .map(m => m.userId);
+
+    // Soft-delete (consistent with leaveWorkspace/kickMember) + remove channel memberships
+    await Promise.all([
+      prisma.workspaceMember.update({
+        where: { id: target.id },
+        data: { leftAt: new Date(), leftReason: targetUserId === removerId ? 'SELF_LEFT' : 'KICKED' },
+      }),
+      prisma.channelMember.deleteMany({ where: { userId: targetUserId, channel: { workspaceId } } }),
+      this.cleanupWorkspaceChatsForUser(workspaceId, targetUserId),
+    ]);
 
     await publishEvent(EventSubjects.WORKSPACE_MEMBER_REMOVED, {
-      workspaceId, userId: targetUserId, removedBy: removerId, isSelfLeave: targetUserId === removerId,
+      workspaceId,
+      userId: targetUserId,
+      removedBy: removerId,
+      isSelfLeave: targetUserId === removerId,
+      memberIds: allMemberIds,
     });
-    logger.info({ workspaceId, userId: targetUserId }, 'Member removed from workspace');
+    logger.info({ workspaceId, userId: targetUserId }, 'Member removed from workspace (soft-deleted)');
+    return { success: true, removed: true };
+  }
+
+  async removeMemberSystem(workspaceId: string, targetUserId: string) {
+    const workspace = await prisma.workspace.findUnique({ where: { id: workspaceId }, include: { members: true } });
+    if (!workspace) throw new Error('Không tìm thấy workspace!');
+
+    const activeMembers = workspace.members.filter(m => m.leftAt === null);
+    const target = activeMembers.find(m => m.userId === targetUserId);
+    if (!target) return { success: false, message: 'Người dùng không phải thành viên!' };
+
+    // Skip workspace owner to prevent orphan workspace issues
+    if (target.role === 'WORKSPACE_OWNER') {
+      logger.info({ workspaceId, targetUserId }, 'Skipping auto-remove of workspace owner from workspace');
+      return { success: false, message: 'Skipped workspace owner' };
+    }
+
+    const allMemberIds = activeMembers
+      .filter(m => m.userId !== targetUserId)
+      .map(m => m.userId);
+
+    await Promise.all([
+      prisma.workspaceMember.update({
+        where: { id: target.id },
+        data: { leftAt: new Date(), leftReason: 'KICKED' },
+      }),
+      prisma.channelMember.deleteMany({ where: { userId: targetUserId, channel: { workspaceId } } }),
+      this.cleanupWorkspaceChatsForUser(workspaceId, targetUserId),
+    ]);
+
+    await publishEvent(EventSubjects.WORKSPACE_MEMBER_REMOVED, {
+      workspaceId,
+      userId: targetUserId,
+      removedBy: 'SYSTEM',
+      isSelfLeave: false,
+      memberIds: allMemberIds,
+    });
+    logger.info({ workspaceId, userId: targetUserId }, 'Member removed from workspace by SYSTEM (soft-deleted)');
     return { success: true, removed: true };
   }
 
@@ -269,19 +519,40 @@ export class WorkspaceService {
     const workspace = await prisma.workspace.findUnique({ where: { id: workspaceId }, include: { members: true } });
     if (!workspace) throw new Error('Không tìm thấy workspace!');
 
-    const updater = workspace.members.find(m => m.userId === updaterId);
-    const target = workspace.members.find(m => m.userId === targetUserId);
+    const { globalRole, assignedWorkspaceIds, assignedDepartmentIds } = await userorgClient.getUserRolesAndScopes(updaterId);
+    const isSystemAdmin = ['SUPER_ADMIN', 'ADMIN'].includes(globalRole);
+    const isSystemWorkspaceManager = globalRole === 'WORKSPACE_MANAGER';
+    const isAssigned = assignedWorkspaceIds.includes(workspace.id) || 
+                       (workspace.departmentId && assignedDepartmentIds.includes(workspace.departmentId));
+
+    const updater = workspace.members.find(m => m.userId === updaterId && m.leftAt === null);
+    const target = workspace.members.find(m => m.userId === targetUserId && m.leftAt === null);
     if (!target) throw new Error('Người dùng không phải thành viên!');
-    if (!updater) throw new Error('Bạn không có quyền!');
+
+    const hasManagerAccess = (updater && ['WORKSPACE_OWNER', 'WORKSPACE_ADMIN'].includes(updater.role)) ||
+                             isSystemAdmin ||
+                             (isSystemWorkspaceManager && (updater !== undefined || isAssigned)) ||
+                             isAssigned ||
+                             await userorgClient.checkWorkspaceAccess(updaterId, workspace.id, workspace.departmentId, workspace.createdAt.toISOString());
+    if (!hasManagerAccess && !updater) throw new Error('Bạn không có quyền!');
+
+    let updaterRole: WorkspaceRole = updater?.role || 'WORKSPACE_MEMBER';
+    if (hasManagerAccess && updaterRole !== 'WORKSPACE_OWNER') {
+      updaterRole = 'WORKSPACE_ADMIN';
+    }
+
+    if (updaterRole !== 'WORKSPACE_OWNER' && updaterRole !== 'WORKSPACE_ADMIN') {
+      throw new Error('Bạn không có quyền thay đổi role thành viên!');
+    }
 
     const roleHierarchy = ['WORKSPACE_GUEST', 'WORKSPACE_MEMBER', 'WORKSPACE_ADMIN', 'WORKSPACE_OWNER'];
-    if (roleHierarchy.indexOf(newRole) >= roleHierarchy.indexOf(updater.role))
+    if (roleHierarchy.indexOf(newRole) >= roleHierarchy.indexOf(updaterRole))
       throw new Error('Không thể gán role cao hơn hoặc bằng quyền của bạn!');
-    if (roleHierarchy.indexOf(target.role) >= roleHierarchy.indexOf(updater.role))
+    if (roleHierarchy.indexOf(target.role) >= roleHierarchy.indexOf(updaterRole))
       throw new Error('Không thể thay đổi role của người có quyền cao hơn hoặc bằng!');
 
     if (newRole === 'WORKSPACE_OWNER') {
-      if (updater.role !== 'WORKSPACE_OWNER') throw new Error('Chỉ Owner mới có thể chuyển quyền ownership!');
+      if (updaterRole !== 'WORKSPACE_OWNER') throw new Error('Chỉ Owner mới có thể chuyển quyền ownership!');
       return await this.transferOwnership(workspaceId, targetUserId, updaterId);
     }
 
@@ -346,27 +617,86 @@ export class WorkspaceService {
     });
   }
 
-  async getMembers(workspaceId: string, options: PaginationOptions = {}) {
+  async getMembers(workspaceId: string, options: PaginationOptions = {}, requesterId?: string) {
     const { page = 1, limit = 50 } = options;
     const skip = (page - 1) * limit;
 
     const [members, total] = await Promise.all([
       prisma.workspaceMember.findMany({
-        where: { workspaceId }, skip, take: limit,
+        where: { workspaceId, leftAt: null }, skip, take: limit,
         orderBy: [{ role: 'desc' }, { joinedAt: 'asc' }],
       }),
-      prisma.workspaceMember.count({ where: { workspaceId } }),
+      prisma.workspaceMember.count({ where: { workspaceId, leftAt: null } }),
     ]);
 
     const userIds = members.map(m => m.userId);
+    
+    // Inject requesterId if not in userIds but has dynamic access
+    let shouldInjectRequester = false;
+    let requesterAccessRole: string | null = null;
+    
+    if (requesterId && !userIds.includes(requesterId)) {
+      const workspace = await prisma.workspace.findUnique({
+        where: { id: workspaceId },
+        select: { id: true, departmentId: true, createdAt: true }
+      });
+      
+      if (workspace) {
+        const hasAccess = await userorgClient.checkWorkspaceAccess(
+          requesterId,
+          workspace.id,
+          workspace.departmentId,
+          workspace.createdAt.toISOString()
+        );
+        if (hasAccess) {
+          shouldInjectRequester = true;
+          requesterAccessRole = 'WORKSPACE_ADMIN';
+          userIds.push(requesterId);
+        }
+      }
+    }
+
     const userMap = await userorgClient.getUsers(userIds);
 
-    const items = members.map(member => ({
-      ...member,
-      user: userMap.get(member.userId) || { name: 'Người dùng hệ thống', avatar: null, email: null }
-    }));
+    const items = members.map(member => {
+      let role = member.role;
+      const userProfile = userMap.get(member.userId);
+      const globalUserRole = userProfile?.role;
+      
+      if (globalUserRole) {
+        const isSystemAdmin = ['SUPER_ADMIN', 'ADMIN'].includes(globalUserRole);
+        const isSystemWorkspaceManager = globalUserRole === 'WORKSPACE_MANAGER';
+        if ((isSystemAdmin || isSystemWorkspaceManager) && role !== 'WORKSPACE_OWNER') {
+          role = 'WORKSPACE_ADMIN';
+        }
+      }
 
-    return { items, total, page, limit, totalPages: Math.ceil(total / limit) };
+      // If this is the requester, and they are a dynamic manager, upgrade their role
+      if (member.userId === requesterId && requesterAccessRole) {
+        role = requesterAccessRole as any;
+      }
+      return {
+        ...member,
+        role,
+        user: userProfile || { name: 'Người dùng hệ thống', avatar: null, email: null }
+      };
+    });
+
+    if (shouldInjectRequester && requesterId && requesterAccessRole) {
+      items.push({
+        id: `virtual_${requesterId}`,
+        workspaceId,
+        userId: requesterId,
+        role: requesterAccessRole as any,
+        joinedAt: new Date(),
+        invitedBy: 'SYSTEM',
+        leftAt: null,
+        leftReason: null,
+        user: userMap.get(requesterId) || { name: 'Quản trị viên hệ thống', avatar: null, email: null }
+      });
+    }
+
+    return { items, total: total + (shouldInjectRequester ? 1 : 0), page, limit, totalPages: Math.ceil((total + (shouldInjectRequester ? 1 : 0)) / limit) };
   }
 
   async dissolveWorkspace(id: string, userId: string, workspaceNameConfirm: string) {
@@ -377,8 +707,11 @@ export class WorkspaceService {
       throw new Error('Xác nhận tên Workspace không chính xác!');
     }
 
+    const { globalRole } = await userorgClient.getUserRolesAndScopes(userId);
+    const isSystemAdmin = ['SUPER_ADMIN', 'ADMIN'].includes(globalRole);
+
     const member = workspace.members.find(m => m.userId === userId);
-    if (!member || member.role !== 'WORKSPACE_OWNER') {
+    if (!isSystemAdmin && (!member || member.role !== 'WORKSPACE_OWNER')) {
       throw new Error('Chỉ Owner mới có quyền giải tán Workspace!');
     }
 
@@ -427,9 +760,20 @@ export class WorkspaceService {
   }
 
   async restoreWorkspace(id: string, userId: string) {
-    const workspace = await prisma.workspace.findUnique({ where: { id } });
+    const workspace = await prisma.workspace.findUnique({ 
+      where: { id },
+      include: { members: true }
+    });
     if (!workspace) throw new Error('Không tìm thấy workspace!');
-    if (workspace.ownerId !== userId) throw new Error('Chỉ Owner mới có quyền khôi phục Workspace!');
+
+    const { globalRole } = await userorgClient.getUserRolesAndScopes(userId);
+    const isSystemAdmin = ['SUPER_ADMIN', 'ADMIN'].includes(globalRole);
+
+    const isCreator = workspace.ownerId === userId;
+
+    if (!isSystemAdmin && !isCreator) {
+      throw new Error('Chỉ Owner mới có quyền khôi phục Workspace!');
+    }
     if (workspace.status !== 'DISSOLVED') throw new Error('Workspace không ở trạng thái bị giải tán!');
 
     return await prisma.$transaction(async (tx) => {
@@ -480,17 +824,62 @@ export class WorkspaceService {
     });
     if (!workspace) throw new Error('Không tìm thấy workspace!');
 
-    const isMember = workspace.members.some(m => m.userId === userId);
-    if (!isMember) throw new Error('Bạn không có quyền truy cập workspace này!');
+    const { globalRole } = await userorgClient.getUserRolesAndScopes(userId);
+    const isSystemAdmin = ['SUPER_ADMIN', 'ADMIN'].includes(globalRole);
 
-    const thirtyDaysAgo = new Date();
-    thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
+    const isMember = workspace.members.some(m => m.userId === userId && m.leftAt === null);
+    if (!isMember && !isSystemAdmin) throw new Error('Bạn không có quyền truy cập workspace này!');
 
+    // Count active members
+    const memberCount = workspace.members.filter(m => m.leftAt === null).length;
+
+    // Count chats in the workspace
     const chats = await prisma.chat.findMany({
       where: { workspaceId },
       select: { id: true }
     });
     const chatIds = chats.map(c => c.id);
+    const chatCount = chatIds.length;
+
+    // Count total messages
+    const messageCount = await prisma.message.count({
+      where: { chatId: { in: chatIds } }
+    });
+
+    // Calculate total file storage size
+    const messagesWithFiles = await prisma.message.findMany({
+      where: {
+        chatId: { in: chatIds },
+        fileName: { not: null },
+        fileSize: { not: null }
+      },
+      select: { fileSize: true }
+    });
+
+    let totalStorageBytes = 0;
+    messagesWithFiles.forEach(m => {
+      if (m.fileSize) {
+        const bytes = parseInt(m.fileSize, 10);
+        if (!isNaN(bytes)) {
+          totalStorageBytes += bytes;
+        }
+      }
+    });
+
+    // Format storage size to MB/GB
+    let storageSizeStr = '0 Bytes';
+    if (totalStorageBytes > 0) {
+      if (totalStorageBytes < 1024 * 1024) {
+        storageSizeStr = `${(totalStorageBytes / 1024).toFixed(1)} KB`;
+      } else if (totalStorageBytes < 1024 * 1024 * 1024) {
+        storageSizeStr = `${(totalStorageBytes / (1024 * 1024)).toFixed(1)} MB`;
+      } else {
+        storageSizeStr = `${(totalStorageBytes / (1024 * 1024 * 1024)).toFixed(2)} GB`;
+      }
+    }
+
+    const thirtyDaysAgo = new Date();
+    thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
 
     const messageActivityRaw = await prisma.message.findMany({
       where: {
@@ -557,6 +946,10 @@ export class WorkspaceService {
 
     return {
       success: true,
+      memberCount,
+      chatCount,
+      messageCount,
+      storageSize: storageSizeStr,
       messageActivity,
       memberActivity,
       recentActivity
@@ -572,7 +965,7 @@ export class WorkspaceService {
 
   async getWorkspaceMembers(workspaceId: string) {
     const members = await prisma.workspaceMember.findMany({
-      where: { workspaceId },
+      where: { workspaceId, leftAt: null },
       select: { userId: true },
     });
     return members.map(m => m.userId);
@@ -602,23 +995,83 @@ export class WorkspaceService {
     const sharedCount = await prisma.workspace.count({
       where: {
         status: 'ACTIVE',
-        members: { some: { userId: user1Id } },
+        members: { some: { userId: user1Id, leftAt: null } },
         AND: {
-          members: { some: { userId: user2Id } }
+          members: { some: { userId: user2Id, leftAt: null } }
         }
       }
     });
     return { hasSharedActiveWorkspace: sharedCount > 0, sharedCount };
   }
 
+  private async cleanupWorkspaceChatsForUser(workspaceId: string, userId: string) {
+    try {
+      // 1. Find all private DMs in the workspace that this user is a participant of
+      const privateDms = await prisma.chat.findMany({
+        where: {
+          workspaceId,
+          isGroup: false,
+          participants: { some: { accountId: userId } }
+        },
+        select: { id: true }
+      });
+
+      if (privateDms.length > 0) {
+        const dmIds = privateDms.map(d => d.id);
+        // Soft-delete: Hide DM for all participants of these direct messages
+        await prisma.chatParticipant.updateMany({
+          where: { chatId: { in: dmIds } },
+          data: { hidden: true }
+        });
+      }
+
+      // 2. Hard-delete the user from all channels/group chats in the workspace (isGroup: true)
+      await prisma.chatParticipant.deleteMany({
+        where: {
+          accountId: userId,
+          chat: { workspaceId, isGroup: true }
+        }
+      });
+    } catch (err: any) {
+      logger.error({ err: err.message, workspaceId, userId }, 'Failed to cleanup workspace chats for user');
+    }
+  }
+
   async deleteWorkspace(id: string, userId: string) {
-    // Keep this for legacy or super-admin hard delete
     const workspace = await prisma.workspace.findUnique({ where: { id }, include: { members: true } });
     if (!workspace) throw new Error('Không tìm thấy workspace!');
-    const member = workspace.members.find(m => m.userId === userId);
-    if (!member || member.role !== 'WORKSPACE_OWNER') throw new Error('Chỉ Owner mới có quyền xóa Workspace!');
 
-    await prisma.workspace.delete({ where: { id } });
+    const { globalRole } = await userorgClient.getUserRolesAndScopes(userId);
+    const isSystemAdmin = ['SUPER_ADMIN', 'ADMIN'].includes(globalRole);
+
+    const member = workspace.members.find(m => m.userId === userId);
+    if (!isSystemAdmin && (!member || member.role !== 'WORKSPACE_OWNER')) {
+      throw new Error('Chỉ Owner mới có quyền xóa Workspace!');
+    }
+
+    await prisma.$transaction(async (tx) => {
+      // 1. Delete all chats/messages referencing this workspace
+      const chats = await tx.chat.findMany({ where: { workspaceId: id } });
+      const chatIds = chats.map(c => c.id);
+
+      if (chatIds.length > 0) {
+        await tx.message.deleteMany({ where: { chatId: { in: chatIds } } });
+        await tx.chat.deleteMany({ where: { workspaceId: id } });
+      }
+
+      // 2. Delete channels
+      await tx.channel.deleteMany({ where: { workspaceId: id } });
+
+      // 3. Delete invites
+      await tx.workspaceInvite.deleteMany({ where: { workspaceId: id } });
+
+      // 4. Delete members
+      await tx.workspaceMember.deleteMany({ where: { workspaceId: id } });
+
+      // 5. Delete workspace itself
+      await tx.workspace.delete({ where: { id } });
+    });
+
     await publishEvent(EventSubjects.WORKSPACE_DELETED, { id, deletedBy: userId });
     logger.info({ workspaceId: id }, 'Workspace hard deleted');
     return { success: true, deleted: true };
@@ -638,6 +1091,14 @@ export class WorkspaceService {
         leftReason: 'SELF_LEFT',
       }
     });
+
+    // Remove from all channels in the workspace (same as kick/remove)
+    await prisma.channelMember.deleteMany({
+      where: { userId, channel: { workspaceId } }
+    });
+
+    // Mirror cleanup all chats/channels in the workspace (soft-delete DMs, hard-delete group/channels)
+    await this.cleanupWorkspaceChatsForUser(workspaceId, userId);
 
     const members = await this.getWorkspaceMembers(workspaceId);
     await publishEvent(EventSubjects.WORKSPACE_MEMBER_LEFT, {
@@ -669,6 +1130,14 @@ export class WorkspaceService {
         leftReason: 'KICKED',
       }
     });
+
+    // Remove kicked user from all channels in the workspace
+    await prisma.channelMember.deleteMany({
+      where: { userId: targetUserId, channel: { workspaceId } }
+    });
+
+    // Mirror cleanup all chats/channels in the workspace (soft-delete DMs, hard-delete group/channels)
+    await this.cleanupWorkspaceChatsForUser(workspaceId, targetUserId);
 
     const members = await this.getWorkspaceMembers(workspaceId);
     await publishEvent(EventSubjects.WORKSPACE_MEMBER_KICKED, {
@@ -890,7 +1359,7 @@ export class WorkspaceService {
       where: { token },
     });
 
-    if (!invite) throw new Error('Lời mời không tồn tại!');
+    if (!invite) throw new Error('Không tìm thấy lời mời!');
     if (invite.status !== 'PENDING') throw new Error('Lời mời này không còn ở trạng thái chờ!');
 
     await prisma.workspaceInvite.update({
@@ -953,6 +1422,11 @@ export class WorkspaceService {
           data: defaultChannels.map(ch => ({ channelId: ch.id, userId, role: 'CHANNEL_MEMBER' as const })),
           skipDuplicates: true,
         });
+
+        await tx.chatParticipant.createMany({
+          data: defaultChannels.map(ch => ({ chatId: ch.id, accountId: userId, role: 'CHANNEL_MEMBER' as const })),
+          skipDuplicates: true,
+        }).catch((e: any) => logger.error({ err: e.message }, 'Failed to mirror default channels participants in acceptInvite'));
       }
 
       // 5. Phát sự kiện thành công
@@ -984,6 +1458,12 @@ export class WorkspaceService {
       data: defaultChannels.map(ch => ({ channelId: ch.id, userId, role: 'CHANNEL_MEMBER' as const })),
       skipDuplicates: true,
     });
+
+    await prisma.chatParticipant.createMany({
+      data: defaultChannels.map(ch => ({ chatId: ch.id, accountId: userId, role: 'CHANNEL_MEMBER' as const })),
+      skipDuplicates: true,
+    }).catch((e: any) => logger.error({ err: e.message }, 'Failed to mirror default channels participants in autoJoinDefaultChannels'));
+
     logger.info({ workspaceId, userId, count: defaultChannels.length }, 'Auto-joined default channels');
   }
 
@@ -992,11 +1472,32 @@ export class WorkspaceService {
   }
 
   async checkMembership(workspaceId: string, userId: string) {
-    return prisma.workspaceMember.findUnique({
+    const member = await prisma.workspaceMember.findUnique({
       where: {
         workspaceId_userId: { workspaceId, userId },
       },
     });
+
+    if (member) return member;
+
+    // Check if system admin dynamically to bypass membership requirement
+    try {
+      const { globalRole } = await userorgClient.getUserRolesAndScopes(userId);
+      if (['SUPER_ADMIN', 'ADMIN'].includes(globalRole)) {
+        return {
+          id: `virtual_${userId}`,
+          workspaceId,
+          userId,
+          role: 'OWNER',
+          joinedAt: new Date(),
+          leftAt: null,
+        } as any;
+      }
+    } catch (err) {
+      logger.error({ err, userId }, 'Failed to check system admin role in checkMembership');
+    }
+
+    return null;
   }
 
   async dissolveGroups(workspaceId: string) {

@@ -12,6 +12,9 @@ import { connect, NatsConnection, JSONCodec } from 'nats';
 import { AccessToken } from 'livekit-server-sdk';
 import { messagingGrpcClient } from './messagingClient.js';
 
+// Redis client for call status and distributed locks
+
+
 const app = express();
 const httpServer = http.createServer(app);
 
@@ -26,13 +29,15 @@ const NATS_URL = process.env.NATS_URL || 'nats://localhost:4222';
 const LIVEKIT_API_KEY = process.env.LIVEKIT_API_KEY || 'devkey';
 const LIVEKIT_API_SECRET = process.env.LIVEKIT_API_SECRET || 'secret';
 const LIVEKIT_URL = process.env.LIVEKIT_URL || 'ws://localhost:7880';
-
+const redis = new Redis(REDIS_URL);
 // ============= TYPES =============
 
 interface AuthenticatedSocket extends Socket {
   userId?: string;
   userName?: string;
   role?: string;
+  roles?: string[];
+  roleLevel?: number;
   orgId?: string;
 }
 
@@ -40,6 +45,9 @@ interface AuthenticatedSocket extends Socket {
 const onlineUsers = new Map<string, Set<string>>();
 // Khắc phục F5: Map lưu trữ timeout để trì hoãn việc đánh dấu offline
 const disconnectTimeouts = new Map<string, NodeJS.Timeout>();
+// Track which admins are observing each channel: channelId -> Set<userId>
+// Used to fan-out real-time messages to observers who aren't in participantIds
+const channelObservers = new Map<string, Set<string>>();
 
 // NATS
 let natsConnection: NatsConnection | null = null;
@@ -122,6 +130,12 @@ const EventSubjects = {
   FRIEND_USER_BLOCKED: 'friend.user.blocked',
   FRIEND_USER_UNBLOCKED: 'friend.user.unblocked',
 
+  // AI Knowledge events
+  DOCUMENT_STATUS_UPDATED: 'document.status.updated',
+  COMPILATION_PLAN_UPDATED: 'compilation.plan.updated',
+  WIKI_DRAFT_UPDATED: 'wiki.draft.updated',
+  POLL_UPDATED: 'poll.updated',
+
   // ===== System/Gateway specific events =====
   USER_ONLINE: 'user.online',
   USER_OFFLINE: 'user.offline',
@@ -130,6 +144,8 @@ const EventSubjects = {
   USER_AVATAR_UPDATED: 'user.avatar.updated',
   NOTIFICATION_CREATED: 'notification.created',
   SYSTEM_BROADCAST: 'system.broadcast',
+  DEPARTMENT_MEMBER_ADDED: 'department.member.added',
+  DEPARTMENT_MEMBER_REMOVED: 'department.member.removed',
 };
 
 // ============= CALL STATE =============
@@ -139,6 +155,8 @@ interface ActiveCall {
   callerName: string;
   callerAvatar?: string;
   chatId: string;
+  chatName?: string;
+  chatAvatar?: string;
   isVideo: boolean;
   callType: 'private' | 'group';
   status: 'ringing' | 'active' | 'ended';
@@ -181,7 +199,7 @@ async function generateLiveKitToken(userId: string, userName: string, roomName: 
 }
 
 /** Full cleanup: remove ALL participants from call, delete room */
-function cleanupCall(roomName: string) {
+async function cleanupCall(roomName: string) {
   const call = activeCalls.get(roomName);
   if (call) {
     // Notify chat that call ended
@@ -191,10 +209,24 @@ function cleanupCall(roomName: string) {
       isActive: false,
     });
 
-    // Remove every participant from userInCall
-    call.participants.forEach((uid) => userInCall.delete(uid));
-    if (call.callerId) userInCall.delete(call.callerId);
-    if (call.calleeId) userInCall.delete(call.calleeId);
+    // Remove every participant from userInCall and Redis
+    const keysToDelete: string[] = [];
+    call.participants.forEach((uid) => {
+      userInCall.delete(uid);
+      keysToDelete.push(`user:call_state:${uid}`);
+    });
+    if (call.callerId) {
+      userInCall.delete(call.callerId);
+      keysToDelete.push(`user:call_state:${call.callerId}`);
+    }
+    if (call.calleeId) {
+      userInCall.delete(call.calleeId);
+      keysToDelete.push(`user:call_state:${call.calleeId}`);
+    }
+
+    if (keysToDelete.length > 0) {
+      await redis.del(...keysToDelete).catch(err => console.error('[Redis] cleanupCall del error:', err));
+    }
   }
   
   activeCalls.delete(roomName);
@@ -217,6 +249,47 @@ function removeParticipant(roomName: string, participantId: string): boolean {
   return call.participants.size === 0;
 }
 
+/** Validate and cleanup any orphaned call sessions where all participants are offline */
+function validateAndCleanupOrphanedCalls() {
+  const now = Date.now();
+  for (const [roomName, call] of activeCalls.entries()) {
+    const durationMs = now - call.createdAt.getTime();
+
+    // 1. Ringing timeout (ringing for > 60s and still no one accepted)
+    if (call.status === 'ringing' && durationMs > 60000) {
+      console.log(`[Call] Ringing timeout for room ${roomName}. Cleaning up.`);
+      cleanupCall(roomName);
+      continue;
+    }
+
+    // 2. Empty group calls (0 participants remaining in the set)
+    if (call.participants.size === 0) {
+      console.log(`[Call] Room ${roomName} has 0 participants. Cleaning up orphaned session.`);
+      cleanupCall(roomName);
+      continue;
+    }
+
+    // 3. Orphancy check (none of the participants, including caller/callee, are online)
+    let hasOnlineParticipant = false;
+    for (const pId of call.participants) {
+      if (onlineUsers.has(pId)) {
+        hasOnlineParticipant = true;
+        break;
+      }
+    }
+
+    // Also check host/caller
+    if (call.callerId && onlineUsers.has(call.callerId)) {
+      hasOnlineParticipant = true;
+    }
+
+    if (!hasOnlineParticipant) {
+      console.log(`[Call] No active participants are online for room ${roomName}. Cleaning up orphaned session.`);
+      cleanupCall(roomName);
+    }
+  }
+}
+
 /**
  * Save a call event as a message in chat history.
  * This creates a system-style message visible in the conversation timeline.
@@ -228,22 +301,29 @@ async function saveCallEventMessage(
   metadata: { isVideo: boolean; duration?: number; callerName?: string }
 ) {
   try {
-    // UNIFIED: Now points to messaging-service instead of chat-service
     const messagingServiceUrl = process.env.MESSAGING_SERVICE_URL || 'http://localhost:3020';
     const content = JSON.stringify(metadata);
     
-    await fetch(`${messagingServiceUrl}/messages/${chatId}`, {
+    const response = await fetch(`${messagingServiceUrl}/messages/${chatId}`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         'x-user-id': callerId,
-        'x-user-name': metadata.callerName || 'System',
+        // NOTE: x-user-name omitted — Vietnamese names contain non-ASCII chars
+        // which are rejected by the HTTP spec (ByteString constraint).
+        // messaging-service resolves the sender name via x-user-id anyway.
       },
       body: JSON.stringify({ content, type: messageType }),
     });
-    console.log(`[Call] Saved ${messageType} message in chat ${chatId}`);
+
+    if (!response.ok) {
+      const errorBody = await response.text().catch(() => '(unreadable)');
+      console.error(`[Call] saveCallEventMessage FAILED — status ${response.status} for ${messageType} in chat ${chatId}. Body: ${errorBody}`);
+    } else {
+      console.log(`[Call] Saved ${messageType} message in chat ${chatId}`);
+    }
   } catch (error: any) {
-    console.error(`[Call] Failed to save call event message:`, error.message);
+    console.error(`[Call] saveCallEventMessage network error for ${messageType} in chat ${chatId}:`, error.message);
   }
 }
 
@@ -360,6 +440,7 @@ function subscribeToNatsEvents() {
         const { chatId, workspaceId, participantIds, ...messageData } = event.payload;
 
         if (Array.isArray(participantIds)) {
+          const participantSet = new Set<string>(participantIds);
           for (const uid of participantIds) {
             io.to(`user:${uid}`).emit('message:new', { 
               message: messageData, 
@@ -367,8 +448,21 @@ function subscribeToNatsEvents() {
               workspaceId 
             });
           }
+          // Also deliver to admin observers who are NOT already in participantIds
+          const observers = channelObservers.get(chatId);
+          if (observers) {
+            for (const observerId of observers) {
+              if (!participantSet.has(observerId)) {
+                io.to(`user:${observerId}`).emit('message:new', { 
+                  message: messageData, 
+                  chatId,
+                  workspaceId 
+                });
+              }
+            }
+          }
         } else {
-          // Fallback if participantIds is missing (though it shouldn't be now)
+          // Fallback if participantIds is missing
           io.to(`chat:${chatId}`).emit('message:new', { 
             message: messageData, 
             chatId,
@@ -445,6 +539,21 @@ function subscribeToNatsEvents() {
     }
   })();
 
+  // Poll Updated
+  const pollUpdatedSub = addSub(natsConnection.subscribe('poll.updated'));
+  (async () => {
+    for await (const msg of pollUpdatedSub) {
+      try {
+        const event = jsonCodec.decode(msg.data) as any;
+        const { chatId, ...rest } = event.payload;
+        console.log(`[WS] Poll ${rest.pollId} updated in chat ${chatId}. Broadcasting...`);
+        io.to(`chat:${chatId}`).emit('poll:updated', { chatId, ...rest });
+      } catch (err) {
+        console.error('[WS] Error processing poll.updated NATS event:', err);
+      }
+    }
+  })();
+
   // Group Created
   const groupCreatedSub = addSub(natsConnection.subscribe(EventSubjects.GROUP_CREATED));
   (async () => {
@@ -452,14 +561,14 @@ function subscribeToNatsEvents() {
       try {
         const event = jsonCodec.decode(msg.data) as any;
         const { id, memberIds, ...chatData } = event.payload;
-        console.log(`[WS] New group created: ${id}. Notifying members.`);
+        console.log(`[WS] New group created: ${id}. Notifying members and admins.`);
         if (Array.isArray(memberIds)) {
-          for (const uid of memberIds) {
-            io.to(`user:${uid}`).emit('chat:new', { 
-              chatId: id, 
-              ...chatData 
-            });
-          }
+          const rooms = memberIds.map((uid) => `user:${uid}`);
+          rooms.push('admins');
+          io.to(rooms).emit('chat:new', { 
+            chatId: id, 
+            ...chatData 
+          });
         }
       } catch (err) {
         console.error('[WS] Error processing GROUP_CREATED:', err);
@@ -653,6 +762,53 @@ function subscribeToNatsEvents() {
       }
     }
   })();
+
+  // Document Status Updated
+  const docStatusSub = addSub(natsConnection.subscribe(EventSubjects.DOCUMENT_STATUS_UPDATED));
+  (async () => {
+    for await (const msg of docStatusSub) {
+      try {
+        const event = jsonCodec.decode(msg.data) as any;
+        const { documentId, status, userId, workspaceId } = event.payload;
+        console.log(`[WS] Document ${documentId} status updated to ${status} for workspace ${workspaceId}`);
+        // Map COMPLETED to READY for frontend compatibility
+        const mappedStatus = status === 'COMPLETED' ? 'READY' : status;
+        io.emit('document:status_changed', { documentId, status: mappedStatus });
+      } catch (err) {
+        console.error('[WS] Error processing DOCUMENT_STATUS_UPDATED:', err);
+      }
+    }
+  })();
+
+  // Compilation Plan Updated
+  const planUpdatedSub = addSub(natsConnection.subscribe(EventSubjects.COMPILATION_PLAN_UPDATED));
+  (async () => {
+    for await (const msg of planUpdatedSub) {
+      try {
+        const event = jsonCodec.decode(msg.data) as any;
+        const { planId, sourceDocumentId, workspaceId, status, userId } = event.payload;
+        console.log(`[WS] Compilation plan ${planId} updated to ${status} in workspace ${workspaceId}`);
+        io.emit('compilation_plan:status_changed', { planId, sourceDocumentId, status, workspaceId });
+      } catch (err) {
+        console.error('[WS] Error processing COMPILATION_PLAN_UPDATED:', err);
+      }
+    }
+  })();
+
+  // Wiki Draft Updated
+  const draftUpdatedSub = addSub(natsConnection.subscribe(EventSubjects.WIKI_DRAFT_UPDATED));
+  (async () => {
+    for await (const msg of draftUpdatedSub) {
+      try {
+        const event = jsonCodec.decode(msg.data) as any;
+        const { draftId, title, slug, workspaceId, status, userId } = event.payload;
+        console.log(`[WS] Wiki draft ${draftId} (${title}) updated to ${status} in workspace ${workspaceId}`);
+        io.emit('wiki_draft:status_changed', { draftId, title, slug, status, workspaceId });
+      } catch (err) {
+        console.error('[WS] Error processing WIKI_DRAFT_UPDATED:', err);
+      }
+    }
+  })();
   
   // Workspace Invite Created
   const workspaceInviteSub = addSub(natsConnection.subscribe(EventSubjects.WORKSPACE_INVITE_CREATED));
@@ -740,10 +896,31 @@ function subscribeToNatsEvents() {
   const workspaceCreatedSub = addSub(natsConnection.subscribe(EventSubjects.WORKSPACE_CREATED));
   (async () => {
     for await (const msg of workspaceCreatedSub) {
-      const event = jsonCodec.decode(msg.data) as any;
-      const { userId, workspace } = event.payload;
-      console.log(`[WS] Workspace ${workspace?.id} created by user ${userId}`);
-      io.to(`user:${userId}`).emit('workspace:created', { workspace });
+      try {
+        const event = jsonCodec.decode(msg.data) as any;
+        const { id, name, slug, createdBy, createdAt, departmentId } = event.payload;
+        console.log(`[WS] Workspace ${id} created by user ${createdBy}`);
+        
+        const workspaceData = {
+          id,
+          name,
+          slug,
+          createdBy,
+          createdAt,
+          departmentId,
+          myRole: 'OWNER',
+          memberCount: 1,
+          channelCount: 1,
+        };
+
+        // Notify the creator
+        io.to(`user:${createdBy}`).emit('workspace:created', { workspace: workspaceData });
+        
+        // Also notify all SUPER_ADMIN users
+        io.to('role:SUPER_ADMIN').emit('workspace:created', { workspace: workspaceData });
+      } catch (err) {
+        console.error('[WS] Error processing WORKSPACE_CREATED:', err);
+      }
     }
   })();
 
@@ -786,16 +963,65 @@ function subscribeToNatsEvents() {
   const workspaceMemberRemovedSub = addSub(natsConnection.subscribe(EventSubjects.WORKSPACE_MEMBER_REMOVED));
   (async () => {
     for await (const msg of workspaceMemberRemovedSub) {
-      const event = jsonCodec.decode(msg.data) as any;
-      const { workspaceId, userId, memberIds } = event.payload;
-      console.log(`[WS] User ${userId} removed from workspace ${workspaceId}`);
-      io.to(`user:${userId}`).emit('workspace:member:left', { workspaceId, userId, reason: 'REMOVED' });
-      if (Array.isArray(memberIds)) {
-        for (const uid of memberIds) {
-          if (uid !== userId) {
-            io.to(`user:${uid}`).emit('workspace:member:updated', { workspaceId, userId, action: 'removed' });
+      try {
+        const event = jsonCodec.decode(msg.data) as any;
+        const { workspaceId, userId, memberIds, isSelfLeave } = event.payload;
+        const reason = isSelfLeave ? 'LEFT' : 'KICKED';
+        console.log(`[WS] User ${userId} removed from workspace ${workspaceId}. Reason: ${reason}`);
+        io.to(`user:${userId}`).emit('workspace:member:left', { workspaceId, userId, reason });
+        if (Array.isArray(memberIds)) {
+          for (const uid of memberIds) {
+            if (uid !== userId) {
+              io.to(`user:${uid}`).emit('workspace:member:updated', { workspaceId, userId, action: 'removed', reason });
+            }
           }
         }
+      } catch (err) {
+        console.error('[WS] Error processing WORKSPACE_MEMBER_REMOVED:', err);
+      }
+    }
+  })();
+
+  // Workspace Member Left
+  const workspaceMemberLeftSub = addSub(natsConnection.subscribe(EventSubjects.WORKSPACE_MEMBER_LEFT));
+  (async () => {
+    for await (const msg of workspaceMemberLeftSub) {
+      try {
+        const event = jsonCodec.decode(msg.data) as any;
+        const { workspaceId, userId, memberIds } = event.payload;
+        console.log(`[WS] User ${userId} left workspace ${workspaceId}`);
+        io.to(`user:${userId}`).emit('workspace:member:left', { workspaceId, userId, reason: 'LEFT' });
+        if (Array.isArray(memberIds)) {
+          for (const uid of memberIds) {
+            if (uid !== userId) {
+              io.to(`user:${uid}`).emit('workspace:member:updated', { workspaceId, userId, action: 'removed', reason: 'LEFT' });
+            }
+          }
+        }
+      } catch (err) {
+        console.error('[WS] Error processing WORKSPACE_MEMBER_LEFT:', err);
+      }
+    }
+  })();
+
+  // Workspace Member Kicked
+  const workspaceMemberKickedSub = addSub(natsConnection.subscribe(EventSubjects.WORKSPACE_MEMBER_KICKED));
+  (async () => {
+    for await (const msg of workspaceMemberKickedSub) {
+      try {
+        const event = jsonCodec.decode(msg.data) as any;
+        const { workspaceId, userId, memberIds, kickedBy } = event.payload;
+        console.log(`[WS] User ${userId} was kicked from workspace ${workspaceId} by ${kickedBy}`);
+        io.to(`user:${userId}`).emit('workspace:member:left', { workspaceId, userId, reason: 'KICKED' });
+        if (Array.isArray(memberIds)) {
+          for (const uid of memberIds) {
+            if (uid !== userId) {
+              io.to(`user:${uid}`).emit('workspace:member:updated', { workspaceId, userId, action: 'removed', reason: 'KICKED' });
+            }
+          }
+        }
+      } catch (err) {
+        console.error('[WS] Error processing WORKSPACE_MEMBER_KICKED:', err);
       }
     }
   })();
@@ -1030,13 +1256,17 @@ function subscribeToNatsEvents() {
   const groupUpdatedSub = addSub(natsConnection.subscribe(EventSubjects.GROUP_UPDATED));
   (async () => {
     for await (const msg of groupUpdatedSub) {
-      const event = jsonCodec.decode(msg.data) as any;
-      const { id, memberIds, ...updates } = event.payload;
-      console.log(`[WS] Group ${id} updated. Notifying members.`);
-      if (Array.isArray(memberIds)) {
-        for (const uid of memberIds) {
-          io.to(`user:${uid}`).emit('chat:updated', { chatId: id, ...updates });
+      try {
+        const event = jsonCodec.decode(msg.data) as any;
+        const { id, memberIds, ...updates } = event.payload;
+        console.log(`[WS] Group ${id} updated. Notifying members and admins.`);
+        if (Array.isArray(memberIds)) {
+          const rooms = memberIds.map((uid) => `user:${uid}`);
+          rooms.push('admins');
+          io.to(rooms).emit('chat:updated', { chatId: id, ...updates });
         }
+      } catch (err) {
+        console.error('[WS] Error processing GROUP_UPDATED:', err);
       }
     }
   })();
@@ -1045,13 +1275,17 @@ function subscribeToNatsEvents() {
   const groupDeletedSub = addSub(natsConnection.subscribe(EventSubjects.GROUP_DELETED));
   (async () => {
     for await (const msg of groupDeletedSub) {
-      const event = jsonCodec.decode(msg.data) as any;
-      const { id, memberIds } = event.payload;
-      console.log(`[WS] Group ${id} deleted. Notifying members.`);
-      if (Array.isArray(memberIds)) {
-        for (const uid of memberIds) {
-          io.to(`user:${uid}`).emit('chat:deleted', { chatId: id });
+      try {
+        const event = jsonCodec.decode(msg.data) as any;
+        const { id, memberIds } = event.payload;
+        console.log(`[WS] Group ${id} deleted. Notifying members and admins.`);
+        if (Array.isArray(memberIds)) {
+          const rooms = memberIds.map((uid) => `user:${uid}`);
+          rooms.push('admins');
+          io.to(rooms).emit('chat:deleted', { chatId: id });
         }
+      } catch (err) {
+        console.error('[WS] Error processing GROUP_DELETED:', err);
       }
     }
   })();
@@ -1060,13 +1294,48 @@ function subscribeToNatsEvents() {
   const groupMemberAddedSub = addSub(natsConnection.subscribe(EventSubjects.GROUP_MEMBER_ADDED));
   (async () => {
     for await (const msg of groupMemberAddedSub) {
-      const event = jsonCodec.decode(msg.data) as any;
-      const { chatId, userId, memberIds } = event.payload;
-      console.log(`[WS] User ${userId} joined group ${chatId}`);
-      if (Array.isArray(memberIds)) {
-        for (const uid of memberIds) {
-          io.to(`user:${uid}`).emit('chat:member_updated', { chatId, userId, action: 'joined' });
+      try {
+        const event = jsonCodec.decode(msg.data) as any;
+        const { chatId, addedMemberIds, allMemberIds, addedBy, userId, memberIds, memberId } = event.payload;
+        
+        // Normalize payload to handle both old/fallback and new structure
+        const finalAddedMemberIds: string[] = Array.isArray(addedMemberIds) 
+          ? addedMemberIds 
+          : (memberId ? [memberId] : (userId ? [userId] : []));
+          
+        const finalAllMemberIds: string[] = Array.isArray(allMemberIds)
+          ? allMemberIds
+          : (Array.isArray(memberIds) ? memberIds : []);
+
+        const finalAddedBy = addedBy || userId || 'SYSTEM';
+
+        console.log(`[WS] Members ${finalAddedMemberIds.join(',')} added to group ${chatId} by ${finalAddedBy}`);
+
+        // 1. Notify newly added members that they have been added to a new chat
+        for (const uid of finalAddedMemberIds) {
+          io.to(`user:${uid}`).emit('chat:new', { 
+            chatId, 
+            isGroup: true 
+          });
         }
+
+        // 2. Notify all members (existing + new) that group members updated
+        for (const uid of finalAllMemberIds) {
+          io.to(`user:${uid}`).emit('chat:member_updated', { 
+            chatId, 
+            userId: finalAddedMemberIds[0] || finalAddedBy, 
+            action: 'joined' 
+          });
+        }
+
+        // Also emit directly to the chat room for active session sync
+        io.to(`chat:${chatId}`).emit('chat:member_updated', {
+          chatId,
+          userId: finalAddedMemberIds[0] || finalAddedBy,
+          action: 'joined'
+        });
+      } catch (err) {
+        console.error('[WS] Error processing GROUP_MEMBER_ADDED event:', err);
       }
     }
   })();
@@ -1075,16 +1344,41 @@ function subscribeToNatsEvents() {
   const groupMemberRemovedSub = addSub(natsConnection.subscribe(EventSubjects.GROUP_MEMBER_REMOVED));
   (async () => {
     for await (const msg of groupMemberRemovedSub) {
-      const event = jsonCodec.decode(msg.data) as any;
-      const { chatId, userId, memberIds, reason } = event.payload;
-      console.log(`[WS] User ${userId} removed from group ${chatId}`);
-      io.to(`user:${userId}`).emit('chat:member_removed', { chatId, userId, reason });
-      if (Array.isArray(memberIds)) {
-        for (const uid of memberIds) {
-          if (uid !== userId) {
-            io.to(`user:${uid}`).emit('chat:member_updated', { chatId, userId, action: 'removed' });
+      try {
+        const event = jsonCodec.decode(msg.data) as any;
+        const { chatId, userId, memberIds, reason, isSelfLeave, memberId } = event.payload;
+        
+        const finalUserId = userId || memberId;
+        const finalIsSelfLeave = isSelfLeave !== undefined ? isSelfLeave : (reason === 'leave');
+
+        console.log(`[WS] User ${finalUserId} removed from group ${chatId}`);
+        io.to(`user:${finalUserId}`).emit('chat:member_removed', { 
+          chatId, 
+          userId: finalUserId, 
+          reason, 
+          isSelfLeave: finalIsSelfLeave 
+        });
+
+        if (Array.isArray(memberIds)) {
+          for (const uid of memberIds) {
+            if (uid !== finalUserId) {
+              io.to(`user:${uid}`).emit('chat:member_updated', { 
+                chatId, 
+                userId: finalUserId, 
+                action: 'removed' 
+              });
+            }
           }
         }
+
+        // Also emit directly to the chat room for active session sync
+        io.to(`chat:${chatId}`).emit('chat:member_updated', {
+          chatId,
+          userId: finalUserId,
+          action: 'removed'
+        });
+      } catch (err) {
+        console.error('[WS] Error processing GROUP_MEMBER_REMOVED event:', err);
       }
     }
   })();
@@ -1108,13 +1402,17 @@ function subscribeToNatsEvents() {
   const channelCreatedSub = addSub(natsConnection.subscribe(EventSubjects.CHANNEL_CREATED));
   (async () => {
     for await (const msg of channelCreatedSub) {
-      const event = jsonCodec.decode(msg.data) as any;
-      const { workspaceId, channel, memberIds } = event.payload;
-      console.log(`[WS] Channel ${channel?.id} created in workspace ${workspaceId}`);
-      if (Array.isArray(memberIds)) {
-        for (const uid of memberIds) {
-          io.to(`user:${uid}`).emit('channel:new', { workspaceId, channel });
+      try {
+        const event = jsonCodec.decode(msg.data) as any;
+        const { workspaceId, channel, memberIds } = event.payload;
+        console.log(`[WS] Channel ${channel?.id} created in workspace ${workspaceId}. Notifying members and admins.`);
+        if (Array.isArray(memberIds)) {
+          const rooms = memberIds.map((uid) => `user:${uid}`);
+          rooms.push('admins');
+          io.to(rooms).emit('channel:new', { workspaceId, channel });
         }
+      } catch (err) {
+        console.error('[WS] Error processing CHANNEL_CREATED:', err);
       }
     }
   })();
@@ -1123,13 +1421,17 @@ function subscribeToNatsEvents() {
   const channelUpdatedSub = addSub(natsConnection.subscribe(EventSubjects.CHANNEL_UPDATED));
   (async () => {
     for await (const msg of channelUpdatedSub) {
-      const event = jsonCodec.decode(msg.data) as any;
-      const { id, workspaceId, memberIds, ...updates } = event.payload;
-      console.log(`[WS] Channel ${id} updated. Notifying members.`);
-      if (Array.isArray(memberIds)) {
-        for (const uid of memberIds) {
-          io.to(`user:${uid}`).emit('channel:updated', { channelId: id, workspaceId, ...updates });
+      try {
+        const event = jsonCodec.decode(msg.data) as any;
+        const { id, workspaceId, memberIds, ...updates } = event.payload;
+        console.log(`[WS] Channel ${id} updated. Notifying members and admins.`);
+        if (Array.isArray(memberIds)) {
+          const rooms = memberIds.map((uid) => `user:${uid}`);
+          rooms.push('admins');
+          io.to(rooms).emit('channel:updated', { channelId: id, workspaceId, ...updates });
         }
+      } catch (err) {
+        console.error('[WS] Error processing CHANNEL_UPDATED:', err);
       }
     }
   })();
@@ -1138,13 +1440,17 @@ function subscribeToNatsEvents() {
   const channelDeletedSub = addSub(natsConnection.subscribe(EventSubjects.CHANNEL_DELETED));
   (async () => {
     for await (const msg of channelDeletedSub) {
-      const event = jsonCodec.decode(msg.data) as any;
-      const { id, workspaceId, memberIds } = event.payload;
-      console.log(`[WS] Channel ${id} deleted. Notifying members.`);
-      if (Array.isArray(memberIds)) {
-        for (const uid of memberIds) {
-          io.to(`user:${uid}`).emit('channel:deleted', { channelId: id, workspaceId });
+      try {
+        const event = jsonCodec.decode(msg.data) as any;
+        const { id, workspaceId, memberIds } = event.payload;
+        console.log(`[WS] Channel ${id} deleted. Notifying members and admins.`);
+        if (Array.isArray(memberIds)) {
+          const rooms = memberIds.map((uid) => `user:${uid}`);
+          rooms.push('admins');
+          io.to(rooms).emit('channel:deleted', { channelId: id, workspaceId });
         }
+      } catch (err) {
+        console.error('[WS] Error processing CHANNEL_DELETED:', err);
       }
     }
   })();
@@ -1191,6 +1497,8 @@ function subscribeToNatsEvents() {
           io.to(`user:${aid}`).emit('chat:join_request:new', { chatId, requestId, accountId });
         }
       }
+      // Also emit directly to the chat room for active session sync
+      io.to(`chat:${chatId}`).emit('chat:join_request:new', { chatId, requestId, accountId });
     }
   })();
 
@@ -1208,6 +1516,8 @@ function subscribeToNatsEvents() {
       }
       // Also notify the applicant
       io.to(`user:${accountId}`).emit('chat:join_request:status', { chatId, requestId, status });
+      // Also emit directly to the chat room for active session sync
+      io.to(`chat:${chatId}`).emit('chat:join_request:updated', { chatId, requestId, accountId, status });
     }
   })();
 
@@ -1215,13 +1525,17 @@ function subscribeToNatsEvents() {
   const channelArchivedSub = addSub(natsConnection.subscribe(EventSubjects.CHANNEL_ARCHIVED));
   (async () => {
     for await (const msg of channelArchivedSub) {
-      const event = jsonCodec.decode(msg.data) as any;
-      const { id, workspaceId, memberIds } = event.payload;
-      console.log(`[WS] Channel ${id} archived in workspace ${workspaceId}`);
-      if (Array.isArray(memberIds)) {
-        for (const uid of memberIds) {
-          io.to(`user:${uid}`).emit('channel:archived', { channelId: id, workspaceId });
+      try {
+        const event = jsonCodec.decode(msg.data) as any;
+        const { id, workspaceId, memberIds } = event.payload;
+        console.log(`[WS] Channel ${id} archived in workspace ${workspaceId}. Notifying members and admins.`);
+        if (Array.isArray(memberIds)) {
+          const rooms = memberIds.map((uid) => `user:${uid}`);
+          rooms.push('admins');
+          io.to(rooms).emit('channel:archived', { channelId: id, workspaceId });
         }
+      } catch (err) {
+        console.error('[WS] Error processing CHANNEL_ARCHIVED:', err);
       }
     }
   })();
@@ -1365,8 +1679,45 @@ function subscribeToNatsEvents() {
     }
   })();
   
+  // Department Member Added
+  const deptMemberAddedSub = addSub(natsConnection.subscribe(EventSubjects.DEPARTMENT_MEMBER_ADDED));
+  (async () => {
+    for await (const msg of deptMemberAddedSub) {
+      try {
+        const event = jsonCodec.decode(msg.data) as any;
+        const { departmentId, userId, role } = event.payload;
+        console.log(`[WS] Department Member ${userId} added/updated in dept ${departmentId} with role ${role}`);
+        
+        // Emit to the specific user added to update their client state
+        io.to(`user:${userId}`).emit('department:member_added', { departmentId, userId, role });
+        
+        // Emit globally so that managers/other members see the updated list
+        io.emit('department:member_added', { departmentId, userId, role });
+      } catch (err) {
+        console.error('[WS] Error processing DEPARTMENT_MEMBER_ADDED event:', err);
+      }
+    }
+  })();
 
-
+  // Department Member Removed
+  const deptMemberRemovedSub = addSub(natsConnection.subscribe(EventSubjects.DEPARTMENT_MEMBER_REMOVED));
+  (async () => {
+    for await (const msg of deptMemberRemovedSub) {
+      try {
+        const event = jsonCodec.decode(msg.data) as any;
+        const { departmentId, userId } = event.payload;
+        console.log(`[WS] Department Member ${userId} removed from dept ${departmentId}`);
+        
+        // Emit to the specific user removed
+        io.to(`user:${userId}`).emit('department:member_removed', { departmentId, userId });
+        
+        // Emit globally so that managers/other members see the updated list
+        io.emit('department:member_removed', { departmentId, userId });
+      } catch (err) {
+        console.error('[WS] Error processing DEPARTMENT_MEMBER_REMOVED event:', err);
+      }
+    }
+  })();
 
   console.log('[WS Gateway] Subscribed to NATS events (including all friend actions)');
 }
@@ -1407,10 +1758,12 @@ io.use(async (socket: AuthenticatedSocket, next) => {
       return next(new Error('Authentication required'));
     }
 
-    const decoded = jwt.verify(token, JWT_SECRET) as { sub?: string; id?: string; name?: string; role?: string; orgId?: string };
+        const decoded = jwt.verify(token, JWT_SECRET) as { sub?: string; id?: string; name?: string; role?: string; roles?: string[]; roleLevel?: number; orgId?: string };
     socket.userId = decoded.sub || decoded.id || '';
     socket.userName = decoded.name || 'User';
     socket.role = decoded.role || 'WORKSPACE_MEMBER';
+    socket.roles = decoded.roles || [];
+    socket.roleLevel = decoded.roleLevel;
     socket.orgId = decoded.orgId;
     next();
   } catch (error) {
@@ -1445,10 +1798,21 @@ io.on('connection', async (socket: AuthenticatedSocket) => {
   console.log(`[WS] User ${userId} joined room: user:${userId}`);
 
   // Join admin room if applicable
-  if (socket.role === 'SUPER_ADMIN' || socket.role === 'ADMIN') {
+  const rolesList = socket.roles || [];
+  const isAdmin = socket.role === 'SUPER_ADMIN' ||
+                  socket.role === 'ADMIN' ||
+                  rolesList.includes('SUPER_ADMIN') ||
+                  rolesList.includes('ADMIN') ||
+                  rolesList.includes('WORKSPACE_ADMIN') ||
+                  rolesList.includes('WORKSPACE_OWNER') ||
+                  rolesList.includes('WORKSPACE_MANAGER');
+
+  if (isAdmin) {
     socket.join('admins');
-    socket.join('role:SUPER_ADMIN'); // Specific room for system-wide broadcasts
-    console.log(`[WS] Admin ${userId} joined room: admins`);
+    if (socket.role === 'SUPER_ADMIN' || rolesList.includes('SUPER_ADMIN')) {
+      socket.join('role:SUPER_ADMIN'); // Specific room for system-wide broadcasts
+    }
+    console.log(`[WS] Admin-like user ${userName} (${userId}) joined room: admins`);
   }
 
   // Join organization room
@@ -1478,6 +1842,78 @@ io.on('connection', async (socket: AuthenticatedSocket) => {
   socket.on('chat:leave', (data) => {
     const { chatId } = data;
     socket.leave(`chat:${chatId}`);
+  });
+
+  // ── Admin Observer: explicit single-channel observation ──
+  // Emitted ONLY from the active chat area when an admin opens a channel they don't belong to.
+  socket.on('observe:join', async (data) => {
+    const { channelId } = data;
+    if (!channelId) return;
+
+    const rolesList = socket.roles || [];
+    const isAdmin = socket.role === 'SUPER_ADMIN' ||
+                    rolesList.includes('SUPER_ADMIN') ||
+                    rolesList.includes('WORKSPACE_ADMIN') ||
+                    rolesList.includes('WORKSPACE_OWNER') ||
+                    rolesList.includes('WORKSPACE_MANAGER');
+
+    if (!isAdmin) return;
+
+    // Leave the previously observed channel before joining a new one
+    const prevChannelId = (socket as any).observedChannelId as string | undefined;
+    if (prevChannelId && prevChannelId !== channelId) {
+      io.to(`chat:${prevChannelId}`).emit('observer:left', {
+        channelId: prevChannelId,
+        adminId: userId
+      });
+      console.log(`[WS] Admin ${userName} (${userId}) auto-left observe on chat:${prevChannelId}`);
+    }
+
+    try {
+      const participantIds = await messagingGrpcClient.getParticipantIds(channelId).catch(() => [] as string[]);
+      if (participantIds.includes(userId as string)) {
+        // Admin is an actual member — no observer badge needed
+        (socket as any).observedChannelId = undefined;
+        return;
+      }
+    } catch (err: any) {
+      console.error('[WS] observe:join gRPC error:', err.message);
+    }
+
+    (socket as any).observedChannelId = channelId;
+    // Maintain global observer map for message fan-out
+    if (!channelObservers.has(channelId)) {
+      channelObservers.set(channelId, new Set());
+    }
+    channelObservers.get(channelId)!.add(userId);
+    // Ensure socket is in the room so it receives messages
+    socket.join(`chat:${channelId}`);
+
+    io.to(`chat:${channelId}`).emit('observer:joined', {
+      channelId,
+      admin: { id: userId, name: userName }
+    });
+    console.log(`[WS] Admin ${userName} (${userId}) is now observing chat:${channelId}`);
+  });
+
+  socket.on('observe:leave', (data) => {
+    const { channelId } = data;
+    if (!channelId) return;
+
+    const current = (socket as any).observedChannelId as string | undefined;
+    if (current !== channelId) return;
+
+    (socket as any).observedChannelId = undefined;
+    // Remove from global observer map
+    channelObservers.get(channelId)?.delete(userId);
+    if (channelObservers.get(channelId)?.size === 0) {
+      channelObservers.delete(channelId);
+    }
+    io.to(`chat:${channelId}`).emit('observer:left', {
+      channelId,
+      adminId: userId
+    });
+    console.log(`[WS] Admin ${userName} (${userId}) stopped observing chat:${channelId}`);
   });
 
   // Thread rooms
@@ -1567,81 +2003,178 @@ io.on('connection', async (socket: AuthenticatedSocket) => {
   // =============================================
 
   // ─── Phase 1: CALL REQUEST (Caller initiates) ───
-  socket.on('call:request', (data) => {
-    const { chatId, targetUserId, isVideo = true, callType = 'private', callerAvatar } = data;
+  socket.on('call:request', async (data) => {
+    const { chatId, targetUserId, isVideo = true, callType = 'private', callerAvatar, chatName, chatAvatar } = data;
 
     console.log(`[Call] ${userName} requesting call to ${targetUserId || 'group'} in chat ${chatId}`);
 
-    // Check if caller is already in a call
-    if (userInCall.has(userId)) {
-      socket.emit('call:error', { reason: 'already_in_call', message: 'Bạn đang trong cuộc gọi khác.' });
+    // Check if there is already an active call in this chat
+    const activeEntry = Array.from(activeCalls.entries()).find(
+      ([_, call]) => call.chatId === chatId && call.status !== 'ended'
+    );
+    if (activeEntry) {
+      socket.emit('call:error', {
+        reason: 'call_already_active',
+        message: 'Cuộc gọi nhóm đang diễn ra.',
+        activeCall: {
+          roomName: activeEntry[0],
+          callerName: activeEntry[1].callerName
+        }
+      });
       return;
     }
 
-    // For private calls: Ghost Ringing support - allow call even if offline
-    if (callType === 'private' && targetUserId) {
-      // We still check if they are busy if they ARE online
-      if (onlineUsers.has(targetUserId) && userInCall.has(targetUserId)) {
-        socket.emit('call:busy', { targetUserId, message: 'Người nhận đang trong cuộc gọi khác.' });
-        return;
-      }
+    // Lock Caller status on Redis atomically
+    const callerStateKey = `user:call_state:${userId}`;
+    const callerLocked = await redis.set(callerStateKey, 'IN_CALL', 'EX', 3600, 'NX');
+    if (!callerLocked) {
+      socket.emit('call:error', { reason: 'already_in_call', message: 'Bạn đang trong cuộc gọi khác.' });
+      return;
     }
 
     // Generate unique room name
     const roomName = generateRoomName(chatId);
 
-    // Lock: Register the call
-    activeCalls.set(roomName, {
-      callerId: userId,
-      callerName: userName,
-      callerAvatar: callerAvatar,
-      calleeId: callType === 'private' ? targetUserId : undefined,
-      chatId,
-      participants: new Set([userId]),
-      isVideo,
-      callType,
-      status: 'ringing',
-      createdAt: new Date(),
-    });
-
-    // Mark caller as in-call
-    userInCall.set(userId, roomName);
-
     if (callType === 'private' && targetUserId) {
-      // Send incoming call to specific callee via personal room
-      io.to(`user:${targetUserId}`).emit('call:incoming', {
-        roomName,
-        chatId,
+      // Private 1-1 Call
+      const calleeStateKey = `user:call_state:${targetUserId}`;
+      const calleeLocked = await redis.set(calleeStateKey, 'RINGING', 'EX', 45, 'NX');
+      if (!calleeLocked) {
+        // Callee is busy! Release caller lock
+        await redis.del(callerStateKey);
+        
+        socket.emit('call:busy', { targetUserId, message: 'Người nhận đang trong cuộc gọi khác.' });
+        
+        // Save missed call event
+        saveCallEventMessage(chatId, userId, 'call_missed', {
+          isVideo,
+          callerName: userName,
+        });
+
+        // Emit silent notification to callee
+        io.to(`user:${targetUserId}`).emit('call:silent_notification', {
+          chatId,
+          callerId: userId,
+          callerName: userName,
+          callerAvatar,
+          isVideo,
+          callType: 'private'
+        });
+        return;
+      }
+
+      // If callee is idle and successfully locked, proceed to register call
+      activeCalls.set(roomName, {
         callerId: userId,
         callerName: userName,
         callerAvatar: callerAvatar,
+        chatName,
+        chatAvatar,
+        calleeId: targetUserId,
+        chatId,
+        participants: new Set([userId]),
         isVideo,
         callType,
-        timestamp: new Date().toISOString(),
+        status: 'ringing',
+        createdAt: new Date(),
       });
-    } else {
-      // Group: broadcast to ALL online members of the chat via their PERSONAL rooms
-      // Optimized via gRPC
+
+      userInCall.set(userId, roomName);
+
       messagingGrpcClient.getParticipantIds(chatId)
         .then(participantIds => {
-          participantIds.forEach(memberId => {
-            if (memberId !== userId) {
-              io.to(`user:${memberId}`).emit('call:incoming', {
-                roomName,
-                chatId,
-                callerId: userId,
-                callerName: userName,
-                callerAvatar: callerAvatar,
-                isVideo,
-                callType,
-                timestamp: new Date().toISOString(),
-              });
-            }
-          });
+          if (participantIds.includes(targetUserId)) {
+            // Send incoming call to specific callee via personal room
+            io.to(`user:${targetUserId}`).emit('call:incoming', {
+              roomName,
+              chatId,
+              callerId: userId,
+              callerName: userName,
+              callerAvatar: callerAvatar,
+              chatName,
+              chatAvatar,
+              isVideo,
+              callType,
+              timestamp: new Date().toISOString(),
+            });
+          } else {
+            console.log(`[Call] Suppressing private call incoming to user ${targetUserId} because they are not an active chat/workspace member.`);
+          }
         })
         .catch(err => {
-          console.error(`[Call] gRPC Failed to fetch participants for group call fan-out:`, err);
+          console.error(`[Call] Failed to fetch participants for private call check:`, err);
         });
+    } else {
+      // Group Call: Ring only IDLE members, send silent notification to busy ones
+      try {
+        const participantIds = await messagingGrpcClient.getParticipantIds(chatId);
+        
+        const invitedMembers: string[] = [];
+        for (const memberId of participantIds) {
+          if (memberId === userId) continue;
+
+          const memberStateKey = `user:call_state:${memberId}`;
+          const memberLocked = await redis.set(memberStateKey, 'RINGING', 'EX', 45, 'NX');
+          if (memberLocked) {
+            invitedMembers.push(memberId);
+          } else {
+            // Member is busy, send silent notification
+            io.to(`user:${memberId}`).emit('call:silent_notification', {
+              chatId,
+              callerId: userId,
+              callerName: userName,
+              callerAvatar,
+              isVideo,
+              callType: 'group'
+            });
+          }
+        }
+
+        // If all group members are busy, abort call initiation
+        if (invitedMembers.length === 0 && participantIds.length > 1) {
+          await redis.del(callerStateKey);
+          socket.emit('call:error', { reason: 'all_busy', message: 'Tất cả mọi người trong nhóm đều đang bận.' });
+          return;
+        }
+
+        // Register the call
+        activeCalls.set(roomName, {
+          callerId: userId,
+          callerName: userName,
+          callerAvatar: callerAvatar,
+          chatName,
+          chatAvatar,
+          chatId,
+          participants: new Set([userId]),
+          isVideo,
+          callType,
+          status: 'ringing',
+          createdAt: new Date(),
+        });
+
+        userInCall.set(userId, roomName);
+
+        // Ring invited members
+        invitedMembers.forEach(memberId => {
+          io.to(`user:${memberId}`).emit('call:incoming', {
+            roomName,
+            chatId,
+            callerId: userId,
+            callerName: userName,
+            callerAvatar: callerAvatar,
+            chatName,
+            chatAvatar,
+            isVideo,
+            callType,
+            timestamp: new Date().toISOString(),
+          });
+        });
+      } catch (err) {
+        console.error(`[Call] Group call failed to fetch participants:`, err);
+        await redis.del(callerStateKey);
+        socket.emit('call:error', { reason: 'server_error', message: 'Không thể khởi tạo cuộc gọi nhóm.' });
+        return;
+      }
     }
     
     // Broadcast to chat room that an active call exists (for UI join button)
@@ -1653,14 +2186,16 @@ io.on('connection', async (socket: AuthenticatedSocket) => {
       callerId: userId,
       callerName: userName,
       callerAvatar: callerAvatar,
+      chatName,
+      chatAvatar,
       callType,
     });
 
     // Confirm to caller that the call is ringing
-    socket.emit('call:ringing', { roomName, chatId });
+    socket.emit('call:ringing', { roomName, chatId, callerId: userId, callerName: userName, callType });
 
     // Auto-cancel if no answer after 30s
-    const ringingTimeout = setTimeout(() => {
+    const ringingTimeout = setTimeout(async () => {
       const call = activeCalls.get(roomName);
       if (call && call.status === 'ringing') {
         console.log(`[Call] Ringing timeout for room ${roomName}`);
@@ -1669,17 +2204,24 @@ io.on('connection', async (socket: AuthenticatedSocket) => {
           reason: 'no_answer',
           message: 'Không có ai trả lời.',
         });
-        if (callType === 'private' && targetUserId) {
-          io.to(`user:${targetUserId}`).emit('call:ended', { roomName, reason: 'missed' });
-        } else {
-          socket.to(`chat:${chatId}`).emit('call:ended', { roomName, reason: 'missed' });
-        }
+        
+        // Notify members via their personal rooms
+        const participantIds = await messagingGrpcClient.getParticipantIds(chatId).catch(() => []);
+        participantIds.forEach(memberId => {
+          if (memberId !== userId) {
+            io.to(`user:${memberId}`).emit('call:ended', { roomName, reason: 'missed' });
+          }
+        });
+        
+        // Also emit to chat room for other listeners
+        io.to(`chat:${chatId}`).emit('call:ended', { roomName, reason: 'missed' });
+
         // Save missed call event to chat history
         saveCallEventMessage(chatId, userId, 'call_missed', {
           isVideo,
           callerName: userName,
         });
-        cleanupCall(roomName);
+        await cleanupCall(roomName);
       }
     }, RINGING_TIMEOUT_MS);
 
@@ -1724,6 +2266,11 @@ io.on('connection', async (socket: AuthenticatedSocket) => {
       call.calleeId = userId;
     }
 
+    // Set accepting user's Redis state to IN_CALL
+    await redis.set(`user:call_state:${userId}`, 'IN_CALL', 'EX', 3600).catch(() => {});
+    // Keep caller state as IN_CALL
+    await redis.set(`user:call_state:${call.callerId}`, 'IN_CALL', 'EX', 3600).catch(() => {});
+
     if (isFirstAccept) {
       saveCallEventMessage(call.chatId, call.callerId, 'call_started', {
         isVideo: call.isVideo,
@@ -1760,6 +2307,12 @@ io.on('connection', async (socket: AuthenticatedSocket) => {
           isVideo: call.isVideo,
           chatId: call.chatId,
         });
+
+        // Private call: save callee joined event
+        saveCallEventMessage(call.chatId, userId, 'call_participant_joined', {
+          isVideo: call.isVideo,
+          callerName: userName,
+        });
       } else {
         // Group: send token to new joiner
         socket.emit('call:start_info', {
@@ -1781,12 +2334,6 @@ io.on('connection', async (socket: AuthenticatedSocket) => {
             chatId: call.chatId,
           });
         }
-
-        // Member joined group call: save event
-        saveCallEventMessage(call.chatId, userId, 'call_participant_joined', {
-          isVideo: call.isVideo,
-          callerName: userName,
-        });
 
         // Notify others a new participant joined
         socket.to(`chat:${call.chatId}`).emit('call:participant_joined', {
@@ -1812,7 +2359,7 @@ io.on('connection', async (socket: AuthenticatedSocket) => {
   });
 
   // ─── Phase 2b: CALL DECLINED (Callee rejects) ───
-  socket.on('call:declined', (data) => {
+  socket.on('call:declined', async (data) => {
     const { roomName } = data;
     const call = activeCalls.get(roomName);
 
@@ -1820,27 +2367,40 @@ io.on('connection', async (socket: AuthenticatedSocket) => {
 
     console.log(`[Call] ${userName} declined call in room ${roomName}`);
 
-    io.to(`user:${call.callerId}`).emit('call:declined', {
-      roomName,
-      declinedById: userId,
-      declinedByName: userName,
+    // Clear declining user's call state in Redis
+    await redis.del(`user:call_state:${userId}`).catch(() => {});
+
+    // Notify all active participants (caller + any joined members) about the decline
+    call.participants.forEach((pId) => {
+      io.to(`user:${pId}`).emit('call:declined', {
+        roomName,
+        declinedById: userId,
+        declinedByName: userName,
+        callType: call.callType,
+      });
     });
 
-    // Save declined event to chat history
-    saveCallEventMessage(call.chatId, call.callerId, 'call_declined', {
-      isVideo: call.isVideo,
-      callerName: call.callerName,
-    });
-
-    cleanupCall(roomName);
+    if (call.callType === 'private') {
+      // Save declined event to chat history for private call
+      saveCallEventMessage(call.chatId, call.callerId, 'call_declined', {
+        isVideo: call.isVideo,
+        callerName: call.callerName,
+      });
+      cleanupCall(roomName);
+    } else {
+      console.log(`[Call] Group call in room ${roomName} remains active. ${userName} declined.`);
+    }
   });
 
   // ─── Phase 4: CALL ENDED / LEAVE ───
-  socket.on('call:ended', (data) => {
+  socket.on('call:ended', async (data) => {
     const { roomName, forceAll = false } = data;
     const call = activeCalls.get(roomName);
 
     if (!call) return;
+
+    // Clear active user's call state in Redis immediately
+    await redis.del(`user:call_state:${userId}`).catch(() => {});
 
     const duration = Math.round((Date.now() - call.createdAt.getTime()) / 1000);
 
@@ -1881,7 +2441,12 @@ io.on('connection', async (socket: AuthenticatedSocket) => {
           duration,
         });
       }
-      // Save call event message to chat history
+      // Save participant left event (who pressed end call)
+      saveCallEventMessage(call.chatId, userId, 'call_participant_left', {
+        isVideo: call.isVideo,
+        callerName: userName,
+      });
+      // Save call ended event to chat history
       saveCallEventMessage(call.chatId, call.callerId, 'call_ended', {
         isVideo: call.isVideo,
         duration,
@@ -1894,20 +2459,38 @@ io.on('connection', async (socket: AuthenticatedSocket) => {
     // ── GROUP CALL: User leaves, room stays alive ──
     console.log(`[Call] ${userName} left GROUP call in room ${roomName}`);
 
+    // Remove this participant from the tracking
+    const roomEmpty = removeParticipant(roomName, userId);
+
+    let newCallerId: string | undefined;
+    let newCallerName: string | undefined;
+
+    if (call.callerId === userId && !roomEmpty) {
+      // Host is leaving! Promote another participant.
+      const remainingIds = Array.from(call.participants);
+      if (remainingIds.length > 0) {
+        const nextId = remainingIds[0];
+        let nextName = 'Thành viên khác';
+        const sockets = await io.in(`user:${nextId}`).fetchSockets();
+        if (sockets.length > 0) {
+          const authSocket = sockets[0] as any;
+          nextName = authSocket.userName || 'Thành viên khác';
+        }
+        call.callerId = nextId;
+        call.callerName = nextName;
+        newCallerId = nextId;
+        newCallerName = nextName;
+        console.log(`[Call] Promoted new host for room ${roomName}: ${nextName} (${nextId})`);
+      }
+    }
+
     // Notify others that this user left
     socket.to(`chat:${call.chatId}`).emit('call:participant_left', {
       roomName,
       participantId: userId,
       participantName: userName,
-    });
-
-    // Remove this participant from the tracking
-    const roomEmpty = removeParticipant(roomName, userId);
-
-    // Save participant left event to history
-    saveCallEventMessage(call.chatId, userId, 'call_participant_left', {
-      isVideo: call.isVideo,
-      callerName: userName,
+      newCallerId,
+      newCallerName,
     });
 
     if (roomEmpty) {
@@ -1940,8 +2523,22 @@ io.on('connection', async (socket: AuthenticatedSocket) => {
     if (call.callType === 'private' && call.calleeId) {
       io.to(`user:${call.calleeId}`).emit('call:ended', { roomName, reason: 'cancelled' });
     } else {
-      socket.to(`chat:${call.chatId}`).emit('call:ended', { roomName, reason: 'cancelled' });
+      // Group call: broadcast to ALL group members via their PERSONAL user rooms
+      messagingGrpcClient.getParticipantIds(call.chatId)
+        .then(participantIds => {
+          participantIds.forEach(memberId => {
+            if (memberId !== userId) {
+              io.to(`user:${memberId}`).emit('call:ended', { roomName, reason: 'cancelled' });
+            }
+          });
+        })
+        .catch(err => {
+          console.error(`[Call] gRPC Failed to fetch participants for group call cancel:`, err);
+        });
     }
+
+    // Also notify chat room for other listeners (UI active status, etc.)
+    io.to(`chat:${call.chatId}`).emit('call:ended', { roomName, reason: 'cancelled' });
 
     // Save cancelled event to chat history
     saveCallEventMessage(call.chatId, call.callerId, 'call_cancelled', {
@@ -1955,6 +2552,9 @@ io.on('connection', async (socket: AuthenticatedSocket) => {
   // ─── CHECK ACTIVE CALL (Chat specific) ───
   socket.on('call:check', (data) => {
     const { chatId } = data;
+    // Self-healing: Cleanup any orphaned call sessions first
+    validateAndCleanupOrphanedCalls();
+
     // Find any active call in this chat
     const activeEntry = Array.from(activeCalls.entries()).find(([_, call]) => call.chatId === chatId);
     
@@ -1978,6 +2578,8 @@ io.on('connection', async (socket: AuthenticatedSocket) => {
   // ─── CHECK ACTIVE CALL (Global Sync for "Golden 30s") ───
   socket.on('call:check_active', () => {
     console.log(`[Call] ⚡ ${userName} (${userId}) requested global active call sync`);
+    // Self-healing: Cleanup any orphaned call sessions first
+    validateAndCleanupOrphanedCalls();
     
     // Find if there's any active call for this user
     // 1. Private call where user is the callee and it's still ringing
@@ -2004,6 +2606,8 @@ io.on('connection', async (socket: AuthenticatedSocket) => {
         callerId: call.callerId,
         callerName: call.callerName,
         callerAvatar: call.callerAvatar,
+        chatName: call.chatName,
+        chatAvatar: call.chatAvatar,
         isVideo: call.isVideo,
         callType: call.callType,
         status: call.status,
@@ -2036,7 +2640,13 @@ io.on('connection', async (socket: AuthenticatedSocket) => {
       if (!activeConversationId) {
         const convRes = await fetch(`${aiServiceUrl}/chat/conversations`, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'x-user-id': userId },
+          headers: {
+            'Content-Type': 'application/json',
+            'x-user-id': userId,
+            'x-user-role': socket.role || '',
+            'x-user-roles': JSON.stringify(socket.roles || [socket.role]),
+            'x-user-role-level': socket.roleLevel !== undefined ? String(socket.roleLevel) : '',
+          },
           body: JSON.stringify({ title: `Chat ${chatId}`, chatId }),
         });
         if (convRes.ok) {
@@ -2050,7 +2660,13 @@ io.on('connection', async (socket: AuthenticatedSocket) => {
       // Step 2: Call streaming RAG endpoint
       const streamRes = await fetch(`${aiServiceUrl}/chat/messages`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'x-user-id': userId },
+        headers: {
+          'Content-Type': 'application/json',
+          'x-user-id': userId,
+          'x-user-role': socket.role || '',
+          'x-user-roles': JSON.stringify(socket.roles || [socket.role]),
+          'x-user-role-level': socket.roleLevel !== undefined ? String(socket.roleLevel) : '',
+        },
         body: JSON.stringify({ conversationId: activeConversationId, message }),
       });
 
@@ -2125,6 +2741,9 @@ io.on('connection', async (socket: AuthenticatedSocket) => {
         headers: {
           'Content-Type': 'application/json',
           'x-user-id': userId,
+          'x-user-role': socket.role || '',
+          'x-user-roles': JSON.stringify(socket.roles || [socket.role]),
+          'x-user-role-level': socket.roleLevel !== undefined ? String(socket.roleLevel) : '',
         },
         body: JSON.stringify({
           conversationId: conversationId || null,
@@ -2187,6 +2806,24 @@ io.on('connection', async (socket: AuthenticatedSocket) => {
 
     console.log(`[WS] User disconnected: ${userName} (${userId})`);
 
+    const observedChannelId = (socket as any).observedChannelId as string | undefined;
+    if (observedChannelId) {
+      // Remove from global observer map
+      channelObservers.get(observedChannelId)?.delete(userId);
+      if (channelObservers.get(observedChannelId)?.size === 0) {
+        channelObservers.delete(observedChannelId);
+      }
+      io.to(`chat:${observedChannelId}`).emit('observer:left', {
+        channelId: observedChannelId,
+        adminId: userId
+      });
+      (socket as any).observedChannelId = undefined;
+      console.log(`[WS] Admin ${userName} disconnected — cleared observer on chat:${observedChannelId}`);
+    }
+
+    // Release disconnecting user's Redis call state immediately
+    await redis.del(`user:call_state:${userId}`).catch(() => {});
+
     // Cleanup active call on disconnect
     const roomName = userInCall.get(userId);
     if (roomName) {
@@ -2205,12 +2842,38 @@ io.on('connection', async (socket: AuthenticatedSocket) => {
           cleanupCall(roomName);
         } else {
           // Group: just remove participant, keep room alive if others remain
+          const roomEmpty = removeParticipant(roomName, userId);
+
+          let newCallerId: string | undefined;
+          let newCallerName: string | undefined;
+
+          if (call.callerId === userId && !roomEmpty) {
+            // Host disconnected! Promote another participant.
+            const remainingIds = Array.from(call.participants);
+            if (remainingIds.length > 0) {
+              const nextId = remainingIds[0];
+              let nextName = 'Thành viên khác';
+              const sockets = await io.in(`user:${nextId}`).fetchSockets();
+              if (sockets.length > 0) {
+                const authSocket = sockets[0] as any;
+                nextName = authSocket.userName || 'Thành viên khác';
+              }
+              call.callerId = nextId;
+              call.callerName = nextName;
+              newCallerId = nextId;
+              newCallerName = nextName;
+              console.log(`[Call] Promoted new host on disconnect for room ${roomName}: ${nextName} (${nextId})`);
+            }
+          }
+
           socket.to(`chat:${call.chatId}`).emit('call:participant_left', {
             roomName,
             participantId: userId,
             participantName: userName,
+            newCallerId,
+            newCallerName,
           });
-          const roomEmpty = removeParticipant(roomName, userId);
+
           if (roomEmpty) {
             io.to(`chat:${call.chatId}`).emit('call:ended', {
               roomName, reason: 'room_empty',
@@ -2264,6 +2927,9 @@ process.on('SIGINT', shutdown);
 async function start() {
   await setupRedisAdapter();
   await setupNats();
+
+  // Periodically cleanup orphaned calls every 30 seconds
+  setInterval(validateAndCleanupOrphanedCalls, 30000);
 
   httpServer.listen(PORT, () => {
     console.log('='.repeat(50));

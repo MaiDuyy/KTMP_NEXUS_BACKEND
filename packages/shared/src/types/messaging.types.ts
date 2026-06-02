@@ -32,7 +32,7 @@ export interface ThreadPreview {
 
 // ============= Mention Types =============
 
-export type MentionTargetType = 'USER' | 'HERE' | 'CHANNEL';
+export type MentionTargetType = 'USER' | 'HERE' | 'CHANNEL' | 'ALL' | 'AI';
 
 export interface Mention {
   id: string;

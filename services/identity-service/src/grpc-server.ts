@@ -41,11 +41,12 @@ export function startGrpcServer() {
         callback(null, { users: users.map(u => ({
           id: u.id,
           name: u.name,
-          email: (u as any).email || '',
+          email: u.email || '',
           avatar: u.avatar || '',
           status: u.status || '',
           isOnline: u.isOnline || false,
-          userStatus: u.userStatus || ''
+          userStatus: u.userStatus || '',
+          role: u.role || 'EMPLOYEE'
         })) });
       } catch (err) {
         logger.error({ err }, 'gRPC getUsersBatch failed');
@@ -120,6 +121,39 @@ export function startGrpcServer() {
         callback(null, result);
       } catch (err) {
         logger.error({ err }, 'gRPC validateWorkspaceQuota failed');
+        callback(err);
+      }
+    },
+
+    CheckUserDepartment: async (call: any, callback: any) => {
+      try {
+        const { userId, departmentId } = call.request;
+        const belongsToDepartment = await userService.checkUserDepartment(userId, departmentId);
+        callback(null, { belongsToDepartment });
+      } catch (err) {
+        logger.error({ err }, 'gRPC checkUserDepartment failed');
+        callback(err);
+      }
+    },
+
+    CheckWorkspaceAccess: async (call: any, callback: any) => {
+      try {
+        const { userId, workspaceId, departmentId, workspaceCreatedAt } = call.request;
+        const hasAccess = await userService.checkWorkspaceAccess(userId, workspaceId, departmentId || null, workspaceCreatedAt);
+        callback(null, { hasAccess });
+      } catch (err) {
+        logger.error({ err }, 'gRPC checkWorkspaceAccess failed');
+        callback(err);
+      }
+    },
+
+    GetUserRolesAndScopes: async (call: any, callback: any) => {
+      try {
+        const { userId } = call.request;
+        const result = await userService.getUserRolesAndScopes(userId);
+        callback(null, result);
+      } catch (err) {
+        logger.error({ err }, 'gRPC getUserRolesAndScopes failed');
         callback(err);
       }
     }

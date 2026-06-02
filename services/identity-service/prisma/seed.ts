@@ -101,6 +101,30 @@ const ROLE_PERMISSIONS: Record<string, string[]> = {
 };
 
 async function main() {
+  console.log('🌱 Skipping clearing database for safe/idempotent seed...');
+  /*
+  console.log('🧹 Clearing existing data from databases...');
+  
+  // Clear RBAC Database
+  await prismaRbac.userRole.deleteMany({}).catch(() => {});
+  await prismaRbac.rolePermission.deleteMany({}).catch(() => {});
+  await prismaRbac.departmentMember.deleteMany({}).catch(() => {});
+  await prismaRbac.departmentInvitation.deleteMany({}).catch(() => {});
+  await prismaRbac.department.deleteMany({}).catch(() => {});
+  await prismaRbac.groupMember.deleteMany({}).catch(() => {});
+  await prismaRbac.group.deleteMany({}).catch(() => {});
+  await prismaRbac.role.deleteMany({}).catch(() => {});
+  await prismaRbac.permission.deleteMany({}).catch(() => {});
+
+  // Clear UserOrg Database
+  await prismaUserOrg.invitation.deleteMany({}).catch(() => {});
+  await prismaUserOrg.account.deleteMany({}).catch(() => {});
+  await prismaUserOrg.organization.deleteMany({}).catch(() => {});
+
+  // Clear Auth Database
+  await prismaAuth.account.deleteMany({}).catch(() => {});
+  */
+
   console.log('🌱 Seeding RBAC database...');
 
   // Create permissions
@@ -176,55 +200,70 @@ async function main() {
   
   const DEFAULT_PASSWORD = await bcrypt.hash('123123', 10);
   const WORKSPACE_ID = 'ws-example-01';
+  const ORG_ID = 'main-org';
+
+  // Seed default Organization first to satisfy DB relation
+  console.log('Creating default organization...');
+  await prismaUserOrg.organization.upsert({
+    where: { id: ORG_ID },
+    update: {
+      name: 'Tổ chức Chính thức',
+      slug: 'chinh-thuc',
+      domain: 'gmail.com',
+      superAdminId: 'admin-0000-0000-0000-000000000000',
+    },
+    create: {
+      id: ORG_ID,
+      name: 'Tổ chức Chính thức',
+      slug: 'chinh-thuc',
+      domain: 'gmail.com',
+      superAdminId: 'admin-0000-0000-0000-000000000000',
+    }
+  });
 
   const accountsToSeed = [
     {
       id: 'admin-0000-0000-0000-000000000000',
-      name: 'System Admin',
-      email: 'admin@ott.com',
+      name: 'Phạm Mai Duy',
+      email: 'phammaiduy1207@gmail.com',
       number: '0900000001',
       role: 'SUPER_ADMIN',
       authRole: 'SUPER_ADMIN',
       orgRole: 'SUPER_ADMIN',
+      deptRole: 'HEAD',
+    },
+    {
+      id: 'mgr-0000-0000-0000-000000000000',
+      name: 'Phạm Mai Nhật',
+      email: 'phammainhat123@gmail.com',
+      number: '0900000002',
+      role: 'WORKSPACE_MANAGER',
+      authRole: 'WORKSPACE_MANAGER',
+      orgRole: 'WORKSPACE_MANAGER',
+      workspaceId: WORKSPACE_ID,
+      deptRole: 'MANAGER',
     },
     {
       id: 'emp1-0000-0000-0000-000000000000',
-      name: 'Employee One',
-      email: 'emp1@ott.com',
-      number: '0900000002',
-      role: 'EMPLOYEE',
-      authRole: 'EMPLOYEE',
-      orgRole: 'EMPLOYEE',
-      workspaceId: WORKSPACE_ID
-    },
-    {
-      id: 'emp2-0000-0000-0000-000000000000',
-      name: 'Employee Two',
-      email: 'emp2@ott.com',
+      name: 'Tiz Gaming',
+      email: 'tizgaming1207@gmail.com',
       number: '0900000003',
       role: 'EMPLOYEE',
       authRole: 'EMPLOYEE',
       orgRole: 'EMPLOYEE',
-      workspaceId: WORKSPACE_ID
+      workspaceId: WORKSPACE_ID,
+      deptRole: 'MEMBER',
     },
     {
-      id: 'emp3-0000-0000-0000-000000000000',
-      name: 'Employee Three',
-      email: 'emp3@ott.com',
+      id: 'emp2-0000-0000-0000-000000000000',
+      name: 'Duy Mai',
+      email: 'duyyymai@gmail.com',
       number: '0900000004',
       role: 'EMPLOYEE',
       authRole: 'EMPLOYEE',
       orgRole: 'EMPLOYEE',
-      workspaceId: WORKSPACE_ID
-    },
-    {
-      id: 'user-0000-0000-0000-000000000000',
-      name: 'Regular User',
-      email: 'user1@ott.com',
-      number: '0900000005',
-      role: 'EMPLOYEE',
-      authRole: 'EMPLOYEE',
-      orgRole: 'EMPLOYEE',
+      workspaceId: WORKSPACE_ID,
+      deptRole: 'MEMBER',
     }
   ];
 
@@ -258,6 +297,7 @@ async function main() {
         password: DEFAULT_PASSWORD,
         gender: 'MALE',
         role: acc.orgRole as any,
+        orgId: ORG_ID,
         isVerified: true
       }
     });
@@ -270,7 +310,7 @@ async function main() {
           userId_roleId_orgId_workspaceId: {
             userId: acc.id,
             roleId: roleRecord.id,
-            orgId: 'main-org',
+            orgId: ORG_ID,
             workspaceId: acc.workspaceId || 'personal',
           }
         },
@@ -278,7 +318,7 @@ async function main() {
         create: {
           userId: acc.id,
           roleId: roleRecord.id,
-          orgId: 'main-org',
+          orgId: ORG_ID,
           workspaceId: acc.workspaceId || 'personal',
           grantedBy: 'system'
         }
@@ -287,6 +327,48 @@ async function main() {
   }
 
   console.log(`✅ Seeded ${accountsToSeed.length} accounts across all databases`);
+
+  // ================= SEEDING DEPARTMENTS =================
+  console.log('\n🌱 Seeding department and memberships...');
+  const DEPT_ID = 'tech-dept-0000-0000-0000-000000000000';
+  await prismaRbac.department.upsert({
+    where: { id: DEPT_ID },
+    update: {
+      name: 'IT',
+      description: 'Nghiên cứu và phát triển phần mềm',
+      managerId: 'admin-0000-0000-0000-000000000000'
+    },
+    create: {
+      id: DEPT_ID,
+      name: 'IT',
+      description: 'Nghiên cứu và phát triển phần mềm',
+      managerId: 'admin-0000-0000-0000-000000000000'
+    }
+  });
+
+  for (const acc of accountsToSeed) {
+    if (acc.deptRole) {
+      await prismaRbac.departmentMember.upsert({
+        where: {
+          userId_departmentId: {
+            userId: acc.id,
+            departmentId: DEPT_ID
+          }
+        },
+        update: {
+          role: acc.deptRole,
+          isPrimary: true
+        },
+        create: {
+          userId: acc.id,
+          departmentId: DEPT_ID,
+          role: acc.deptRole,
+          isPrimary: true
+        }
+      });
+    }
+  }
+  console.log('✅ Department and memberships seeded successfully');
 
   console.log('\n🎉 Identity seeding complete!');
 }

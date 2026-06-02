@@ -25,6 +25,7 @@ const SERVICES = {
   AUDIT: process.env.IDENTITY_SERVICE_URL || 'http://localhost:3010',
   KNOWLEDGE: process.env.KNOWLEDGE_SERVICE_URL || 'http://localhost:3018',
   NOTIFICATION: process.env.NOTIFICATION_SERVICE_URL || 'http://localhost:3019',
+
   SPRING_AI: process.env.SPRING_AI_URL || 'http://localhost:8080',
   WS_GATEWAY: process.env.WS_GATEWAY_URL || 'http://localhost:3001',
 };
@@ -82,6 +83,11 @@ if (user) {
 
     if ((req as any).correlationId) {
       headers['x-correlation-id'] = (req as any).correlationId;
+    }
+
+    const forwardedFor = req.headers['x-forwarded-for'] as string || req.ip || req.socket.remoteAddress || '';
+    if (forwardedFor) {
+      headers['x-forwarded-for'] = forwardedFor;
     }
 
     const wsId = req.headers['x-workspace-id'] as string;
@@ -266,6 +272,12 @@ async function forwardStreamRequest(
     if (user) {
       headers['x-user-id'] = user.id;
       headers['x-user-role'] = user.role || '';
+      if (user.roles?.length) {
+        headers['x-user-roles'] = JSON.stringify(user.roles);
+      }
+      if (user.roleLevel !== undefined) {
+        headers['x-user-role-level'] = String(user.roleLevel);
+      }
     }
 
     if ((req as any).correlationId) {
@@ -377,6 +389,8 @@ router.put('/users/account', (req, res) => forwardRequest(req, res, SERVICES.USE
 router.put('/users/status', (req, res) => forwardRequest(req, res, SERVICES.USER, '/users/status'));
 router.put('/users/online-status', (req, res) => forwardRequest(req, res, SERVICES.USER, '/users/online-status'));
 router.post('/users/heartbeat', (req, res) => forwardRequest(req, res, SERVICES.USER, '/users/heartbeat'));
+router.post('/users/provision', roleMiddleware('SUPER_ADMIN', 'ADMIN', 'WORKSPACE_OWNER', 'WORKSPACE_ADMIN'), (req, res) =>
+  forwardRequest(req, res, SERVICES.USER, '/users/provision'));
 router.get('/users/devices', (req, res) => forwardRequest(req, res, SERVICES.USER, '/users/devices'));
 router.get('/users/directory', roleMiddleware('SUPER_ADMIN', 'ADMIN', 'WORKSPACE_ADMIN', 'WORKSPACE_MEMBER', 'EMPLOYEE'), (req, res) => {
   const query = new URLSearchParams(req.query as any).toString();
@@ -429,6 +443,9 @@ router.post('/users/:id/suspend', roleMiddleware('SUPER_ADMIN', 'ADMIN', 'WORKSP
   forwardRequest(req, res, SERVICES.USER, `/users/${req.params.id}/suspend`));
 router.post('/users/:id/unsuspend', roleMiddleware('SUPER_ADMIN', 'ADMIN', 'WORKSPACE_OWNER', 'WORKSPACE_ADMIN'), (req, res) => 
   forwardRequest(req, res, SERVICES.USER, `/users/${req.params.id}/unsuspend`));
+
+router.get('/users/:userId/departments', (req, res) => 
+  forwardRequest(req, res, SERVICES.IDENTITY, `/users/${req.params.userId}/departments`));
 
 // 6. Generic ID routes (Place these LAST)
 router.get('/users/:id', (req, res) => 
@@ -506,10 +523,11 @@ router.post('/workspaces/invites/:inviteId/resend', (req, res) =>
 router.get('/workspaces/invites/validate/:token', (req, res) => forwardRequest(req, res, SERVICES.IDENTITY, `/invitations/validate/${req.params.token}`));
 router.post('/workspaces/invites/accept', (req, res) => forwardRequest(req, res, SERVICES.IDENTITY, '/invitations/accept-body'));
 router.post('/workspaces/invites/join', (req, res) => forwardRequest(req, res, SERVICES.IDENTITY, '/invitations/join-body'));
+router.post('/workspaces/invites/reject', (req, res) => forwardRequest(req, res, SERVICES.IDENTITY, '/invitations/reject-body'));
 
 // Explicit Workspace Lifecycle Routes (Go to IDENTITY)
-router.post('/workspaces/:id/dissolve', roleMiddleware('SUPER_ADMIN', 'ADMIN'), (req, res) => forwardRequest(req, res, SERVICES.IDENTITY, `/workspaces/${req.params.id}/dissolve`));
-router.post('/workspaces/:id/restore', roleMiddleware('SUPER_ADMIN', 'ADMIN'), (req, res) => forwardRequest(req, res, SERVICES.IDENTITY, `/workspaces/${req.params.id}/restore`));
+router.post('/workspaces/:id/dissolve', roleMiddleware('SUPER_ADMIN', 'ADMIN', 'WORKSPACE_MANAGER', 'EMPLOYEE'), (req, res) => forwardRequest(req, res, SERVICES.IDENTITY, `/workspaces/${req.params.id}/dissolve`));
+router.post('/workspaces/:id/restore', roleMiddleware('SUPER_ADMIN', 'ADMIN', 'WORKSPACE_MANAGER', 'EMPLOYEE'), (req, res) => forwardRequest(req, res, SERVICES.IDENTITY, `/workspaces/${req.params.id}/restore`));
 router.post('/workspaces/:id/leave', (req, res) => forwardRequest(req, res, SERVICES.IDENTITY, `/workspaces/${req.params.id}/leave`));
 
 router.all(/^\/workspaces/, (req, res) => {
@@ -596,12 +614,21 @@ router.patch('/chats/tasks/:taskId/status', (req, res) =>
 router.delete('/chats/tasks/:taskId', (req, res) => 
   forwardRequest(req, res, SERVICES.MESSAGING, `/chats/tasks/${req.params.taskId}`));
 
+// ============= POLLS ROUTES → MESSAGING SERVICE =============
+router.post('/polls', (req, res) => forwardRequest(req, res, SERVICES.MESSAGING, '/polls'));
+router.get('/polls/:pollId', (req, res) => forwardRequest(req, res, SERVICES.MESSAGING, `/polls/${req.params.pollId}`));
+router.post('/polls/:pollId/vote', (req, res) => forwardRequest(req, res, SERVICES.MESSAGING, `/polls/${req.params.pollId}/vote`));
+router.post('/polls/:pollId/end', (req, res) => forwardRequest(req, res, SERVICES.MESSAGING, `/polls/${req.params.pollId}/end`));
+
 // ============= MESSAGE ROUTES → MESSAGING SERVICE =============
 
 router.get('/messages/:chatId', (req, res) => {
   const query = new URLSearchParams(req.query as any).toString();
   forwardRequest(req, res, SERVICES.MESSAGING, `/messages/${req.params.chatId}${query ? `?${query}` : ''}`);
 });
+router.post('/messages/forward', (req, res) => 
+  forwardRequest(req, res, SERVICES.MESSAGING, '/messages/forward'));
+
 router.post('/messages/:chatId', (req, res) => 
   forwardRequest(req, res, SERVICES.MESSAGING, `/messages/${req.params.chatId}`));
 router.delete('/messages/:messageId', (req, res) => 
@@ -614,7 +641,7 @@ router.put('/messages/:messageId/pin', (req, res) =>
   forwardRequest(req, res, SERVICES.MESSAGING, `/messages/${req.params.messageId}/pin`));
 router.get('/messages/:chatId/pinned', (req, res) => 
   forwardRequest(req, res, SERVICES.MESSAGING, `/messages/${req.params.chatId}/pinned`));
-router.get('/messages/:chatId/search', (req, res) => {
+router.get('/messages/:chatId/search', roleMiddleware('SUPER_ADMIN', 'ADMIN', 'WORKSPACE_ADMIN', 'WORKSPACE_MEMBER', 'EMPLOYEE'), (req, res) => {
   const query = new URLSearchParams(req.query as any).toString();
   forwardRequest(req, res, SERVICES.MESSAGING, `/messages/${req.params.chatId}/search${query ? `?${query}` : ''}`);
 });
@@ -716,19 +743,93 @@ router.post('/audit/reports', (req, res) => forwardRequest(req, res, SERVICES.AU
 // These proxy directly to the Spring Boot ai-knowledge service (API/DB)
 // eliminating the need for the Node.js knowledge-service.
 
+// Spring: MRP (Map-Reduce-Plan) & Wiki Review Pipeline
+router.post('/mrp/compile', roleMiddleware('SUPER_ADMIN', 'ADMIN', 'WORKSPACE_ADMIN'), (req, res) => {
+  const query = new URLSearchParams(req.query as any).toString();
+  return forwardRequest(req, res, SERVICES.SPRING_AI, `/api/mrp/compile${query ? `?${query}` : ''}`);
+});
+
+router.post('/mrp/plan/:planId/approve', roleMiddleware('SUPER_ADMIN', 'ADMIN', 'WORKSPACE_ADMIN'), (req, res) => {
+  const query = new URLSearchParams(req.query as any).toString();
+  return forwardRequest(req, res, SERVICES.SPRING_AI, `/api/mrp/plan/${req.params.planId}/approve${query ? `?${query}` : ''}`);
+});
+
+router.get('/mrp/plans', roleMiddleware('SUPER_ADMIN', 'ADMIN', 'WORKSPACE_ADMIN'), (req, res) => {
+  const query = new URLSearchParams(req.query as any).toString();
+  return forwardRequest(req, res, SERVICES.SPRING_AI, `/api/mrp/plans${query ? `?${query}` : ''}`);
+});
+
+router.get('/mrp/plans/:planId', roleMiddleware('SUPER_ADMIN', 'ADMIN', 'WORKSPACE_ADMIN'), (req, res) =>
+  forwardRequest(req, res, SERVICES.SPRING_AI, `/api/mrp/plans/${req.params.planId}`));
+
+router.get('/mrp/drafts', roleMiddleware('SUPER_ADMIN', 'ADMIN', 'WORKSPACE_ADMIN', 'WORKSPACE_MEMBER', 'EMPLOYEE'), (req, res) => {
+  const query = new URLSearchParams(req.query as any).toString();
+  return forwardRequest(req, res, SERVICES.SPRING_AI, `/api/mrp/drafts${query ? `?${query}` : ''}`);
+});
+
+router.get('/mrp/drafts/workspace/:workspaceId', roleMiddleware('SUPER_ADMIN', 'ADMIN', 'WORKSPACE_ADMIN', 'WORKSPACE_MEMBER', 'EMPLOYEE'), (req, res) =>
+  forwardRequest(req, res, SERVICES.SPRING_AI, `/api/mrp/drafts/workspace/${req.params.workspaceId}`));
+
+router.post('/mrp/drafts/:draftId/approve', roleMiddleware('SUPER_ADMIN', 'ADMIN', 'WORKSPACE_ADMIN'), (req, res) =>
+  forwardRequest(req, res, SERVICES.SPRING_AI, `/api/mrp/drafts/${req.params.draftId}/approve`));
+
+router.post('/mrp/drafts/:draftId/reject', roleMiddleware('SUPER_ADMIN', 'ADMIN', 'WORKSPACE_ADMIN'), (req, res) =>
+  forwardRequest(req, res, SERVICES.SPRING_AI, `/api/mrp/drafts/${req.params.draftId}/reject`));
+
+router.post('/mrp/drafts/:draftId/request-changes', roleMiddleware('SUPER_ADMIN', 'ADMIN', 'WORKSPACE_ADMIN'), (req, res) =>
+  forwardRequest(req, res, SERVICES.SPRING_AI, `/api/mrp/drafts/${req.params.draftId}/request-changes`));
+
+router.get('/mrp/wiki', roleMiddleware('SUPER_ADMIN', 'ADMIN', 'WORKSPACE_ADMIN', 'WORKSPACE_MEMBER', 'EMPLOYEE'), (req, res) => {
+  const query = new URLSearchParams(req.query as any).toString();
+  return forwardRequest(req, res, SERVICES.SPRING_AI, `/api/mrp/wiki${query ? `?${query}` : ''}`);
+});
+
+router.get('/mrp/wiki/metadata', roleMiddleware('SUPER_ADMIN', 'ADMIN', 'WORKSPACE_ADMIN', 'WORKSPACE_MEMBER', 'EMPLOYEE'), (req, res) => {
+  const query = new URLSearchParams(req.query as any).toString();
+  return forwardRequest(req, res, SERVICES.SPRING_AI, `/api/mrp/wiki/metadata${query ? `?${query}` : ''}`);
+});
+
+router.get(/^\/mrp\/wiki\/slug\/(.+)$/, roleMiddleware('SUPER_ADMIN', 'ADMIN', 'WORKSPACE_ADMIN', 'WORKSPACE_MEMBER', 'EMPLOYEE'), (req, res) => {
+  const slug = req.params[0];
+  const query = new URLSearchParams(req.query as any).toString();
+  return forwardRequest(req, res, SERVICES.SPRING_AI, `/api/mrp/wiki/slug/${slug}${query ? `?${query}` : ''}`);
+});
+
+router.get('/mrp/wiki/id/:id', roleMiddleware('SUPER_ADMIN', 'ADMIN', 'WORKSPACE_ADMIN', 'WORKSPACE_MEMBER', 'EMPLOYEE'), (req, res) =>
+  forwardRequest(req, res, SERVICES.SPRING_AI, `/api/mrp/wiki/id/${req.params.id}`));
+
+// Spring: Wiki Images
+router.post('/wiki/images/resolve', roleMiddleware('SUPER_ADMIN', 'ADMIN', 'WORKSPACE_ADMIN', 'WORKSPACE_MEMBER', 'EMPLOYEE'), (req, res) => {
+  return forwardRequest(req, res, SERVICES.SPRING_AI, '/api/wiki/images/resolve');
+});
+
+router.get('/wiki/images/raw/:id', roleMiddleware('SUPER_ADMIN', 'ADMIN', 'WORKSPACE_ADMIN', 'WORKSPACE_MEMBER', 'EMPLOYEE'), (req, res) => {
+  return forwardRequest(req, res, SERVICES.SPRING_AI, `/api/wiki/images/raw/${req.params.id}`);
+});
+
 // Spring: Document CRUD
-router.get('/documents', roleMiddleware('SUPER_ADMIN', 'ADMIN', 'WORKSPACE_ADMIN', 'WORKSPACE_MEMBER', 'EMPLOYEE'), (req, res) =>
-  forwardRequest(req, res, SERVICES.SPRING_AI, '/documents'));
+router.get('/documents', roleMiddleware('SUPER_ADMIN', 'ADMIN', 'WORKSPACE_ADMIN', 'WORKSPACE_MEMBER', 'EMPLOYEE'), (req, res) => {
+  const query = new URLSearchParams(req.query as any).toString();
+  return forwardRequest(req, res, SERVICES.SPRING_AI, `/documents${query ? `?${query}` : ''}`);
+});
 router.get('/documents/:id', roleMiddleware('SUPER_ADMIN', 'ADMIN', 'WORKSPACE_ADMIN', 'WORKSPACE_MEMBER', 'EMPLOYEE'), (req, res) =>
   forwardRequest(req, res, SERVICES.SPRING_AI, `/documents/${req.params.id}`));
-router.post('/documents/upload', roleMiddleware('SUPER_ADMIN', 'ADMIN', 'WORKSPACE_ADMIN'), (req, res) =>
-  forwardMultipartRequest(req, res, SERVICES.SPRING_AI, '/documents/upload'));
+router.get('/documents/:id/raw', roleMiddleware('SUPER_ADMIN', 'ADMIN', 'WORKSPACE_ADMIN', 'WORKSPACE_MEMBER', 'EMPLOYEE'), (req, res) =>
+  forwardMultipartRequest(req, res, SERVICES.SPRING_AI, `/documents/${req.params.id}/raw`));
+router.post('/documents/upload', roleMiddleware('SUPER_ADMIN', 'ADMIN', 'WORKSPACE_ADMIN'), (req, res) => {
+  const query = new URLSearchParams(req.query as any).toString();
+  return forwardMultipartRequest(req, res, SERVICES.SPRING_AI, `/documents/upload${query ? `?${query}` : ''}`);
+});
+router.post('/documents/:id/ingest', roleMiddleware('SUPER_ADMIN', 'ADMIN', 'WORKSPACE_ADMIN'), (req, res) =>
+  forwardRequest(req, res, SERVICES.SPRING_AI, `/documents/${req.params.id}/ingest`));
 router.delete('/documents/:id', roleMiddleware('SUPER_ADMIN', 'ADMIN'), (req, res) =>
   forwardRequest(req, res, SERVICES.SPRING_AI, `/documents/${req.params.id}`));
 router.patch('/documents/:id/metadata', roleMiddleware('SUPER_ADMIN', 'ADMIN'), (req, res) =>
   forwardRequest(req, res, SERVICES.SPRING_AI, `/documents/${req.params.id}/metadata`));
 router.post('/documents/:id/approve', roleMiddleware('SUPER_ADMIN', 'ADMIN'), (req, res) =>
   forwardRequest(req, res, SERVICES.SPRING_AI, `/documents/${req.params.id}/approve`));
+router.post('/documents/:id/ai-refactor', roleMiddleware('SUPER_ADMIN', 'ADMIN', 'WORKSPACE_ADMIN'), (req, res) =>
+  forwardRequest(req, res, SERVICES.SPRING_AI, `/documents/${req.params.id}/ai-refactor`));
 
 // Spring: Chunks & Stats
 router.get('/documents/:id/chunks', roleMiddleware('SUPER_ADMIN', 'ADMIN', 'WORKSPACE_ADMIN', 'WORKSPACE_MEMBER', 'EMPLOYEE'), (req, res) =>
@@ -754,8 +855,7 @@ router.delete('/chat/conversations/:id', roleMiddleware('SUPER_ADMIN', 'ADMIN', 
 router.post('/chat/messages', roleMiddleware('SUPER_ADMIN', 'ADMIN', 'WORKSPACE_MEMBER', 'EMPLOYEE'), (req, res) =>
   forwardStreamRequest(req, res, SERVICES.SPRING_AI, '/chat/messages'));
 
-// ============= AI AGENT ROUTES (Phase 2) =============
-// Streams SSE response from /agent/chat back to client
+// ============= AI AGENT ROUTES (Spring) =============
 router.post('/agent/chat', roleMiddleware('SUPER_ADMIN', 'ADMIN', 'WORKSPACE_MEMBER', 'EMPLOYEE'), (req, res) =>
   forwardStreamRequest(req, res, SERVICES.SPRING_AI, '/agent/chat'));
 router.get('/agent/health', (req, res) =>
@@ -852,6 +952,20 @@ router.delete('/notifications', (req, res) => {
   const userId = (req as any).user?.id;
   if (!userId) return res.status(401).json({ error: 'Unauthorized' });
   forwardRequest(req, res, SERVICES.NOTIFICATION, `/notifications/${userId}/all`, { method: 'DELETE' });
+});
+
+// Delete read notifications only
+router.delete('/notifications/read', (req, res) => {
+  const userId = (req as any).user?.id;
+  if (!userId) return res.status(401).json({ error: 'Unauthorized' });
+  forwardRequest(req, res, SERVICES.NOTIFICATION, `/notifications/${userId}/read`, { method: 'DELETE' });
+});
+
+// Delete notifications by category
+router.delete('/notifications/category/:type', (req, res) => {
+  const userId = (req as any).user?.id;
+  if (!userId) return res.status(401).json({ error: 'Unauthorized' });
+  forwardRequest(req, res, SERVICES.NOTIFICATION, `/notifications/${userId}/category/${req.params.type}`, { method: 'DELETE' });
 });
 
 router.post('/notifications/push-tokens', (req, res) => forwardRequest(req, res, SERVICES.NOTIFICATION, '/push-tokens'));

@@ -7,6 +7,7 @@ import { publishEvent, EventSubjects } from '../lib/nats.js';
 import { logger } from '../lib/logger.js';
 import { messageService } from './message.service.js';
 import { userorgClient } from '../lib/userorgClient.js';
+import { clearChatCache, clearChatMemberCache } from '../middleware/chatAccess.js';
 export class ChatService {
   /**
    * Lấy tổng số tin nhắn chưa đọc theo từng workspace
@@ -43,20 +44,90 @@ export class ChatService {
    * Lấy danh sách chat của user
    */
   async getChats(userId: string, type?: 'all' | 'private' | 'group', workspaceId?: string) {
-    const whereCondition: any = {
-      participants: {
-        some: {
-          accountId: userId,
-          hidden: false,
-        },
-      },
-      workspaceId: workspaceId || null, // Phân tách chat theo workspace
-    };
+    let whereCondition: any;
+    
+    let isAdmin = false;
+    let isSystemAdmin = false;
+    try {
+      const { globalRole } = await userorgClient.getUserRolesAndScopes(userId);
+      isSystemAdmin = ['SUPER_ADMIN', 'ADMIN'].includes(globalRole);
+      const isGlobalAdmin = ['SUPER_ADMIN', 'WORKSPACE_MANAGER', 'ADMIN'].includes(globalRole);
+      
+      let isWorkspaceAdmin = false;
+      if (workspaceId) {
+        const workspaceMember = await prisma.workspaceMember.findUnique({
+          where: { workspaceId_userId: { workspaceId, userId } },
+        });
+        isWorkspaceAdmin = workspaceMember ? ['WORKSPACE_OWNER', 'WORKSPACE_ADMIN'].includes(workspaceMember.role) : false;
+      }
+      isAdmin = isGlobalAdmin || isWorkspaceAdmin;
+    } catch (err) {
+      console.error('[ChatService] Failed to check admin role in getChats', err);
+    }
 
-    if (type === 'private') {
-      whereCondition.isGroup = false;
-    } else if (type === 'group') {
-      whereCondition.isGroup = true;
+    if (isAdmin) {
+      whereCondition = {
+        workspaceId: workspaceId || null,
+        OR: [
+          {
+            participants: {
+              some: {
+                accountId: userId,
+                hidden: false,
+              },
+            },
+          },
+          {
+            isGroup: true,
+            joinPolicy: 'PUBLIC',
+          },
+        ],
+      };
+
+      if (type === 'private') {
+        whereCondition.isGroup = false;
+        whereCondition.OR = [
+          {
+            participants: {
+              some: {
+                accountId: userId,
+                hidden: false,
+              },
+            },
+          }
+        ];
+      } else if (type === 'group') {
+        whereCondition.isGroup = true;
+        whereCondition.OR = [
+          {
+            participants: {
+              some: {
+                accountId: userId,
+                hidden: false,
+              },
+            },
+          },
+          {
+            joinPolicy: 'PUBLIC',
+          },
+        ];
+      }
+    } else {
+      whereCondition = {
+        participants: {
+          some: {
+            accountId: userId,
+            hidden: false,
+          },
+        },
+        workspaceId: workspaceId || null, // Phân tách chat theo workspace
+      };
+
+      if (type === 'private') {
+        whereCondition.isGroup = false;
+      } else if (type === 'group') {
+        whereCondition.isGroup = true;
+      }
     }
 
     const chats = await prisma.chat.findMany({
@@ -120,6 +191,7 @@ export class ChatService {
         notify: myParticipant?.notify ?? true,
         readed: myParticipant?.readed ?? false,
         isReadOnly: chat.isReadOnly,
+        workspaceId: chat.workspaceId,
         lastMessage: summary?.lastMessage || null,
         unreadCount: summary?.unreadCount || 0,
         participantIds: otherParticipants.map((p) => p.accountId),
@@ -172,16 +244,48 @@ export class ChatService {
     // Check user is participant
     const isParticipant = chat.participants.some((p) => p.accountId === userId);
     if (!isParticipant) {
-      // Fail-safe for public workspace channels: allow workspace members to view
-      if (chat.workspaceId && chat.joinPolicy === 'PUBLIC') {
+      const { globalRole } = await userorgClient.getUserRolesAndScopes(userId);
+      const isSystemAdmin = ['SUPER_ADMIN', 'ADMIN'].includes(globalRole);
+
+      if (isSystemAdmin && chat.isGroup && chat.workspaceId && chat.joinPolicy === 'PUBLIC') {
+        // Allow system admin to view all public workspace channels and groups (kênh/nhóm)
+      } else if (chat.workspaceId && chat.joinPolicy === 'PUBLIC') {
         const workspaceMember = await prisma.workspaceMember.findUnique({
           where: { workspaceId_userId: { workspaceId: chat.workspaceId, userId } }
         });
-        if (!workspaceMember) {
+        // Must be an active member (not left/kicked)
+        if (!workspaceMember || workspaceMember.leftAt !== null) {
           throw new Error('Bạn không có quyền xem chat này!');
         }
       } else {
         throw new Error('Bạn không có quyền xem chat này!');
+      }
+    }
+
+    // For workspace-scoped private DMs, verify both participants are still active workspace members
+    if (!chat.isGroup && chat.workspaceId) {
+      const { globalRole } = await userorgClient.getUserRolesAndScopes(userId);
+      const isSystemAdmin = ['SUPER_ADMIN', 'ADMIN'].includes(globalRole);
+
+      if (!isSystemAdmin) {
+        const partner = chat.participants.find(p => p.accountId !== userId);
+        if (partner) {
+          const activeMembers = await prisma.workspaceMember.findMany({
+            where: {
+              workspaceId: chat.workspaceId,
+              userId: { in: [userId, partner.accountId] },
+              leftAt: null,
+            },
+            select: { userId: true },
+          });
+          const activeMemberIds = activeMembers.map(m => m.userId);
+          if (!activeMemberIds.includes(userId)) {
+            throw new Error('Bạn không còn là thành viên của không gian làm việc này!');
+          }
+          if (!activeMemberIds.includes(partner.accountId)) {
+            throw new Error('Thành viên này đã rời khỏi không gian làm việc!');
+          }
+        }
       }
     }
 
@@ -227,6 +331,13 @@ export class ChatService {
       }
     }
 
+    const { globalRole } = await userorgClient.getUserRolesAndScopes(userId);
+    const isSystemAdmin = ['SUPER_ADMIN', 'ADMIN'].includes(globalRole);
+    let myRole = myParticipant?.role;
+    if (!myRole && isSystemAdmin && chat.isGroup && chat.workspaceId && chat.joinPolicy === 'PUBLIC') {
+      myRole = 'CHANNEL_OWNER';
+    }
+
     return {
       id: chat.id,
       name: chat.name,
@@ -240,7 +351,7 @@ export class ChatService {
       isFriend,
       pin: myParticipant?.pin || false,
       notify: myParticipant?.notify ?? true,
-      myRole: myParticipant?.role,
+      myRole,
       participants: chat.participants.map((p) => {
         const acc = accountMap.get(p.accountId);
         return {
@@ -266,8 +377,33 @@ export class ChatService {
     options?: { avatar?: string; joinPolicy?: 'PUBLIC' | 'PRIVATE' | 'APPROVAL' },
     workspaceId?: string
   ) {
-    if (!name || name.trim().length < 2) {
+    const trimmedName = name ? name.trim() : '';
+    if (!trimmedName || trimmedName.length < 2) {
       throw new Error('Tên nhóm phải có ít nhất 2 ký tự!');
+    }
+
+    // Check duplicate group name in the same scope (workspace or global)
+    const existingGroup = await prisma.chat.findFirst({
+      where: {
+        isGroup: true,
+        workspaceId: workspaceId || null,
+        name: {
+          equals: trimmedName,
+          mode: 'insensitive'
+        }
+      }
+    });
+
+    if (existingGroup) {
+      const error = new Error(
+        workspaceId 
+          ? 'Tên nhóm đã tồn tại trong Workspace này.' 
+          : 'Tên nhóm đã tồn tại trên hệ thống.'
+      );
+      (error as any).statusCode = 409;
+      (error as any).errorCode = 'DUPLICATE_GROUP_NAME';
+      (error as any).field = 'groupName';
+      throw error;
     }
 
     const uniqueMemberIds = [...new Set([userId, ...(memberIds || [])])];
@@ -277,17 +413,18 @@ export class ChatService {
       const workspaceMember = await prisma.workspaceMember.findUnique({
         where: { workspaceId_userId: { workspaceId, userId } }
       });
-      
-      if (!workspaceMember) {
+
+      // Must be an ACTIVE member (leftAt: null)
+      if (!workspaceMember || workspaceMember.leftAt !== null) {
         throw new Error('Bạn không phải là thành viên của Workspace này!');
       }
 
       if (workspaceMember.role === 'WORKSPACE_GUEST') {
         throw new Error('Khách (Guest) không có quyền tạo nhóm chat mới trong Workspace!');
       }
-      // Ensure all members belong to the workspace
+      // Ensure all members are active in the workspace
       const workspaceMembers = await prisma.workspaceMember.findMany({
-        where: { workspaceId, userId: { in: uniqueMemberIds } },
+        where: { workspaceId, userId: { in: uniqueMemberIds }, leftAt: null },
         select: { userId: true }
       });
       const inWorkspaceIds = workspaceMembers.map(m => m.userId);
@@ -362,6 +499,7 @@ export class ChatService {
       throw new Error('Không thể chat với chính mình!');
     }
 
+    // Find existing chat FIRST (before any workspace check)
     const existingChat = await prisma.chat.findFirst({
       where: {
         isGroup: false,
@@ -376,21 +514,17 @@ export class ChatService {
       },
     });
 
-    if (workspaceId) {
-      // Verify partner is in workspace
-      const partnerInWorkspace = await prisma.workspaceMember.findUnique({
-        where: { workspaceId_userId: { workspaceId, userId: partnerId } }
-      });
-      if (!partnerInWorkspace) {
-        throw new Error('Người nhận không thuộc Workspace này!');
-      }
-    }
-
+    // If chat already exists → allow access regardless of workspace membership
+    // (users can continue an existing DM even if the partner later left the workspace)
     if (existingChat) {
-      const myParticipant = existingChat.participants.find((p) => p.accountId === userId);
-      if (myParticipant?.hidden) {
-        await prisma.chatParticipant.update({
-          where: { id: myParticipant.id },
+      // Unhide for all hidden participants so that both sides can see the chat again on activity
+      const hiddenParticipantIds = existingChat.participants
+        .filter((p) => p.hidden)
+        .map((p) => p.id);
+
+      if (hiddenParticipantIds.length > 0) {
+        await prisma.chatParticipant.updateMany({
+          where: { id: { in: hiddenParticipantIds } },
           data: { hidden: false },
         });
       }
@@ -403,6 +537,17 @@ export class ChatService {
         },
         created: false,
       };
+    }
+
+    // No existing chat → creating a NEW one: only then enforce workspace membership
+    if (workspaceId) {
+      const partnerInWorkspace = await prisma.workspaceMember.findUnique({
+        where: { workspaceId_userId: { workspaceId, userId: partnerId } }
+      });
+      // Partner must be an ACTIVE member to start a brand-new workspace DM
+      if (!partnerInWorkspace || partnerInWorkspace.leftAt !== null) {
+        throw new Error('Người nhận không còn là thành viên của Workspace này!');
+      }
     }
 
     const newChat = await prisma.chat.create({
@@ -458,7 +603,39 @@ export class ChatService {
     }
 
     const updateData: any = {};
-    if (data.name !== undefined) updateData.name = data.name.trim();
+    if (data.name !== undefined) {
+      const trimmedName = data.name ? data.name.trim() : '';
+      if (!trimmedName || trimmedName.length < 2) {
+        throw new Error('Tên nhóm phải có ít nhất 2 ký tự!');
+      }
+
+      // Check duplicate group name excluding current group
+      const existingGroup = await prisma.chat.findFirst({
+        where: {
+          id: { not: chatId },
+          isGroup: true,
+          workspaceId: chat.workspaceId || null,
+          name: {
+            equals: trimmedName,
+            mode: 'insensitive'
+          }
+        }
+      });
+
+      if (existingGroup) {
+        const error = new Error(
+          chat.workspaceId 
+            ? 'Tên nhóm đã tồn tại trong Workspace này.' 
+            : 'Tên nhóm đã tồn tại trên hệ thống.'
+        );
+        (error as any).statusCode = 409;
+        (error as any).errorCode = 'DUPLICATE_GROUP_NAME';
+        (error as any).field = 'groupName';
+        throw error;
+      }
+
+      updateData.name = trimmedName;
+    }
     if (data.avatar !== undefined) updateData.avatar = data.avatar;
     if (data.joinPolicy !== undefined) {
       // Only Owner can change join policy
@@ -475,6 +652,8 @@ export class ChatService {
       where: { id: chatId },
       data: updateData,
     });
+
+    await clearChatCache(chatId);
 
     await publishEvent(EventSubjects.GROUP_UPDATED, {
       chatId,
@@ -535,10 +714,10 @@ export class ChatService {
       throw new Error('Bạn không có quyền thêm thành viên!');
     }
 
-        if (chat.workspaceId) {
-      // Ensure added members belong to the workspace
+    if (chat.workspaceId) {
+      // Ensure added members are ACTIVE in the workspace (not left/kicked)
       const workspaceMembers = await prisma.workspaceMember.findMany({
-        where: { workspaceId: chat.workspaceId, userId: { in: memberIds } },
+        where: { workspaceId: chat.workspaceId, userId: { in: memberIds }, leftAt: null },
         select: { userId: true }
       });
       const inWorkspaceIds = workspaceMembers.map(m => m.userId);
@@ -562,18 +741,22 @@ export class ChatService {
       })),
     });
 
+    for (const newMemberId of newMemberIds) {
+      await clearChatMemberCache(chatId, newMemberId);
+    }
+
     await prisma.chat.update({
       where: { id: chatId },
       data: { updatedAt: new Date() },
     });
 
-    for (const memberId of newMemberIds) {
-      await publishEvent(EventSubjects.GROUP_MEMBER_ADDED, {
-        chatId,
-        memberId,
-        addedBy: userId,
-      });
-    }
+    await publishEvent(EventSubjects.GROUP_MEMBER_ADDED, {
+      chatId,
+      addedMemberIds: newMemberIds,
+      allMemberIds: [...existingMemberIds, ...newMemberIds],
+      addedBy: userId,
+      memberId: newMemberIds[0], // legacy support
+    });
 
     logger.info({ chatId, addedCount: newMemberIds.length }, 'Members added');
 
@@ -637,6 +820,8 @@ export class ChatService {
       where: { id: targetParticipant.id },
     });
 
+    await clearChatMemberCache(chatId, memberId);
+
     // If Owner leaves, transfer to someone else
     if (userId === memberId && targetParticipant.role === 'CHANNEL_OWNER') {
       const remainingMembers = chat.participants.filter((p) => p.accountId !== memberId);
@@ -650,11 +835,18 @@ export class ChatService {
       }
     }
 
+    const remainingMemberIds = chat.participants
+      .map((p) => p.accountId)
+      .filter((id) => id !== memberId);
+
     await publishEvent(EventSubjects.GROUP_MEMBER_REMOVED, {
       chatId,
-      memberId,
+      userId: memberId,
       removedBy: userId,
       isSelfLeave: userId === memberId,
+      memberIds: remainingMemberIds,
+      reason: userId === memberId ? 'leave' : 'kick',
+      memberId, // legacy support
     });
 
     logger.info({ chatId, memberId, isSelfLeave: userId === memberId }, 'Member removed');
@@ -777,11 +969,15 @@ export class ChatService {
           role: 'CHANNEL_MEMBER',
         },
       });
+
+      await clearChatMemberCache(chatId, userId);
       
       await publishEvent(EventSubjects.GROUP_MEMBER_ADDED, {
         chatId,
-        memberId: userId,
+        addedMemberIds: [userId],
+        allMemberIds: chat.participants.map(p => p.accountId).concat([userId]),
         addedBy: 'SYSTEM_PUBLIC_JOIN',
+        memberId: userId, // legacy support
       });
       
       return { status: 'JOINED' };
@@ -837,10 +1033,14 @@ export class ChatService {
         })
       ]);
 
+      await clearChatMemberCache(chatId, targetAccountId);
+
       await publishEvent(EventSubjects.GROUP_MEMBER_ADDED, {
         chatId,
-        memberId: targetAccountId,
-        addedBy: userId
+        addedMemberIds: [targetAccountId],
+        allMemberIds: chat.participants.map(p => p.accountId).concat([targetAccountId]),
+        addedBy: userId,
+        memberId: targetAccountId, // legacy support
       });
     } else {
       await prisma.joinRequest.update({
@@ -972,19 +1172,24 @@ export class ChatService {
       throw new Error('Bạn không có quyền!');
     }
 
-    // Private chat: soft delete (hide)
+    // Private chat: soft delete (hide & clear history)
     if (!chat.isGroup) {
       await prisma.chatParticipant.update({
         where: { id: myParticipant.id },
-        data: { hidden: true },
+        data: { hidden: true, clearedAt: new Date() },
       });
 
       return { type: 'soft_delete' };
     }
 
-    // Group chat: only leader can hard delete
+    // Group chat: only leader can hard delete, other members do soft delete (hide & clear history)
     if (myParticipant.role !== 'CHANNEL_OWNER') {
-      throw new Error('Chỉ nhóm trưởng mới có thể xóa nhóm!');
+      await prisma.chatParticipant.update({
+        where: { id: myParticipant.id },
+        data: { hidden: true, clearedAt: new Date() },
+      });
+
+      return { type: 'soft_delete' };
     }
 
     const memberIds = chat.participants.map(p => p.accountId);
@@ -1032,8 +1237,10 @@ export class ChatService {
       }
     });
     if (!chat) return null;
+
     return {
       ...chat,
+      participants: chat.participants,
       participantCount: chat.participants.length
     };
   }

@@ -5,6 +5,7 @@ import { prisma } from '../lib/prisma.js';
 import { publishEvent, EventSubjects } from '../lib/nats.js';
 import { logger } from '../lib/logger.js';
 import type { ChannelType, ChannelMemberRole } from '@prisma/client';
+import { userorgClient } from '../lib/userorgClient.js';
 
 interface CreateChannelInput {
   name: string; description?: string; topic?: string;
@@ -34,6 +35,12 @@ export class ChannelService {
     const { name, description, topic, type, categoryId, isDefault } = data;
     if (!name || name.trim().length < 2) throw new Error('Tên channel phải có ít nhất 2 ký tự!');
 
+    const workspace = await prisma.workspace.findUnique({
+      where: { id: workspaceId },
+      select: { id: true, departmentId: true, createdAt: true },
+    });
+    if (!workspace) throw new Error('Không tìm thấy workspace!');
+
     const membership = await prisma.workspaceMember.findUnique({
       where: { workspaceId_userId: { workspaceId, userId } },
     });
@@ -41,14 +48,37 @@ export class ChannelService {
 
     const channelType = type || 'PUBLIC';
 
-    // Only WORKSPACE_OWNER and WORKSPACE_ADMIN can create any channel
-    const isAdminOrOwner = ['WORKSPACE_OWNER', 'WORKSPACE_ADMIN'].includes(membership.role);
-    if (!isAdminOrOwner)
-      throw new Error('Chỉ Admin hoặc Owner của workspace mới có thể tạo kênh!');
+    // 1. Check direct Workspace Manager / Owner roles
+    const isDirectAdminOrOwner = ['WORKSPACE_OWNER', 'WORKSPACE_ADMIN'].includes(membership.role);
 
-    // ANNOUNCEMENT channels require WORKSPACE_OWNER
-    if (channelType === 'ANNOUNCEMENT' && membership.role !== 'WORKSPACE_OWNER')
-      throw new Error('Chỉ Owner mới có thể tạo kênh Thông báo (ANNOUNCEMENT)!');
+    // 2. Fetch dynamic access scopes from identity-service via gRPC
+    const { globalRole, assignedWorkspaceIds, assignedDepartmentIds } = await userorgClient.getUserRolesAndScopes(userId);
+    const isSystemAdmin = ['SUPER_ADMIN', 'ADMIN'].includes(globalRole);
+    const isSystemWorkspaceManager = globalRole === 'WORKSPACE_MANAGER';
+    
+    const isAssigned = assignedWorkspaceIds.includes(workspace.id) || 
+                       (workspace.departmentId && assignedDepartmentIds.includes(workspace.departmentId));
+
+    const hasRbacAccess = isSystemAdmin || 
+                          (isSystemWorkspaceManager && isAssigned) ||
+                          isAssigned ||
+                          await userorgClient.checkWorkspaceAccess(userId, workspace.id, workspace.departmentId, workspace.createdAt.toISOString());
+
+    // 3. Grant access based on roles
+    if (isDirectAdminOrOwner || isSystemAdmin) {
+      // Workspace Owner / Workspace Admin / System Admin: full creation rights
+      if (channelType === 'ANNOUNCEMENT' && membership.role !== 'WORKSPACE_OWNER' && !isSystemAdmin) {
+        throw new Error('Chỉ Owner mới có thể tạo kênh Thông báo (ANNOUNCEMENT)!');
+      }
+    } else if (hasRbacAccess) {
+      // Trưởng phòng (DEPT_HEAD) / Dynamic Workspace Manager:
+      // Can only create PUBLIC channels, not PRIVATE or ANNOUNCEMENT
+      if (channelType !== 'PUBLIC') {
+        throw new Error('Trưởng phòng chỉ được phép tạo kênh công khai (PUBLIC)! Kênh riêng tư và Thông báo yêu cầu chủ sở hữu.');
+      }
+    } else {
+      throw new Error('Chỉ Admin hoặc Owner của bộ phận mới có thể tạo kênh!');
+    }
 
     const existing = await prisma.channel.findUnique({
       where: { workspaceId_name: { workspaceId, name: name.trim().toLowerCase() } },
@@ -145,7 +175,20 @@ export class ChannelService {
   }
 
   async archiveChannel(id: string, userId: string) {
-    await this.getChannelWithPermissionCheck(id, userId, ['CHANNEL_OWNER', 'CHANNEL_MODERATOR']);
+    const channel = await this.getChannelWithPermissionCheck(id, userId, ['CHANNEL_OWNER', 'CHANNEL_MODERATOR']);
+    
+    // Check if the user is a system admin or direct workspace admin
+    const workspaceMember = await prisma.workspaceMember.findUnique({
+      where: { workspaceId_userId: { workspaceId: channel.workspaceId, userId } },
+    });
+    const { globalRole } = await userorgClient.getUserRolesAndScopes(userId);
+    const isSystemAdmin = ['SUPER_ADMIN', 'ADMIN'].includes(globalRole);
+    const isDirectWorkspaceAdmin = workspaceMember && ['WORKSPACE_OWNER', 'WORKSPACE_ADMIN'].includes(workspaceMember.role);
+    
+    if (!isSystemAdmin && !isDirectWorkspaceAdmin) {
+      throw new Error('Chỉ Chủ sở hữu Workspace hoặc Trưởng hệ thống mới có quyền lưu trữ kênh!');
+    }
+
     const updated = await prisma.channel.update({
       where: { id }, data: { isArchived: true, archivedAt: new Date(), archivedBy: userId },
     });
@@ -159,7 +202,20 @@ export class ChannelService {
   }
 
   async unarchiveChannel(id: string, userId: string) {
-    await this.getChannelWithPermissionCheck(id, userId, ['CHANNEL_OWNER', 'CHANNEL_MODERATOR']);
+    const channel = await this.getChannelWithPermissionCheck(id, userId, ['CHANNEL_OWNER', 'CHANNEL_MODERATOR']);
+    
+    // Check if the user is a system admin or direct workspace admin
+    const workspaceMember = await prisma.workspaceMember.findUnique({
+      where: { workspaceId_userId: { workspaceId: channel.workspaceId, userId } },
+    });
+    const { globalRole } = await userorgClient.getUserRolesAndScopes(userId);
+    const isSystemAdmin = ['SUPER_ADMIN', 'ADMIN'].includes(globalRole);
+    const isDirectWorkspaceAdmin = workspaceMember && ['WORKSPACE_OWNER', 'WORKSPACE_ADMIN'].includes(workspaceMember.role);
+    
+    if (!isSystemAdmin && !isDirectWorkspaceAdmin) {
+      throw new Error('Chỉ Chủ sở hữu Workspace hoặc Trưởng hệ thống mới có quyền khôi phục lưu trữ kênh!');
+    }
+
     const updated = await prisma.channel.update({
       where: { id }, data: { isArchived: false, archivedAt: null, archivedBy: null },
     });
@@ -172,6 +228,19 @@ export class ChannelService {
 
   async deleteChannel(id: string, userId: string) {
     const channel = await this.getChannelWithPermissionCheck(id, userId, ['CHANNEL_OWNER']);
+    
+    // Check if the user is a system admin or direct workspace admin
+    const workspaceMember = await prisma.workspaceMember.findUnique({
+      where: { workspaceId_userId: { workspaceId: channel.workspaceId, userId } },
+    });
+    const { globalRole } = await userorgClient.getUserRolesAndScopes(userId);
+    const isSystemAdmin = ['SUPER_ADMIN', 'ADMIN'].includes(globalRole);
+    const isDirectWorkspaceAdmin = workspaceMember && ['WORKSPACE_OWNER', 'WORKSPACE_ADMIN'].includes(workspaceMember.role);
+    
+    if (!isSystemAdmin && !isDirectWorkspaceAdmin) {
+      throw new Error('Chỉ Chủ sở hữu Workspace hoặc Trưởng hệ thống mới có quyền xóa kênh!');
+    }
+
     await prisma.channel.delete({ where: { id } });
     // Mirror to Chat table
     await prisma.chat.delete({ where: { id } }).catch(() => null);
@@ -195,20 +264,31 @@ export class ChannelService {
     });
     if (!channel) throw new Error('Không tìm thấy channel!');
 
+    const { globalRole } = await userorgClient.getUserRolesAndScopes(userId);
+    const isSystemAdmin = ['SUPER_ADMIN', 'ADMIN'].includes(globalRole);
+
     const isMember = channel.members.some(m => m.userId === userId);
-    if (!isMember && channel.type !== 'PUBLIC') throw new Error('Bạn không có quyền xem channel này!');
+    const isPublic = channel.type === 'PUBLIC';
+    const isSystemAdminAndAnnouncement = isSystemAdmin && channel.type === 'ANNOUNCEMENT';
+    
+    if (!isMember && !isPublic && !isSystemAdminAndAnnouncement) {
+      throw new Error('Bạn không có quyền xem channel này!');
+    }
     return channel;
   }
 
   async listChannels(workspaceId: string, userId: string, includeArchived = false) {
+    const { globalRole } = await userorgClient.getUserRolesAndScopes(userId);
+    const isSystemAdmin = ['SUPER_ADMIN', 'ADMIN'].includes(globalRole);
+
     const membership = await prisma.workspaceMember.findUnique({
       where: { workspaceId_userId: { workspaceId, userId } },
     });
-    if (!membership) throw new Error('Bạn không phải thành viên của workspace này!');
+    if (!membership && !isSystemAdmin) throw new Error('Bạn không phải thành viên của workspace này!');
 
     const whereCondition: any = { workspaceId };
     if (!includeArchived) whereCondition.isArchived = false;
-    if (membership.role === 'WORKSPACE_GUEST') {
+    if (membership?.role === 'WORKSPACE_GUEST') {
       whereCondition.OR = [{ type: 'GUEST' }, { members: { some: { userId } } }];
     }
 
@@ -222,9 +302,21 @@ export class ChannelService {
       orderBy: [{ category: { position: 'asc' } }, { position: 'asc' }, { name: 'asc' }],
     });
 
-    return channels.map(ch => ({
-      ...ch, isMember: ch.members.length > 0, myMembership: ch.members[0] || null, memberCount: ch._count.members,
-    }));
+    return channels.map(ch => {
+      let myMembership = ch.members[0] || null;
+      const isPublicOrAnnouncement = ch.type === 'PUBLIC' || ch.type === 'ANNOUNCEMENT';
+      if (!myMembership && isSystemAdmin && isPublicOrAnnouncement) {
+        myMembership = {
+          role: 'CHANNEL_OWNER',
+          canPost: true,
+          isMuted: false,
+          isPinned: false
+        } as any;
+      }
+      return {
+        ...ch, isMember: ch.members.length > 0 || (isSystemAdmin && isPublicOrAnnouncement), myMembership, memberCount: ch._count.members,
+      };
+    });
   }
 
   async addMember(channelId: string, targetUserId: string, adderId: string) {
@@ -374,6 +466,14 @@ export class ChannelService {
   async canUserPost(channelId: string, userId: string): Promise<boolean> {
     const channel = await prisma.channel.findUnique({ where: { id: channelId }, include: { members: { where: { userId } } } });
     if (!channel || channel.isArchived) return false;
+
+    const { globalRole } = await userorgClient.getUserRolesAndScopes(userId);
+    const isSystemAdmin = ['SUPER_ADMIN', 'ADMIN'].includes(globalRole);
+
+    if (isSystemAdmin && (channel.type === 'PUBLIC' || channel.type === 'ANNOUNCEMENT')) {
+      return true;
+    }
+
     const member = channel.members[0];
     if (!member || member.role === 'CHANNEL_GUEST' || !member.canPost) return false;
     return true;
@@ -382,6 +482,14 @@ export class ChannelService {
   async canUserRead(channelId: string, userId: string): Promise<boolean> {
     const channel = await prisma.channel.findUnique({ where: { id: channelId }, include: { members: { where: { userId } } } });
     if (!channel) return false;
+
+    const { globalRole } = await userorgClient.getUserRolesAndScopes(userId);
+    const isSystemAdmin = ['SUPER_ADMIN', 'ADMIN'].includes(globalRole);
+
+    if (isSystemAdmin && (channel.type === 'PUBLIC' || channel.type === 'ANNOUNCEMENT')) {
+      return true;
+    }
+
     if (channel.type === 'PUBLIC') {
       const workspaceMember = await prisma.workspaceMember.findUnique({
         where: { workspaceId_userId: { workspaceId: channel.workspaceId, userId } },
@@ -401,13 +509,19 @@ export class ChannelService {
     const channel = await prisma.channel.findUnique({ where: { id: channelId }, include: { members: true } });
     if (!channel) throw new Error('Không tìm thấy channel!');
 
+    const { globalRole } = await userorgClient.getUserRolesAndScopes(userId);
+    const isSystemAdmin = ['SUPER_ADMIN', 'ADMIN'].includes(globalRole);
+    const isPublicOrAnnouncement = channel.type === 'PUBLIC' || channel.type === 'ANNOUNCEMENT';
+    if (isSystemAdmin && isPublicOrAnnouncement) return channel;
+
     const channelMember = channel.members.find(m => m.userId === userId);
     const workspaceMember = await prisma.workspaceMember.findUnique({
       where: { workspaceId_userId: { workspaceId: channel.workspaceId, userId } },
     });
     const hasPermission =
       (channelMember && requiredRoles.includes(channelMember.role)) ||
-      (workspaceMember && ['WORKSPACE_OWNER', 'WORKSPACE_ADMIN'].includes(workspaceMember.role));
+      (workspaceMember && ['WORKSPACE_OWNER', 'WORKSPACE_ADMIN'].includes(workspaceMember.role)) ||
+      isSystemAdmin;
     if (!hasPermission) throw new Error('Bạn không có quyền thực hiện hành động này!');
     return channel;
   }

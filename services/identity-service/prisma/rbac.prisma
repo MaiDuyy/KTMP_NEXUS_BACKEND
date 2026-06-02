@@ -91,17 +91,37 @@ model Department {
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 
-  parent   Department?  @relation("DepartmentHierarchy", fields: [parentId], references: [id])
-  children Department[] @relation("DepartmentHierarchy")
-  members  DepartmentMember[]
+  parent      Department?  @relation("DepartmentHierarchy", fields: [parentId], references: [id])
+  children    Department[] @relation("DepartmentHierarchy")
+  members     DepartmentMember[]
+  invitations DepartmentInvitation[]
 
   @@map("department")
+}
+
+model DepartmentInvitation {
+  id           String    @id @default(uuid())
+  departmentId String    @map("dept_id")
+  invitedEmail String    @map("invited_email")
+  role         String    @default("MEMBER") // 'HEAD', 'MANAGER', 'MEMBER', 'GUEST'
+  token        String    @unique @db.VarChar(64)
+  status       String    @default("PENDING") // 'PENDING', 'ACCEPTED', 'DECLINED', 'EXPIRED'
+  expiresAt    DateTime  @map("expires_at")
+  invitedBy    String    @map("invited_by")
+  acceptedBy   String?   @map("accepted_by")
+  acceptedAt   DateTime? @map("accepted_at")
+  createdAt    DateTime  @default(now()) @map("created_at")
+
+  department   Department @relation(fields: [departmentId], references: [id], onDelete: Cascade)
+
+  @@map("department_invitation")
 }
 
 model DepartmentMember {
   id           String   @id @default(uuid())
   userId       String
   departmentId String
+  role         String   @default("MEMBER")
   isPrimary    Boolean  @default(false)
   joinedAt     DateTime @default(now())
 

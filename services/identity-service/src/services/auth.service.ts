@@ -23,7 +23,14 @@ interface TokenPayload {
 }
 
 const generateToken = (userId: string, name: string, role: AccountRole, orgId?: string, rbacRoles?: string[], roleLevel?: number): string => {
-  const payload: TokenPayload = { sub: userId, name, role, orgId };
+  let finalRole = role;
+  if (rbacRoles?.includes('SUPER_ADMIN')) {
+    finalRole = 'SUPER_ADMIN';
+  } else if (rbacRoles?.includes('ADMIN')) {
+    finalRole = 'ADMIN';
+  }
+
+  const payload: TokenPayload = { sub: userId, name, role: finalRole, orgId };
   if (rbacRoles?.length) {
     payload.roles = rbacRoles;
     payload.roleLevel = roleLevel;
@@ -50,8 +57,24 @@ const generateRefreshToken = async (
   const jti = uuidv4();
   const fId = familyId || uuidv4();
 
+  let finalRole = role;
+  try {
+    const userRoles = await rbacPrisma.userRole.findMany({
+      where: { userId },
+      include: { role: true },
+    });
+    const rolesList = userRoles.map(ur => ur.role.name);
+    if (rolesList.includes('SUPER_ADMIN')) {
+      finalRole = 'SUPER_ADMIN';
+    } else if (rolesList.includes('ADMIN')) {
+      finalRole = 'ADMIN';
+    }
+  } catch (error) {
+    logger.warn({ error, userId }, 'Failed to check RBAC roles for refresh token generation');
+  }
+
   const token = jwt.sign(
-    { sub: userId, role, jti, fid: fId } as RefreshTokenClaims,
+    { sub: userId, role: finalRole, jti, fid: fId } as RefreshTokenClaims,
     authConfig.refreshSecret as string,
     { expiresIn: authConfig.refreshTokenExpiry as SignOptions["expiresIn"] }
   );
@@ -192,7 +215,7 @@ export class AuthService {
         role: role || 'EMPLOYEE',
         isVerified: false,
         isOnline: false,
-        maxWorkspaces: getQuotaByRole(role || 'EMPLOYEE'),
+        maxWorkspaces: null,
       },
     });
 
@@ -210,7 +233,7 @@ export class AuthService {
         location: newAccount.location,
         role: newAccount.role as any,
         isVerified: false,
-        maxWorkspaces: getQuotaByRole(newAccount.role || 'EMPLOYEE'),
+        maxWorkspaces: null,
       }
     }).catch(err => {
       logger.error({ err, userId: newAccount.id }, 'Failed to sync user to userorg schema');
@@ -281,14 +304,102 @@ export class AuthService {
     channelIds?: string[];
     type?: string;
     invitedBy?: string;
+    departmentId?: string;
+    departmentRole?: string;
   }) {
-    const { email, name, password, gender, role, workspaceId, orgId, channelIds, type, invitedBy } = data;
+    const { email, name, password, gender, role, workspaceId, orgId, channelIds, type, invitedBy, departmentId, departmentRole } = data;
 
     // 1. Check if email exists
     const existing = await authPrisma.account.findUnique({ where: { email } });
     if (existing) {
-      logger.warn({ email }, 'Attempted to create account from invitation but email already exists');
-      return existing;
+      logger.info({ email }, 'Account already exists, updating password and completing provisioning flow');
+      
+      const hashedPassword = await bcrypt.hash(password, 10);
+      
+      try {
+        await authPrisma.$transaction(async (tx) => {
+          await tx.account.update({
+            where: { id: existing.id },
+            data: {
+              password: hashedPassword,
+              name: name || existing.name,
+              gender: gender || existing.gender,
+              isVerified: true,
+            }
+          });
+        });
+        
+        await userorgPrisma.$transaction(async (tx) => {
+          await tx.account.update({
+            where: { id: existing.id },
+            data: {
+              password: hashedPassword,
+              name: name || existing.name,
+              gender: gender || (existing.gender as any),
+              isVerified: true,
+            }
+          });
+        });
+      } catch (err: any) {
+        logger.error({ err, email }, 'Failed to update provisioned password in transaction');
+        throw new Error('Không thể thiết lập mật khẩu do lỗi đồng bộ cơ sở dữ liệu. Vui lòng thử lại!');
+      }
+
+      // Generate Tokens for "Auto-Login"
+      const rbacRoles = [existing.role || 'EMPLOYEE'];
+      const roleLevel = 4; // Default level for members
+      const userPermissions: string[] = [];
+      
+      // Fetch actual roles if they exist to be accurate in JWT
+      const userRoles = await rbacPrisma.userRole.findMany({
+        where: { userId: existing.id },
+        include: { role: true },
+      });
+      const rolesList = userRoles.length > 0 ? userRoles.map((ur) => ur.role.name) : rbacRoles;
+      
+      // Fetch existing orgId from userorg schema
+      const userorgAccount = await userorgPrisma.account.findUnique({
+        where: { id: existing.id },
+        select: { orgId: true }
+      });
+      const activeOrgId = orgId || userorgAccount?.orgId || undefined;
+      const accessToken = generateToken(existing.id, name || existing.name, (existing.role || 'EMPLOYEE') as AccountRole, activeOrgId, rolesList, roleLevel);
+      const { token: refreshToken } = await generateRefreshToken(existing.id, (existing.role || 'EMPLOYEE') as AccountRole);
+      
+      // Save audit log
+      await auditLogService.createLog({
+        userId: existing.id,
+        action: 'SETUP_PASSWORD_PROVISION',
+        resource: 'account',
+        data: { email, completedAt: new Date() },
+        ipAddress: 'gateway-proxied',
+        status: 'SUCCESS',
+      }).catch(err => logger.warn({ err: err.message }, 'Failed to create provision password setup audit log'));
+
+      // Assign Department if provided and not already a member
+      if (departmentId) {
+        try {
+          const { departmentService } = await import('./org.service.js');
+          await departmentService.addMember(departmentId, existing.id, departmentRole || 'MEMBER');
+        } catch (err: any) {
+          logger.warn({ err: err.message, email, departmentId }, 'User might already be in department or failed to add');
+        }
+      }
+
+      return {
+        user: {
+          id: existing.id,
+          name: name || existing.name,
+          email,
+          role: existing.role,
+          orgId: activeOrgId || null,
+          isVerified: true,
+        },
+        accessToken,
+        refreshToken,
+        roles: rolesList,
+        permissions: userPermissions,
+      };
     }
 
     const hashedPassword = await bcrypt.hash(password, 10);
@@ -306,7 +417,7 @@ export class AuthService {
         gender: gender || 'other',
         role: accountRole,
         isVerified: true,
-        maxWorkspaces: getQuotaByRole(accountRole),
+        maxWorkspaces: null,
       },
     });
 
@@ -322,12 +433,22 @@ export class AuthService {
         role: accountRole as any,
         orgId: orgId || null,
         isVerified: true,
-        maxWorkspaces: getQuotaByRole(accountRole),
+        maxWorkspaces: null,
       }
     });
 
     // 4. Assign RBAC Role
     await assignRbacRole(userId, accountRole, 'INVITATION_SYSTEM');
+
+    // 4b. Assign Department if provided
+    if (departmentId) {
+      try {
+        const { departmentService } = await import('./org.service.js');
+        await departmentService.addMember(departmentId, userId, departmentRole || 'MEMBER');
+      } catch (err: any) {
+        logger.error({ err: err.message, userId, departmentId }, 'Failed to automatically assign department in createAccountFromInvitation');
+      }
+    }
 
     // 5. Notify messaging-service if needed (Sync via gRPC to avoid race condition)
     if (workspaceId) {
@@ -442,7 +563,7 @@ export class AuthService {
         gender,
         role: 'WORKSPACE_MANAGER',
         isVerified: true, // Auto-verify for organization creator? Or send OTP?
-        maxWorkspaces: getQuotaByRole('WORKSPACE_MANAGER'),
+        maxWorkspaces: null,
       },
     });
 
@@ -457,7 +578,7 @@ export class AuthService {
         role: 'WORKSPACE_MANAGER',
         orgId: organization.id,
         isVerified: true,
-        maxWorkspaces: getQuotaByRole('WORKSPACE_MANAGER'),
+        maxWorkspaces: null,
       },
     });
 
@@ -531,7 +652,7 @@ export class AuthService {
       where: { id: userId },
       data: { 
         role: 'WORKSPACE_MANAGER',
-        maxWorkspaces: getQuotaByRole('WORKSPACE_MANAGER')
+        maxWorkspaces: null
       },
     });
 
@@ -540,7 +661,7 @@ export class AuthService {
       data: { 
         role: 'WORKSPACE_MANAGER', 
         orgId: organization.id,
-        maxWorkspaces: getQuotaByRole('WORKSPACE_MANAGER')
+        maxWorkspaces: null
       },
     });
 

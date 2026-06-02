@@ -17,6 +17,7 @@ import { messageRoutes } from './routes/message.routes.js';
 import { chatRoutes } from './routes/chat.routes.js';
 import { workspaceRoutes } from './routes/workspace.routes.js';
 import { channelRoutes } from './routes/channel.routes.js';
+import { pollRoutes } from './routes/poll.routes.js';
 
 // Subscribers
 import { startFileSubscriber } from './subscribers/file.subscriber.js';
@@ -25,6 +26,8 @@ import { startUserSubscriber } from './subscribers/user.subscriber.js';
 import { startFriendSubscriber } from './subscribers/friend.subscriber.js';
 import { startOrganizationSubscriber } from './subscribers/organization.subscriber.js';
 import { startInvitationSubscriber } from './subscribers/invitation.subscriber.js';
+import { startDepartmentSubscriber } from './subscribers/department.subscriber.js';
+import { startWorkspaceRoleSubscriber } from './subscribers/workspace-role.subscriber.js';
 
 const app = express();
 const PORT = process.env.PORT || 3020;
@@ -66,6 +69,9 @@ app.use('/dashboard', dashboardRoutes);
 // Channel routes (from group-service) — includes /workspaces/:wsId/channels, /channels/:id, /categories/:id
 app.use('/', channelRoutes);
 
+// Poll routes — mounted at /polls
+app.use('/polls', pollRoutes);
+
 // Error handler
 app.use(errorHandler);
 
@@ -102,6 +108,8 @@ async function start() {
     startFriendSubscriber();
     startOrganizationSubscriber();
     startInvitationSubscriber();
+    startDepartmentSubscriber();
+    startWorkspaceRoleSubscriber();
     logger.info('NATS subscribers started');
 
     // Start gRPC server

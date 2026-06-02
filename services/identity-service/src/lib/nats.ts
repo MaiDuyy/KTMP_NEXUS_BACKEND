@@ -39,6 +39,9 @@ export const EventSubjects = {
   WORKSPACE_MEMBER_KICKED: 'workspace.member.kicked',
   WORKSPACE_QUOTA_UPDATED: 'workspace.quota.updated',
   WORKSPACE_INVITE_CREATED: 'workspace.invite.created',
+  WORKSPACE_INVITE_REJECTED: 'workspace.invite.rejected',
+  WORKSPACE_ROLE_ASSIGNED: 'workspace.role.assigned',
+  WORKSPACE_ROLE_REVOKED: 'workspace.role.revoked',
 
   // Admin events
   SYSTEM_BROADCAST: 'system.broadcast',
@@ -48,9 +51,10 @@ export const EventSubjects = {
   ORG_SETTINGS_UPDATED: 'admin.org.settings.updated',
   AUDIT_LOG_CREATED: 'admin.audit_log.created',
   INVITATION_ACCEPTED: 'invitation.accepted',
+  ORGANIZATION_CREATED: 'organization.created',
 
-
-   ORGANIZATION_CREATED: 'organization.created',
+  DEPARTMENT_MEMBER_ADDED: 'department.member.added',
+  DEPARTMENT_MEMBER_REMOVED: 'department.member.removed',
 } as const;
 
 export type EventSubject = typeof EventSubjects[keyof typeof EventSubjects];

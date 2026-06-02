@@ -19,12 +19,28 @@ export class TaskService {
       where: { chatId, accountId: creatorId }
     });
 
-    if (!participant || (participant.role !== 'CHANNEL_OWNER' && participant.role !== 'CHANNEL_MODERATOR')) {
-      throw new Error('Chỉ chủ sở hữu kênh hoặc quản trị kênh mới có quyền tạo kế hoạch!');
+    if (!participant) {
+      throw new Error('Bạn không có trong cuộc trò chuyện này!');
+    }
+
+    const chat = await prisma.chat.findUnique({
+      where: { id: chatId },
+      select: { isGroup: true }
+    });
+
+    // Only enforce owner/moderator role in group chats
+    if (chat?.isGroup) {
+      if (participant.role !== 'CHANNEL_OWNER' && participant.role !== 'CHANNEL_MODERATOR') {
+        throw new Error('Chỉ chủ sở hữu kênh hoặc quản trị kênh mới có quyền tạo kế hoạch!');
+      }
     }
 
     const deadline = data.deadlineAt ? new Date(data.deadlineAt) : null;
     const start = data.startAt ? new Date(data.startAt) : null;
+
+    if (start && deadline && start >= deadline) {
+      throw new Error('Thời gian bắt đầu phải trước thời gian hoàn thành (deadline)!');
+    }
 
     const task = await prisma.task.create({
       data: {
@@ -43,19 +59,23 @@ export class TaskService {
       }
     });
 
-    // 1. Thông báo ngay lập tức về việc tạo task
+    // 1. Lấy tất cả thành viên trong nhóm để gửi thông báo real-time
+    const participants = await prisma.chatParticipant.findMany({
+      where: { chatId },
+      select: { accountId: true }
+    });
+    const memberIds = participants.map(p => p.accountId);
+
+    // 2. Thông báo ngay lập tức về việc tạo task
     await publishEvent(EventSubjects.TASK_CREATED, {
-      taskId: task.id,
       chatId,
-      creatorId,
-      title: task.title,
-      deadlineAt: task.deadlineAt,
-      assigneeIds
+      task,
+      memberIds
     });
 
-    // 2. Lập lịch thông báo Cận Date (Delayed Message)
+    // 2. Lập lịch thông báo Cận Date (Delayed Message: trước 1h30p)
     if (task.deadlineAt) {
-      const notifyTime = new Date(task.deadlineAt.getTime() - 24 * 60 * 60 * 1000);
+      const notifyTime = new Date(task.deadlineAt.getTime() - (1 * 60 + 30) * 60 * 1000);
       const now = new Date();
 
       if (notifyTime > now) {
@@ -66,6 +86,8 @@ export class TaskService {
           chatId,
           title: task.title,
           assigneeIds,
+          assignedTo: assigneeIds,
+          deadline: task.deadlineAt.toISOString(),
           notifyAt: notifyTime.toISOString(),
           delayMs: notifyTime.getTime() - now.getTime()
         });
@@ -79,8 +101,8 @@ export class TaskService {
       const accountMap = await userorgClient.getUsers([creatorId]);
       const userName = accountMap.get(creatorId)?.name || 'Người dùng';
       await messageService.sendMessage(chatId, creatorId, {
-        content: `${userName} đã tạo kế hoạch: "${task.title}"`,
-        type: 'system'
+        content: task.id,
+        type: 'task'
       });
     } catch (e) {
       logger.error({ err: e }, 'Failed to send system message for task creation');
@@ -106,8 +128,15 @@ export class TaskService {
       where: { chatId: task.chatId, accountId: userId }
     });
 
-    if (!isAssignee && (!participant || participant.role === 'CHANNEL_MEMBER')) {
+    const isLeader = participant?.role === 'CHANNEL_OWNER' || participant?.role === 'CHANNEL_MODERATOR';
+
+    if (!isAssignee && !isLeader) {
       throw new Error('Bạn không có quyền cập nhật trạng thái này!');
+    }
+
+    // Check status rules: Member cannot cancel tasks
+    if (status === 'CANCELLED' && !isLeader) {
+      throw new Error('Chỉ chủ sở hữu kênh hoặc quản trị kênh mới có quyền hủy kế hoạch!');
     }
 
     const updatedTask = await prisma.task.update({
@@ -115,11 +144,19 @@ export class TaskService {
       data: { status }
     });
 
+    // Lấy tất cả thành viên trong nhóm để gửi thông báo real-time
+    const participants = await prisma.chatParticipant.findMany({
+      where: { chatId: task.chatId },
+      select: { accountId: true }
+    });
+    const memberIds = participants.map(p => p.accountId);
+
     await publishEvent(EventSubjects.TASK_UPDATED, {
       taskId,
       chatId: task.chatId,
       status,
-      updatedBy: userId
+      updatedBy: userId,
+      memberIds
     });
 
     // System Message: Task status updated
@@ -181,10 +218,27 @@ export class TaskService {
       throw new Error('Chỉ chủ sở hữu kênh hoặc quản trị kênh mới có quyền xóa kế hoạch!');
     }
 
-    // 2. Thực hiện xóa (Prisma Cascade sẽ tự xóa assignees nếu đã config)
-    return prisma.task.delete({
+    // 2. Lấy tất cả thành viên trong nhóm để gửi thông báo real-time
+    const participants = await prisma.chatParticipant.findMany({
+      where: { chatId },
+      select: { accountId: true }
+    });
+    const memberIds = participants.map(p => p.accountId);
+
+    // 3. Thực hiện xóa (Prisma Cascade sẽ tự xóa assignees nếu đã config)
+    const result = await prisma.task.delete({
       where: { id: taskId }
     });
+
+    // 4. Phát sự kiện xóa kế hoạch qua NATS
+    await publishEvent(EventSubjects.TASK_DELETED, {
+      taskId,
+      chatId,
+      deletedBy: userId,
+      memberIds
+    });
+
+    return result;
   }
 }
 

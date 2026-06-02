@@ -157,6 +157,74 @@ app.post('/upload/avatar', upload.single('file'), async (req, res) => {
   }
 });
 
+// ============= UPLOAD GROUP AVATAR =============
+
+app.post('/upload/group-avatar', upload.single('file'), async (req, res) => {
+  try {
+    const userId = req.headers['x-user-id'] as string;
+    const { chatId } = req.body;
+
+    if (!userId) {
+      return res.status(401).json({ success: false, message: 'Chưa đăng nhập!' });
+    }
+    if (!req.file) {
+      return res.status(400).json({ success: false, message: 'Vui lòng chọn file ảnh!' });
+    }
+    if (!ALLOWED_IMAGE_TYPES.includes(req.file.mimetype)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Chỉ chấp nhận file ảnh (jpg, jpeg, png, gif, webp)!',
+      });
+    }
+
+    // Upload via storage provider
+    const uploadResult = await storage.upload(req.file.buffer, {
+      folder: 'chat-app/group-avatars',
+      publicId: `group_avatar_${chatId || userId}_${Date.now()}`,
+      resourceType: 'image',
+      mimeType: req.file.mimetype,
+      transformation: [
+        { width: 400, height: 400, crop: 'fill', gravity: 'center' },
+        { quality: 'auto', format: 'webp' },
+      ],
+    });
+
+    // Save to database
+    await prisma.file.create({
+      data: {
+        id: uuidv4(),
+        userId,
+        chatId: chatId || null,
+        type: 'GROUP_AVATAR',
+        mimeType: req.file.mimetype,
+        url: uploadResult.url,
+        publicId: uploadResult.publicId,
+        size: req.file.size,
+      },
+    });
+
+    // Publish event
+    await publishEvent(EventSubjects.FILE_UPLOADED, {
+      userId,
+      chatId,
+      type: 'GROUP_AVATAR',
+      url: uploadResult.url,
+    });
+
+    logger.info({ userId, chatId }, 'Group avatar uploaded');
+
+    res.json({
+      success: true,
+      message: 'Upload avatar nhóm thành công!',
+      url: uploadResult.url,
+      publicId: uploadResult.publicId,
+    });
+  } catch (error: any) {
+    logger.error({ error: error.message }, 'Upload group avatar error');
+    res.status(500).json({ success: false, message: 'Lỗi upload avatar nhóm!' });
+  }
+});
+
 // ============= UPLOAD WORKSPACE ICON =============
 
 app.post('/upload/workspace-icon', upload.single('file'), async (req, res) => {
@@ -234,10 +302,6 @@ app.post('/upload/chat', upload.single('file'), async (req, res) => {
 
     if (!req.file) {
       return res.status(400).json({ success: false, message: 'Vui lòng chọn file!' });
-    }
-
-    if (!ALLOWED_FILE_TYPES.includes(req.file.mimetype)) {
-      return res.status(400).json({ success: false, message: 'Loại file không được hỗ trợ!' });
     }
 
     // Determine resource type
@@ -527,7 +591,7 @@ app.use((req, res) => {
   res.status(404).json({
     success: false,
     message: `File Service: ${req.method} ${req.path} not found`,
-    hint: req.method === 'GET' && ['/upload/chat', '/upload/avatar'].includes(req.path)
+    hint: req.method === 'GET' && ['/upload/chat', '/upload/avatar', '/upload/group-avatar'].includes(req.path)
       ? 'This endpoint only accepts POST requests with multipart/form-data'
       : undefined,
   });
