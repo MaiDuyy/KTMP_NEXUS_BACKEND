@@ -2,6 +2,7 @@
 export * from './userorg.types.js';
 export * from './rbac.types.js';
 export * from './messaging.types.js';
+export * from './voice.types.js';
 
 // User types
 export interface User {
