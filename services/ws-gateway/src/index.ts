@@ -11,6 +11,10 @@ import jwt from 'jsonwebtoken';
 import { connect, NatsConnection, JSONCodec } from 'nats';
 import { AccessToken } from 'livekit-server-sdk';
 import { messagingGrpcClient } from './messagingClient.js';
+import { RedisCallParticipantRegistry } from './calls/callRegistry.js';
+import { RedisVoiceLockService } from './voice/voiceLockService.js';
+import { getVoiceTurnTokenTtlSeconds, VoiceTurnTokenIssuer } from './voice/turnTokenService.js';
+import { VoiceTurnController } from './voice/voiceTurnController.js';
 
 // Redis client for call status and distributed locks
 
@@ -29,7 +33,29 @@ const NATS_URL = process.env.NATS_URL || 'nats://localhost:4222';
 const LIVEKIT_API_KEY = process.env.LIVEKIT_API_KEY || 'devkey';
 const LIVEKIT_API_SECRET = process.env.LIVEKIT_API_SECRET || 'secret';
 const LIVEKIT_URL = process.env.LIVEKIT_URL || 'ws://localhost:7880';
+const VOICE_SERVICE_PUBLIC_URL = process.env.VOICE_SERVICE_PUBLIC_URL || 'http://localhost:3035';
 const redis = new Redis(REDIS_URL);
+const callRegistry = new RedisCallParticipantRegistry(redis);
+const voiceLockService = new RedisVoiceLockService(redis);
+
+function createVoiceTurnTokenIssuer(): VoiceTurnTokenIssuer | null {
+  const secret = process.env.VOICE_TURN_TOKEN_SECRET;
+  if (!secret) {
+    if (process.env.NODE_ENV === 'production') {
+      throw new Error('VOICE_TURN_TOKEN_SECRET is required in production');
+    }
+
+    console.warn('[Voice] AI Voice turn control is disabled until VOICE_TURN_TOKEN_SECRET is configured');
+    return null;
+  }
+
+  return new VoiceTurnTokenIssuer({
+    secret,
+    ttlSeconds: getVoiceTurnTokenTtlSeconds(),
+  });
+}
+
+const voiceTurnTokenIssuer = createVoiceTurnTokenIssuer();
 // ============= TYPES =============
 
 interface AuthenticatedSocket extends Socket {
@@ -202,6 +228,10 @@ async function generateLiveKitToken(userId: string, userName: string, roomName: 
 async function cleanupCall(roomName: string) {
   const call = activeCalls.get(roomName);
   if (call) {
+    await voiceTurnController.cancelForCallCleanup(roomName).catch((error) => {
+      console.error('[Voice] Failed to cancel active voice turn during call cleanup:', error);
+    });
+
     // Notify chat that call ended
     io.to(`chat:${call.chatId}`).emit('chat:call_status', {
       chatId: call.chatId,
@@ -227,7 +257,17 @@ async function cleanupCall(roomName: string) {
     if (keysToDelete.length > 0) {
       await redis.del(...keysToDelete).catch(err => console.error('[Redis] cleanupCall del error:', err));
     }
+
+    await Promise.all(
+      Array.from(call.participants).map(async (participantId) => {
+        await io.in(`user:${participantId}`).socketsLeave(`call:${roomName}`);
+      }),
+    );
   }
+
+  await callRegistry.clear(roomName).catch((error) => {
+    console.error('[Voice] Failed to clear call participant registry:', error);
+  });
   
   activeCalls.delete(roomName);
   
@@ -240,13 +280,42 @@ async function cleanupCall(roomName: string) {
 }
 
 /** Remove a single participant from a group call. Returns true if room is now empty. */
-function removeParticipant(roomName: string, participantId: string): boolean {
+async function removeParticipant(roomName: string, participantId: string): Promise<boolean> {
   const call = activeCalls.get(roomName);
   if (!call) return true;
+  await voiceTurnController.cancelForParticipantDeparture(roomName, participantId).catch((error) => {
+    console.error('[Voice] Failed to cancel departing participant voice turn:', error);
+  });
   call.participants.delete(participantId);
   userInCall.delete(participantId);
+  await Promise.all([
+    callRegistry.removeParticipant(roomName, participantId),
+    io.in(`user:${participantId}`).socketsLeave(`call:${roomName}`),
+  ]).catch((error) => {
+    console.error('[Voice] Failed to remove call participant from registry:', error);
+  });
   console.log(`[Call] ${participantId} left room ${roomName}. Remaining: ${call.participants.size}`);
   return call.participants.size === 0;
+}
+
+async function synchronizeVoiceCallRegistry(roomName: string, call: ActiveCall): Promise<void> {
+  if (call.status !== 'active') {
+    return;
+  }
+
+  await callRegistry.setMeta({
+    meetingSessionId: roomName,
+    roomName,
+    chatId: call.chatId,
+    status: 'active',
+    updatedAt: new Date().toISOString(),
+  });
+  await Promise.all(
+    Array.from(call.participants).flatMap((participantId) => [
+      callRegistry.addParticipant(roomName, participantId),
+      io.in(`user:${participantId}`).socketsJoin(`call:${roomName}`),
+    ]),
+  );
 }
 
 /** Validate and cleanup any orphaned call sessions where all participants are offline */
@@ -355,6 +424,14 @@ const io = new SocketIOServer(httpServer, {
     maxDisconnectionDuration: 2 * 60 * 1000,
     skipMiddlewares: true,
   },
+});
+
+const voiceTurnController = new VoiceTurnController({
+  broadcaster: io,
+  callRegistry,
+  voiceLockService,
+  tokenIssuer: voiceTurnTokenIssuer,
+  voiceServicePublicUrl: VOICE_SERVICE_PUBLIC_URL,
 });
 
 // ============= REDIS ADAPTER (Optional) =============
@@ -2284,6 +2361,10 @@ io.on('connection', async (socket: AuthenticatedSocket) => {
     // Mark participant as in-call
     userInCall.set(userId, roomName);
 
+    await synchronizeVoiceCallRegistry(roomName, call).catch((error) => {
+      console.error('[Voice] Failed to synchronize active call participants:', error);
+    });
+
     try {
       // Generate token for the accepting/joining user
       const joinerToken = await generateLiveKitToken(userId, userName, roomName);
@@ -2353,7 +2434,7 @@ io.on('connection', async (socket: AuthenticatedSocket) => {
         cleanupCall(roomName);
       } else {
         // Group: just remove this participant, don't kill the room
-        removeParticipant(roomName, userId);
+        await removeParticipant(roomName, userId);
       }
     }
   });
@@ -2460,7 +2541,7 @@ io.on('connection', async (socket: AuthenticatedSocket) => {
     console.log(`[Call] ${userName} left GROUP call in room ${roomName}`);
 
     // Remove this participant from the tracking
-    const roomEmpty = removeParticipant(roomName, userId);
+    const roomEmpty = await removeParticipant(roomName, userId);
 
     let newCallerId: string | undefined;
     let newCallerName: string | undefined;
@@ -2547,6 +2628,47 @@ io.on('connection', async (socket: AuthenticatedSocket) => {
     });
 
     cleanupCall(roomName);
+  });
+
+  // ============= MEETING AI VOICE TURN CONTROL =============
+  // The data plane (audio/STT/TTS) is intentionally implemented in Voice Service later.
+  socket.on('voice:turn:start', (payload) => {
+    void voiceTurnController.start({ socket, userId, userName, payload }).catch((error) => {
+      console.error('[Voice] Failed to start voice turn:', error);
+      socket.emit('voice:error', {
+        meetingSessionId: typeof payload?.meetingSessionId === 'string' ? payload.meetingSessionId : '',
+        turnId: null,
+        code: 'VOICE_INTERNAL_ERROR',
+        message: 'Không thể khởi tạo lượt AI Voice.',
+        retryable: true,
+      });
+    });
+  });
+
+  socket.on('voice:turn:end', (payload) => {
+    void voiceTurnController.end({ socket, userId, userName, payload }).catch((error) => {
+      console.error('[Voice] Failed to end voice turn:', error);
+      socket.emit('voice:error', {
+        meetingSessionId: typeof payload?.meetingSessionId === 'string' ? payload.meetingSessionId : '',
+        turnId: typeof payload?.turnId === 'string' ? payload.turnId : null,
+        code: 'VOICE_INTERNAL_ERROR',
+        message: 'Không thể kết thúc lượt AI Voice.',
+        retryable: true,
+      });
+    });
+  });
+
+  socket.on('voice:turn:cancel', (payload) => {
+    void voiceTurnController.cancel({ socket, userId, userName, payload }).catch((error) => {
+      console.error('[Voice] Failed to cancel voice turn:', error);
+      socket.emit('voice:error', {
+        meetingSessionId: typeof payload?.meetingSessionId === 'string' ? payload.meetingSessionId : '',
+        turnId: typeof payload?.turnId === 'string' ? payload.turnId : null,
+        code: 'VOICE_INTERNAL_ERROR',
+        message: 'Không thể hủy lượt AI Voice.',
+        retryable: true,
+      });
+    });
   });
 
   // ─── CHECK ACTIVE CALL (Chat specific) ───
@@ -2842,7 +2964,7 @@ io.on('connection', async (socket: AuthenticatedSocket) => {
           cleanupCall(roomName);
         } else {
           // Group: just remove participant, keep room alive if others remain
-          const roomEmpty = removeParticipant(roomName, userId);
+          const roomEmpty = await removeParticipant(roomName, userId);
 
           let newCallerId: string | undefined;
           let newCallerName: string | undefined;
