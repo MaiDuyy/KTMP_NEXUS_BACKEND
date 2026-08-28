@@ -3,6 +3,9 @@ import { loadVoiceServiceConfig, type VoiceServiceConfig } from "./config.js";
 import { createVoiceHttpServer } from "./httpServer.js";
 import { createVoiceServiceLogger, type VoiceServiceLogger } from "./logger.js";
 import { createGracefulShutdown } from "./shutdown.js";
+import { Redis } from "ioredis";
+import { RedisTurnTokenReplayGuard } from "./turnTokenReplayGuard.js";
+import { VoiceTurnTokenVerifier } from "./turnTokenVerifier.js";
 
 export interface VoiceServiceInstance {
   config: VoiceServiceConfig;
@@ -14,11 +17,16 @@ export function createVoiceService(
   config: VoiceServiceConfig = loadVoiceServiceConfig(),
   logger: VoiceServiceLogger = createVoiceServiceLogger(config),
 ): VoiceServiceInstance {
-  const server = createVoiceHttpServer({ logger });
+  const redis = config.voiceTurnTokenSecret ? new Redis(config.redisUrl) : null;
+  const turnTokenVerifier = config.voiceTurnTokenSecret && redis
+    ? new VoiceTurnTokenVerifier({ secret: config.voiceTurnTokenSecret, replayGuard: new RedisTurnTokenReplayGuard(redis) })
+    : undefined;
+  const server = createVoiceHttpServer({ logger, turnTokenVerifier, onBatchAudio: async () => undefined });
   const shutdown = createGracefulShutdown({
     server,
     logger,
     timeoutMs: config.shutdownTimeoutMs,
+    onClose: () => redis?.disconnect(),
   });
   process.once("SIGINT", () => void shutdown("SIGINT"));
   process.once("SIGTERM", () => void shutdown("SIGTERM"));

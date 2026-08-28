@@ -9,6 +9,7 @@ export interface GracefulShutdownOptions {
   logger: VoiceServiceLogger;
   timeoutMs: number;
   exit?: (code: number) => void;
+  onClose?: () => Promise<void> | void;
 }
 
 function closeServer(server: ClosableServer): Promise<void> {
@@ -43,6 +44,7 @@ export function createGracefulShutdown(options: GracefulShutdownOptions): (signa
 
       try {
         await closeServer(options.server);
+        await options.onClose?.();
         clearTimeout(forceExit);
         options.logger.info({ signal }, "Voice service shutdown completed");
         exit(0);
