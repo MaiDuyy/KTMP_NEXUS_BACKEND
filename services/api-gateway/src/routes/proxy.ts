@@ -28,7 +28,42 @@ const SERVICES = {
 
   SPRING_AI: process.env.SPRING_AI_URL || 'http://localhost:8080',
   WS_GATEWAY: process.env.WS_GATEWAY_URL || 'http://localhost:3001',
+  VOICE: process.env.VOICE_SERVICE_URL || 'http://localhost:3035',
 };
+
+const MAX_VOICE_AUDIO_BYTES = 10 * 1024 * 1024;
+
+function forwardVoiceAudio(req: Request, res: Response, turnId: string): void {
+  const contentType = req.headers['content-type'];
+  const contentLength = Number(req.headers['content-length']);
+  if (!contentType || (!contentType.startsWith('audio/') && contentType !== 'application/octet-stream')) {
+    res.status(415).json({ code: 'VOICE_AUDIO_FORMAT_UNSUPPORTED' });
+    return;
+  }
+  if (!Number.isSafeInteger(contentLength) || contentLength <= 0 || contentLength > MAX_VOICE_AUDIO_BYTES) {
+    res.status(413).json({ code: 'VOICE_AUDIO_TOO_LARGE' });
+    return;
+  }
+
+  const target = new URL(`${SERVICES.VOICE}/v1/voice/turns/${encodeURIComponent(turnId)}/audio`);
+  const requestModule = target.protocol === 'https:' ? https : http;
+  const headers: Record<string, string> = { 'content-type': contentType, 'content-length': String(contentLength) };
+  if (typeof req.headers.authorization === 'string') headers.authorization = req.headers.authorization;
+  if (typeof req.headers['x-request-id'] === 'string') headers['x-request-id'] = req.headers['x-request-id'];
+
+  const proxyRequest = requestModule.request({
+    hostname: target.hostname, port: target.port, path: target.pathname, method: 'POST', headers, timeout: 60_000,
+  }, (proxyResponse) => {
+    res.status(proxyResponse.statusCode || 502);
+    if (proxyResponse.headers['content-type']) res.setHeader('content-type', proxyResponse.headers['content-type']);
+    proxyResponse.pipe(res);
+  });
+  proxyRequest.on('timeout', () => proxyRequest.destroy(new Error('voice upload timed out')));
+  proxyRequest.on('error', () => {
+    if (!res.headersSent) res.status(503).json({ code: 'VOICE_INTERNAL_ERROR' });
+  });
+  req.pipe(proxyRequest);
+}
 async function forwardRequest(
   req: Request,
   res: Response,
@@ -651,6 +686,9 @@ router.get('/messages/:chatId/media', (req, res) => {
 });
 
 // ============= FILE ROUTES =============
+
+// Voice audio is raw binary: keep it out of JSON/multipart forwarding paths.
+router.post('/voice/turns/:turnId/audio', (req, res) => forwardVoiceAudio(req, res, req.params.turnId));
 
 // Proxy all file upload/download routes to the FILE service
 // Express 5 uses {*rest} syntax for catch-all wildcards
