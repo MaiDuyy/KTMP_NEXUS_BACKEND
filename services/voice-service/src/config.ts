@@ -6,6 +6,11 @@ export interface VoiceServiceConfig {
   nodeEnv: string;
   redisUrl: string;
   voiceTurnTokenSecret: string | null;
+  googleCloudProject: string | null;
+  googleCloudLocation: string;
+  googleSttModel: string;
+  googleSttLanguage: string;
+  sttTimeoutMs: number;
 }
 
 const DEFAULT_PORT = 3035;
@@ -71,5 +76,10 @@ export function loadVoiceServiceConfig(env: NodeJS.ProcessEnv = process.env): Vo
     nodeEnv,
     redisUrl: readNonEmptyString(env.REDIS_URL, "redis://localhost:6379", "REDIS_URL"),
     voiceTurnTokenSecret: readOptionalVoiceTurnTokenSecret(env.VOICE_TURN_TOKEN_SECRET, nodeEnv),
+    googleCloudProject: env.GOOGLE_CLOUD_PROJECT || null,
+    googleCloudLocation: readNonEmptyString(env.GOOGLE_CLOUD_LOCATION, "asia-southeast1", "GOOGLE_CLOUD_LOCATION"),
+    googleSttModel: readNonEmptyString(env.GOOGLE_STT_MODEL, "chirp_2", "GOOGLE_STT_MODEL"),
+    googleSttLanguage: readNonEmptyString(env.GOOGLE_STT_LANGUAGE, "vi-VN", "GOOGLE_STT_LANGUAGE"),
+    sttTimeoutMs: readPositiveInteger(env.GOOGLE_STT_TIMEOUT_MS, 15_000, "GOOGLE_STT_TIMEOUT_MS"),
   };
 }

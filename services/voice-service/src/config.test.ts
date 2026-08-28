@@ -11,6 +11,8 @@ test("uses safe defaults without provider credentials", () => {
   assert.equal(config.logLevel, "info");
   assert.equal(config.redisUrl, "redis://localhost:6379");
   assert.equal(config.voiceTurnTokenSecret, null);
+  assert.equal(config.googleCloudLocation, "asia-southeast1");
+  assert.equal(config.googleSttLanguage, "vi-VN");
 });
 
 test("rejects invalid numeric configuration", () => {
