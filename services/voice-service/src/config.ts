@@ -4,6 +4,8 @@ export interface VoiceServiceConfig {
   shutdownTimeoutMs: number;
   logLevel: string;
   nodeEnv: string;
+  redisUrl: string;
+  voiceTurnTokenSecret: string | null;
 }
 
 const DEFAULT_PORT = 3035;
@@ -39,7 +41,24 @@ function readNonEmptyString(value: string | undefined, fallback: string, variabl
   return resolved;
 }
 
+function readOptionalVoiceTurnTokenSecret(value: string | undefined, nodeEnv: string): string | null {
+  if (value === undefined || value === "") {
+    if (nodeEnv === "production") {
+      throw new Error("VOICE_TURN_TOKEN_SECRET is required in production");
+    }
+
+    return null;
+  }
+
+  if (value.trim() !== value || value.length < 32) {
+    throw new Error("VOICE_TURN_TOKEN_SECRET must contain at least 32 non-whitespace characters");
+  }
+
+  return value;
+}
+
 export function loadVoiceServiceConfig(env: NodeJS.ProcessEnv = process.env): VoiceServiceConfig {
+  const nodeEnv = readNonEmptyString(env.NODE_ENV, "development", "NODE_ENV");
   return {
     host: readNonEmptyString(env.VOICE_SERVICE_HOST, "0.0.0.0", "VOICE_SERVICE_HOST"),
     port: readPositiveInteger(env.VOICE_SERVICE_PORT ?? env.PORT, DEFAULT_PORT, "VOICE_SERVICE_PORT"),
@@ -48,7 +67,9 @@ export function loadVoiceServiceConfig(env: NodeJS.ProcessEnv = process.env): Vo
       DEFAULT_SHUTDOWN_TIMEOUT_MS,
       "VOICE_SHUTDOWN_TIMEOUT_MS",
     ),
-    logLevel: readNonEmptyString(env.LOG_LEVEL, env.NODE_ENV === "production" ? "warn" : "info", "LOG_LEVEL"),
-    nodeEnv: readNonEmptyString(env.NODE_ENV, "development", "NODE_ENV"),
+    logLevel: readNonEmptyString(env.LOG_LEVEL, nodeEnv === "production" ? "warn" : "info", "LOG_LEVEL"),
+    nodeEnv,
+    redisUrl: readNonEmptyString(env.REDIS_URL, "redis://localhost:6379", "REDIS_URL"),
+    voiceTurnTokenSecret: readOptionalVoiceTurnTokenSecret(env.VOICE_TURN_TOKEN_SECRET, nodeEnv),
   };
 }
