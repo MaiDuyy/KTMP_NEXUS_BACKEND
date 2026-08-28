@@ -32,6 +32,19 @@ const REFRESH_LOCK_SCRIPT = `
   return 0
 `;
 
+const RELEASE_BY_OWNER_SCRIPT = `
+  local raw = redis.call('get', KEYS[1])
+  if not raw then
+    return 0
+  end
+
+  local lock = cjson.decode(raw)
+  if lock.turnId == ARGV[1] and lock.ownerUserId == ARGV[2] then
+    return redis.call('del', KEYS[1])
+  end
+  return 0
+`;
+
 function assertIdentifier(value: string, fieldName: string): string {
   if (
     typeof value !== 'string' ||
@@ -168,6 +181,28 @@ export class RedisVoiceLockService {
       1,
       getVoiceLockKey(handle.meetingSessionId),
       handle.lockValue,
+    );
+    return isRedisSuccessResult(result);
+  }
+
+  /**
+   * Releases only the current matching turn and user. This supports reconnect,
+   * call cleanup, and another Gateway instance without accepting a stale turn.
+   */
+  public async releaseByOwner(
+    meetingSessionId: string,
+    turnId: string,
+    ownerUserId: string,
+  ): Promise<boolean> {
+    assertIdentifier(meetingSessionId, 'meetingSessionId');
+    assertIdentifier(turnId, 'turnId');
+    assertIdentifier(ownerUserId, 'ownerUserId');
+    const result = await this.redis.eval(
+      RELEASE_BY_OWNER_SCRIPT,
+      1,
+      getVoiceLockKey(meetingSessionId),
+      turnId,
+      ownerUserId,
     );
     return isRedisSuccessResult(result);
   }
