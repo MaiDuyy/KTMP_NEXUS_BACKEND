@@ -16,6 +16,7 @@
   },
   "dependencies": {
     "@google-cloud/speech": "^8.0.1",
+    "@google-cloud/text-to-speech": "^6.0.0",
     "@ott/shared": "file:../../packages/shared",
     "ioredis": "^5.4.1",
     "jsonwebtoken": "^9.0.2",
