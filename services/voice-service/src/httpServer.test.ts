@@ -4,6 +4,7 @@ import { connect } from "node:net";
 import type { AddressInfo } from "node:net";
 import { createVoiceHttpServer } from "./httpServer.js";
 import type { VoiceServiceLogger } from "./logger.js";
+import type { VoiceTurnTokenVerifier } from "./turnTokenVerifier.js";
 
 const logger: VoiceServiceLogger = {
   info: () => undefined,
@@ -15,8 +16,9 @@ const logger: VoiceServiceLogger = {
 async function withServer(
   isReady: () => boolean,
   callback: (baseUrl: string, port: number) => Promise<void>,
+  options: Parameters<typeof createVoiceHttpServer>[0] = { logger },
 ): Promise<void> {
-  const server = createVoiceHttpServer({ logger, isReady });
+  const server = createVoiceHttpServer({ ...options, logger, isReady });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   const address = server.address() as AddressInfo;
 
@@ -33,6 +35,22 @@ test("returns health without configuration details", async () => {
     assert.equal(response.status, 200);
     assert.deepEqual(await response.json(), { status: "ok", service: "voice-service" });
   });
+});
+
+test("accepts bounded audio only after the turn token is consumed", async () => {
+  const uploads: unknown[] = [];
+  const verifier = {
+    verifyAndConsume: async () => ({ userId: "user-1", jti: "jti-1", meetingSessionId: "call-1", turnId: "turn-1", chatId: "chat-1", issuedAtSeconds: 1, expiresAtSeconds: 2 }),
+  } as unknown as VoiceTurnTokenVerifier;
+  await withServer(() => true, async (baseUrl) => {
+    const response = await fetch(`${baseUrl}/v1/voice/turns/turn-1/audio`, {
+      method: "POST",
+      headers: { authorization: "Bearer test", "content-type": "audio/webm", "content-length": "3" },
+      body: new Uint8Array([1, 2, 3]),
+    });
+    assert.equal(response.status, 202);
+    assert.equal(uploads.length, 1);
+  }, { logger, turnTokenVerifier: verifier, onBatchAudio: (upload) => { uploads.push(upload); } });
 });
 
 test("returns 503 when readiness is false", async () => {
