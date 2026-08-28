@@ -11,6 +11,9 @@ export interface VoiceServiceConfig {
   googleSttModel: string;
   googleSttLanguage: string;
   sttTimeoutMs: number;
+  googleTtsVoice: string;
+  googleTtsAudioEncoding: string;
+  googleTtsTimeoutMs: number;
 }
 
 const DEFAULT_PORT = 3035;
@@ -81,5 +84,8 @@ export function loadVoiceServiceConfig(env: NodeJS.ProcessEnv = process.env): Vo
     googleSttModel: readNonEmptyString(env.GOOGLE_STT_MODEL, "chirp_2", "GOOGLE_STT_MODEL"),
     googleSttLanguage: readNonEmptyString(env.GOOGLE_STT_LANGUAGE, "vi-VN", "GOOGLE_STT_LANGUAGE"),
     sttTimeoutMs: readPositiveInteger(env.GOOGLE_STT_TIMEOUT_MS, 15_000, "GOOGLE_STT_TIMEOUT_MS"),
+    googleTtsVoice: readNonEmptyString(env.GOOGLE_TTS_VOICE, "vi-VN-Chirp3-HD-Charon", "GOOGLE_TTS_VOICE"),
+    googleTtsAudioEncoding: readNonEmptyString(env.GOOGLE_TTS_AUDIO_ENCODING, "LINEAR16", "GOOGLE_TTS_AUDIO_ENCODING"),
+    googleTtsTimeoutMs: readPositiveInteger(env.GOOGLE_TTS_TIMEOUT_MS, 15_000, "GOOGLE_TTS_TIMEOUT_MS"),
   };
 }
