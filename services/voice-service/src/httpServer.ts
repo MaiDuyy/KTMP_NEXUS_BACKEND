@@ -1,4 +1,5 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
+import { createHash, timingSafeEqual } from 'node:crypto';
 import type { VoiceServiceLogger } from "./logger.js";
 import { readBatchAudioUpload, type BatchAudioUpload } from "./audioUpload.js";
 import type { VoiceTurnTokenVerifier } from "./turnTokenVerifier.js";
@@ -8,6 +9,15 @@ export interface VoiceHttpServerOptions {
   isReady?: () => boolean;
   turnTokenVerifier?: VoiceTurnTokenVerifier;
   onBatchAudio?: (upload: BatchAudioUpload) => Promise<void> | void;
+  internalServiceKey?: string | null;
+  onMeetingCleanup?: (meetingSessionId: string, cleanupId: string) => Promise<void>;
+}
+
+function internalAuthorized(request: IncomingMessage, expected?: string | null): boolean {
+  const provided = request.headers['x-voice-internal-service-key'];
+  if (!expected || typeof provided !== 'string') return false;
+  const digest = (value: string) => createHash('sha256').update(value, 'utf8').digest();
+  return timingSafeEqual(digest(provided), digest(expected));
 }
 
 function writeJson(response: ServerResponse, statusCode: number, body: Record<string, unknown>): void {
@@ -24,9 +34,35 @@ async function handleRequest(
   isReady: () => boolean,
   turnTokenVerifier?: VoiceTurnTokenVerifier,
   onBatchAudio?: (upload: BatchAudioUpload) => Promise<void> | void,
+  internalServiceKey?: string | null,
+  onMeetingCleanup?: (meetingSessionId: string, cleanupId: string) => Promise<void>,
 ): Promise<void> {
   if (request.method === "GET" && request.url === "/healthz") {
     writeJson(response, 200, { status: "ok", service: "voice-service" });
+    return;
+  }
+
+  const cleanupMatch = request.url?.match(/^\/internal\/voice\/meetings\/([^/]+)\/cleanup$/);
+  if (request.method === 'POST' && cleanupMatch) {
+    if (!internalAuthorized(request, internalServiceKey)) {
+      writeJson(response, 401, { code: 'VOICE_INTERNAL_UNAUTHORIZED' });
+      return;
+    }
+    if (!onMeetingCleanup) {
+      writeJson(response, 503, { code: 'VOICE_INTERNAL_ERROR' });
+      return;
+    }
+    const cleanupId = request.headers['x-voice-cleanup-id'];
+    if (typeof cleanupId !== 'string' || cleanupId.length === 0 || cleanupId.length > 256) {
+      writeJson(response, 400, { code: 'VOICE_INTERNAL_ERROR' });
+      return;
+    }
+    try {
+      await onMeetingCleanup(decodeURIComponent(cleanupMatch[1]), cleanupId);
+      writeJson(response, 200, { status: 'cleaned' });
+    } catch {
+      writeJson(response, 503, { code: 'VOICE_INTERNAL_ERROR' });
+    }
     return;
   }
 
@@ -61,7 +97,15 @@ async function handleRequest(
 
 export function createVoiceHttpServer(options: VoiceHttpServerOptions): Server {
   const isReady = options.isReady ?? (() => true);
-  const server = createServer((request, response) => void handleRequest(request, response, isReady, options.turnTokenVerifier, options.onBatchAudio));
+  const server = createServer((request, response) => void handleRequest(
+    request,
+    response,
+    isReady,
+    options.turnTokenVerifier,
+    options.onBatchAudio,
+    options.internalServiceKey,
+    options.onMeetingCleanup,
+  ));
 
   server.on("clientError", (_error, socket) => {
     options.logger.warn("Rejected malformed HTTP request");

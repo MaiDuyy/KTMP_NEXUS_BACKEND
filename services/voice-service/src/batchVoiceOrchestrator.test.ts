@@ -132,3 +132,24 @@ test('does not emit a stale terminal event after Gateway reports expired ownersh
   await new Promise((resolve) => setTimeout(resolve, 25));
   assert.deepEqual(events, []);
 });
+
+test('cancels every active stage by meeting and rejects enqueue after meeting end', async () => {
+  let sttAborted = false;
+  const { orchestrator, events } = fixture({
+    stt: {
+      transcribe: async (_audio, _mimeType, signal) => new Promise((_resolve, reject) => {
+        signal?.addEventListener('abort', () => {
+          sttAborted = true;
+          reject(new BatchSttError('VOICE_CANCELLED'));
+        }, { once: true });
+      }),
+    },
+  });
+
+  assert.equal(orchestrator.enqueue(upload()), true);
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  await orchestrator.cancelMeeting('call-1');
+  assert.equal(sttAborted, true);
+  assert.deepEqual(events.map(({ kind }) => kind), ['state']);
+  assert.equal(orchestrator.enqueue(upload()), false);
+});

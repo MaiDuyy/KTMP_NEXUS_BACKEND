@@ -14,6 +14,7 @@ import { GoogleBatchSttAdapter } from './batchStt.js';
 import { GoogleBatchTtsAdapter } from './batchTts.js';
 import { MeetingAiClient, VoiceControlClient } from './internalClients.js';
 import { BatchVoiceOrchestrator } from './batchVoiceOrchestrator.js';
+import { MeetingCleanupCoordinator } from './meetingCleanupCoordinator.js';
 
 export interface VoiceServiceInstance {
   config: VoiceServiceConfig;
@@ -44,6 +45,13 @@ export function createVoiceService(
     config.livekitApiKey &&
     config.livekitApiSecret,
   );
+  const meetingAiClient = config.meetingAiInternalUrl && config.meetingAiInternalServiceKey
+    ? new MeetingAiClient(
+      config.meetingAiInternalUrl,
+      config.meetingAiInternalServiceKey,
+      config.meetingAiTimeoutMs,
+    )
+    : null;
   const orchestrator = pipelineConfigured
     ? new BatchVoiceOrchestrator({
       stt: new GoogleBatchSttAdapter({
@@ -53,11 +61,7 @@ export function createVoiceService(
         languageCode: config.googleSttLanguage,
         timeoutMs: config.sttTimeoutMs,
       }),
-      ai: new MeetingAiClient(
-        config.meetingAiInternalUrl!,
-        config.meetingAiInternalServiceKey!,
-        config.meetingAiTimeoutMs,
-      ),
+      ai: meetingAiClient!,
       tts: new GoogleBatchTtsAdapter({
         projectId: config.googleCloudProject!,
         location: config.googleCloudLocation,
@@ -74,11 +78,24 @@ export function createVoiceService(
       timeoutMs: config.pipelineTimeoutMs,
     })
     : null;
+  const meetingCleanupCoordinator = meetingAiClient
+    ? new MeetingCleanupCoordinator({
+      orchestrator,
+      publisher: meetingAudioPublisher,
+      meetingAi: meetingAiClient,
+      logger,
+      timeoutMs: config.meetingCleanupTimeoutMs,
+    })
+    : null;
 
   const server = createVoiceHttpServer({
     logger,
     isReady: () => Boolean(turnTokenVerifier && orchestrator),
     turnTokenVerifier,
+    internalServiceKey: config.voiceInternalServiceKey,
+    onMeetingCleanup: meetingCleanupCoordinator
+      ? (meetingSessionId, cleanupId) => meetingCleanupCoordinator.cleanup(meetingSessionId, cleanupId)
+      : undefined,
     onBatchAudio: orchestrator
       ? async (upload) => {
         if (!orchestrator.enqueue(upload)) {

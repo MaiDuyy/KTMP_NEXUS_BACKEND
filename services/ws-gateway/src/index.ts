@@ -3,6 +3,7 @@
 
 import 'dotenv/config';
 import http from 'http';
+import { randomUUID } from 'node:crypto';
 import express from 'express';
 import { Server as SocketIOServer, Socket } from 'socket.io';
 import { createAdapter } from '@socket.io/redis-adapter';
@@ -17,6 +18,7 @@ import { RedisVoiceSessionStore } from './voice/voiceSessionStore.js';
 import { getVoiceTurnTokenTtlSeconds, VoiceTurnTokenIssuer } from './voice/turnTokenService.js';
 import { VoiceTurnController } from './voice/voiceTurnController.js';
 import { createVoiceInternalRouter } from './voice/internalVoiceRouter.js';
+import { VoiceMeetingCleanupClient } from './voice/voiceMeetingCleanupClient.js';
 
 // Redis client for call status and distributed locks
 
@@ -37,6 +39,7 @@ const LIVEKIT_API_SECRET = process.env.LIVEKIT_API_SECRET || 'secret';
 const LIVEKIT_URL = process.env.LIVEKIT_URL || 'ws://localhost:7880';
 const VOICE_PUBLIC_API_URL = process.env.VOICE_PUBLIC_API_URL || 'http://localhost:3000/api';
 const VOICE_INTERNAL_SERVICE_KEY = process.env.VOICE_INTERNAL_SERVICE_KEY || null;
+const VOICE_SERVICE_INTERNAL_URL = process.env.VOICE_SERVICE_INTERNAL_URL || 'http://localhost:3035/internal/voice';
 const redis = new Redis(REDIS_URL);
 const callRegistry = new RedisCallParticipantRegistry(redis);
 const voiceLockService = new RedisVoiceLockService(redis);
@@ -51,6 +54,17 @@ if (process.env.NODE_ENV === 'production' && !VOICE_INTERNAL_SERVICE_KEY) {
 if (process.env.NODE_ENV === 'production' && !process.env.VOICE_PUBLIC_API_URL) {
   throw new Error('VOICE_PUBLIC_API_URL is required in production');
 }
+if (process.env.NODE_ENV === 'production' && !process.env.VOICE_SERVICE_INTERNAL_URL) {
+  throw new Error('VOICE_SERVICE_INTERNAL_URL is required in production');
+}
+
+const voiceMeetingCleanupClient = VOICE_INTERNAL_SERVICE_KEY
+  ? new VoiceMeetingCleanupClient(VOICE_SERVICE_INTERNAL_URL, VOICE_INTERNAL_SERVICE_KEY)
+  : null;
+const PENDING_VOICE_CLEANUP_KEY = 'voice:meeting-cleanup:pending';
+const callCleanupOperations = new Map<string, Promise<void>>();
+let orphanCleanupInterval: NodeJS.Timeout | null = null;
+let voiceCleanupRetryInterval: NodeJS.Timeout | null = null;
 
 function createVoiceTurnTokenIssuer(): VoiceTurnTokenIssuer | null {
   const secret = process.env.VOICE_TURN_TOKEN_SECRET;
@@ -239,13 +253,53 @@ async function generateLiveKitToken(userId: string, userName: string, roomName: 
 }
 
 /** Full cleanup: remove ALL participants from call, delete room */
-async function cleanupCall(roomName: string) {
-  const call = activeCalls.get(roomName);
-  if (call) {
-    await voiceTurnController.cancelForCallCleanup(roomName).catch((error) => {
-      console.error('[Voice] Failed to cancel active voice turn during call cleanup:', error);
-    });
+async function sendVoiceMeetingCleanup(roomName: string, cleanupId: string): Promise<void> {
+  if (!voiceMeetingCleanupClient) return;
+  await redis.hset(PENDING_VOICE_CLEANUP_KEY, roomName, cleanupId);
+  await voiceMeetingCleanupClient.cleanupMeeting(roomName, cleanupId);
+  await redis.hdel(PENDING_VOICE_CLEANUP_KEY, roomName);
+}
 
+async function retryPendingVoiceCleanups(): Promise<void> {
+  if (!voiceMeetingCleanupClient) return;
+  let cursor = '0';
+  do {
+    const [nextCursor, entries] = await redis.hscan(PENDING_VOICE_CLEANUP_KEY, cursor, 'COUNT', 20);
+    cursor = nextCursor;
+    for (let index = 0; index < entries.length; index += 2) {
+      const roomName = entries[index];
+      const cleanupId = entries[index + 1];
+      await voiceMeetingCleanupClient.cleanupMeeting(roomName, cleanupId)
+        .then(() => redis.hdel(PENDING_VOICE_CLEANUP_KEY, roomName))
+        .catch((error) => console.error('[Voice] Pending meeting cleanup retry failed:', {
+          roomName,
+          message: error instanceof Error ? error.message : 'unknown error',
+        }));
+    }
+  } while (cursor !== '0');
+}
+
+async function performCleanupCall(roomName: string, cleanupId: string): Promise<void> {
+  const call = activeCalls.get(roomName);
+  await callRegistry.updateStatus(roomName, 'ending').catch((error) => {
+    console.error('[Voice] Failed to mark call registry ending:', error);
+  });
+
+  const voiceCleanupResults = await Promise.allSettled([
+    voiceTurnController.cancelForCallCleanup(roomName),
+    voiceSessionStore.clearSession(roomName),
+    sendVoiceMeetingCleanup(roomName, cleanupId),
+  ]);
+  for (const result of voiceCleanupResults) {
+    if (result.status === 'rejected') {
+      console.error('[Voice] Meeting cleanup step failed:', {
+        roomName,
+        message: result.reason instanceof Error ? result.reason.message : 'unknown error',
+      });
+    }
+  }
+
+  if (call) {
     // Notify chat that call ended
     io.to(`chat:${call.chatId}`).emit('chat:call_status', {
       chatId: call.chatId,
@@ -279,6 +333,9 @@ async function cleanupCall(roomName: string) {
     );
   }
 
+  await callRegistry.updateStatus(roomName, 'ended').catch((error) => {
+    console.error('[Voice] Failed to mark call registry ended:', error);
+  });
   await callRegistry.clear(roomName).catch((error) => {
     console.error('[Voice] Failed to clear call participant registry:', error);
   });
@@ -291,6 +348,25 @@ async function cleanupCall(roomName: string) {
     ringingTimeouts.delete(roomName);
   }
   console.log(`[Call] Cleaned up room: ${roomName}`);
+}
+
+async function cleanupCall(roomName: string): Promise<void> {
+  const existing = callCleanupOperations.get(roomName);
+  if (existing) return existing;
+  const cleanupId = randomUUID();
+  const operation = performCleanupCall(roomName, cleanupId)
+    .finally(() => callCleanupOperations.delete(roomName));
+  callCleanupOperations.set(roomName, operation);
+  return operation;
+}
+
+function observeCleanupCall(roomName: string): void {
+  void cleanupCall(roomName).catch((error) => {
+    console.error('[Voice] Asynchronous call cleanup failed:', {
+      roomName,
+      message: error instanceof Error ? error.message : 'unknown error',
+    });
+  });
 }
 
 /** Remove a single participant from a group call. Returns true if room is now empty. */
@@ -347,14 +423,14 @@ function validateAndCleanupOrphanedCalls() {
     // 1. Ringing timeout (ringing for > 60s and still no one accepted)
     if (call.status === 'ringing' && durationMs > 60000) {
       console.log(`[Call] Ringing timeout for room ${roomName}. Cleaning up.`);
-      cleanupCall(roomName);
+      observeCleanupCall(roomName);
       continue;
     }
 
     // 2. Empty group calls (0 participants remaining in the set)
     if (call.participants.size === 0) {
       console.log(`[Call] Room ${roomName} has 0 participants. Cleaning up orphaned session.`);
-      cleanupCall(roomName);
+      observeCleanupCall(roomName);
       continue;
     }
 
@@ -374,7 +450,7 @@ function validateAndCleanupOrphanedCalls() {
 
     if (!hasOnlineParticipant) {
       console.log(`[Call] No active participants are online for room ${roomName}. Cleaning up orphaned session.`);
-      cleanupCall(roomName);
+      observeCleanupCall(roomName);
     }
   }
 }
@@ -2458,7 +2534,7 @@ io.on('connection', async (socket: AuthenticatedSocket) => {
       socket.emit('call:error', { reason: 'token_error', message: 'Không thể tạo token cho cuộc gọi.' });
       if (call.callType === 'private') {
         io.to(`user:${call.callerId}`).emit('call:error', { reason: 'token_error', message: 'Lỗi kết nối cuộc gọi.' });
-        cleanupCall(roomName);
+        await cleanupCall(roomName);
       } else {
         // Group: just remove this participant, don't kill the room
         await removeParticipant(roomName, userId);
@@ -2494,7 +2570,7 @@ io.on('connection', async (socket: AuthenticatedSocket) => {
         isVideo: call.isVideo,
         callerName: call.callerName,
       });
-      cleanupCall(roomName);
+      await cleanupCall(roomName);
     } else {
       console.log(`[Call] Group call in room ${roomName} remains active. ${userName} declined.`);
     }
@@ -2533,7 +2609,7 @@ io.on('connection', async (socket: AuthenticatedSocket) => {
         callerName: call.callerName,
       });
 
-      cleanupCall(roomName);
+      await cleanupCall(roomName);
       return;
     }
 
@@ -2560,7 +2636,7 @@ io.on('connection', async (socket: AuthenticatedSocket) => {
         duration,
         callerName: call.callerName,
       });
-      cleanupCall(roomName);
+      await cleanupCall(roomName);
       return;
     }
 
@@ -2615,12 +2691,12 @@ io.on('connection', async (socket: AuthenticatedSocket) => {
         duration,
         callerName: call.callerName,
       });
-      cleanupCall(roomName);
+      await cleanupCall(roomName);
     }
   });
 
   // ─── CANCEL: Caller cancels before callee answers ───
-  socket.on('call:cancel', (data) => {
+  socket.on('call:cancel', async (data) => {
     const { roomName } = data;
     const call = activeCalls.get(roomName);
 
@@ -2654,7 +2730,7 @@ io.on('connection', async (socket: AuthenticatedSocket) => {
       callerName: call.callerName,
     });
 
-    cleanupCall(roomName);
+    await cleanupCall(roomName);
   });
 
   // ============= MEETING AI VOICE TURN CONTROL =============
@@ -3005,7 +3081,7 @@ io.on('connection', async (socket: AuthenticatedSocket) => {
               roomName, endedBy: userId, reason: 'disconnected',
             });
           }
-          cleanupCall(roomName);
+          await cleanupCall(roomName);
         } else {
           // Group: just remove participant, keep room alive if others remain
           const roomEmpty = await removeParticipant(roomName, userId);
@@ -3044,7 +3120,7 @@ io.on('connection', async (socket: AuthenticatedSocket) => {
             io.to(`chat:${call.chatId}`).emit('call:ended', {
               roomName, reason: 'room_empty',
             });
-            cleanupCall(roomName);
+            await cleanupCall(roomName);
           }
         }
       }
@@ -3077,6 +3153,8 @@ async function shutdown() {
   console.log('\n[WS Gateway] Shutting down...');
 
   io.close();
+  if (orphanCleanupInterval) clearInterval(orphanCleanupInterval);
+  if (voiceCleanupRetryInterval) clearInterval(voiceCleanupRetryInterval);
 
   if (natsConnection) {
     await natsConnection.drain();
@@ -3095,7 +3173,15 @@ async function start() {
   await setupNats();
 
   // Periodically cleanup orphaned calls every 30 seconds
-  setInterval(validateAndCleanupOrphanedCalls, 30000);
+  orphanCleanupInterval = setInterval(validateAndCleanupOrphanedCalls, 30_000);
+  voiceCleanupRetryInterval = setInterval(() => {
+    void retryPendingVoiceCleanups().catch((error) => {
+      console.error('[Voice] Failed to scan pending meeting cleanups:', error);
+    });
+  }, 30_000);
+  await retryPendingVoiceCleanups().catch((error) => {
+    console.error('[Voice] Initial pending meeting cleanup retry failed:', error);
+  });
 
   httpServer.listen(PORT, () => {
     console.log('='.repeat(50));

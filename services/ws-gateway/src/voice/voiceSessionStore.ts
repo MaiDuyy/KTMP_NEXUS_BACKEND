@@ -19,12 +19,13 @@ const APPEND_HISTORY_SCRIPT = `
     or redis.call('hget', KEYS[1], 'ownerUserId') ~= ARGV[2] then
     return 0
   end
-  if redis.call('set', KEYS[3], '1', 'EX', ARGV[5], 'NX') == false then
+  if redis.call('sadd', KEYS[3], ARGV[6]) == 0 then
     return 1
   end
   redis.call('rpush', KEYS[2], ARGV[3])
   redis.call('ltrim', KEYS[2], -tonumber(ARGV[4]), -1)
   redis.call('expire', KEYS[2], ARGV[5])
+  redis.call('expire', KEYS[3], ARGV[5])
   return 1
 `;
 
@@ -61,8 +62,8 @@ function historyKey(meetingSessionId: string): string {
   return `voice:${assertIdentifier(meetingSessionId, 'meetingSessionId')}:history`;
 }
 
-function historyDedupeKey(meetingSessionId: string, messageId: string): string {
-  return `voice:${assertIdentifier(meetingSessionId, 'meetingSessionId')}:history:${assertIdentifier(messageId, 'messageId')}`;
+function historyDedupeKey(meetingSessionId: string): string {
+  return `voice:${assertIdentifier(meetingSessionId, 'meetingSessionId')}:history:dedupe`;
 }
 
 export interface VoiceSessionStore {
@@ -148,12 +149,13 @@ export class RedisVoiceSessionStore implements VoiceSessionStore {
       3,
       snapshotKey(meetingSessionId),
       historyKey(meetingSessionId),
-      historyDedupeKey(meetingSessionId, message.id),
+      historyDedupeKey(meetingSessionId),
       assertIdentifier(turnId, 'turnId'),
       assertIdentifier(ownerUserId, 'ownerUserId'),
       JSON.stringify(message),
       this.historyLimit,
       this.ttlSeconds,
+      assertIdentifier(message.id, 'messageId'),
     );
     return isSuccess(result);
   }
@@ -194,6 +196,10 @@ export class RedisVoiceSessionStore implements VoiceSessionStore {
   }
 
   public async clearSession(meetingSessionId: string): Promise<void> {
-    await this.redis.del(snapshotKey(meetingSessionId), historyKey(meetingSessionId));
+    await this.redis.del(
+      snapshotKey(meetingSessionId),
+      historyKey(meetingSessionId),
+      historyDedupeKey(meetingSessionId),
+    );
   }
 }

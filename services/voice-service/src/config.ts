@@ -20,6 +20,7 @@ export interface VoiceServiceConfig {
   voiceControlInternalUrl: string | null;
   voiceInternalServiceKey: string | null;
   pipelineTimeoutMs: number;
+  meetingCleanupTimeoutMs: number;
   livekitUrl: string | null;
   livekitApiKey: string | null;
   livekitApiSecret: string | null;
@@ -167,6 +168,11 @@ export function loadVoiceServiceConfig(env: NodeJS.ProcessEnv = process.env): Vo
       nodeEnv,
     ),
     pipelineTimeoutMs: readPositiveInteger(env.VOICE_PIPELINE_TIMEOUT_MS, 150_000, 'VOICE_PIPELINE_TIMEOUT_MS'),
+    meetingCleanupTimeoutMs: readPositiveInteger(
+      env.VOICE_MEETING_CLEANUP_TIMEOUT_MS,
+      30_000,
+      'VOICE_MEETING_CLEANUP_TIMEOUT_MS',
+    ),
     livekitUrl: lkCredentials.livekitUrl,
     livekitApiKey: lkCredentials.livekitApiKey,
     livekitApiSecret: lkCredentials.livekitApiSecret,
