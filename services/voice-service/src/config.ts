@@ -14,6 +14,12 @@ export interface VoiceServiceConfig {
   googleTtsVoice: string;
   googleTtsAudioEncoding: string;
   googleTtsTimeoutMs: number;
+  meetingAiInternalUrl: string | null;
+  meetingAiInternalServiceKey: string | null;
+  meetingAiTimeoutMs: number;
+  voiceControlInternalUrl: string | null;
+  voiceInternalServiceKey: string | null;
+  pipelineTimeoutMs: number;
   livekitUrl: string | null;
   livekitApiKey: string | null;
   livekitApiSecret: string | null;
@@ -71,6 +77,33 @@ function readOptionalVoiceTurnTokenSecret(value: string | undefined, nodeEnv: st
   return value;
 }
 
+function readOptionalServiceSecret(value: string | undefined, variableName: string, nodeEnv: string): string | null {
+  if (value === undefined || value === '') {
+    if (nodeEnv === 'production') {
+      throw new Error(`${variableName} is required in production`);
+    }
+    return null;
+  }
+  if (value.trim() !== value || value.length < 32) {
+    throw new Error(`${variableName} must contain at least 32 non-whitespace characters`);
+  }
+  return value;
+}
+
+function readOptionalHttpUrl(value: string | undefined, variableName: string, nodeEnv: string): string | null {
+  if (value === undefined || value === '') {
+    if (nodeEnv === 'production') {
+      throw new Error(`${variableName} is required in production`);
+    }
+    return null;
+  }
+  const url = new URL(value);
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+    throw new Error(`${variableName} must use http or https`);
+  }
+  return url.toString();
+}
+
 function readLiveKitCredentials(env: NodeJS.ProcessEnv, nodeEnv: string): { livekitUrl: string | null; livekitApiKey: string | null; livekitApiSecret: string | null } {
   const url = (env.LIVEKIT_URL ?? "").trim();
   const key = (env.LIVEKIT_API_KEY ?? "").trim();
@@ -120,6 +153,20 @@ export function loadVoiceServiceConfig(env: NodeJS.ProcessEnv = process.env): Vo
     googleTtsVoice: readNonEmptyString(env.GOOGLE_TTS_VOICE, "vi-VN-Chirp3-HD-Charon", "GOOGLE_TTS_VOICE"),
     googleTtsAudioEncoding: readNonEmptyString(env.GOOGLE_TTS_AUDIO_ENCODING, "LINEAR16", "GOOGLE_TTS_AUDIO_ENCODING"),
     googleTtsTimeoutMs: readPositiveInteger(env.GOOGLE_TTS_TIMEOUT_MS, 15_000, "GOOGLE_TTS_TIMEOUT_MS"),
+    meetingAiInternalUrl: readOptionalHttpUrl(env.MEETING_AI_INTERNAL_URL, 'MEETING_AI_INTERNAL_URL', nodeEnv),
+    meetingAiInternalServiceKey: readOptionalServiceSecret(
+      env.MEETING_AI_INTERNAL_SERVICE_KEY,
+      'MEETING_AI_INTERNAL_SERVICE_KEY',
+      nodeEnv,
+    ),
+    meetingAiTimeoutMs: readPositiveInteger(env.MEETING_AI_TIMEOUT_MS, 45_000, 'MEETING_AI_TIMEOUT_MS'),
+    voiceControlInternalUrl: readOptionalHttpUrl(env.VOICE_CONTROL_INTERNAL_URL, 'VOICE_CONTROL_INTERNAL_URL', nodeEnv),
+    voiceInternalServiceKey: readOptionalServiceSecret(
+      env.VOICE_INTERNAL_SERVICE_KEY,
+      'VOICE_INTERNAL_SERVICE_KEY',
+      nodeEnv,
+    ),
+    pipelineTimeoutMs: readPositiveInteger(env.VOICE_PIPELINE_TIMEOUT_MS, 150_000, 'VOICE_PIPELINE_TIMEOUT_MS'),
     livekitUrl: lkCredentials.livekitUrl,
     livekitApiKey: lkCredentials.livekitApiKey,
     livekitApiSecret: lkCredentials.livekitApiSecret,

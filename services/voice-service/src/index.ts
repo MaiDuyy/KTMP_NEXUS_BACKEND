@@ -10,6 +10,10 @@ import { MeetingAudioPublisher } from "./livekit/MeetingAudioPublisher.js";
 import { LivekitTokenService } from "./livekit/LivekitTokenService.js";
 import { DefaultLivekitAdapter } from "./livekit/LivekitAdapter.js";
 import { closeVoiceServiceResources } from "./resourceCleanup.js";
+import { GoogleBatchSttAdapter } from './batchStt.js';
+import { GoogleBatchTtsAdapter } from './batchTts.js';
+import { MeetingAiClient, VoiceControlClient } from './internalClients.js';
+import { BatchVoiceOrchestrator } from './batchVoiceOrchestrator.js';
 
 export interface VoiceServiceInstance {
   config: VoiceServiceConfig;
@@ -30,15 +34,70 @@ export function createVoiceService(
   const adapter = new DefaultLivekitAdapter();
   const meetingAudioPublisher = new MeetingAudioPublisher(config, tokenService, adapter);
 
-  const server = createVoiceHttpServer({ logger, turnTokenVerifier, onBatchAudio: async () => undefined });
+  const pipelineConfigured = Boolean(
+    config.googleCloudProject &&
+    config.meetingAiInternalUrl &&
+    config.meetingAiInternalServiceKey &&
+    config.voiceControlInternalUrl &&
+    config.voiceInternalServiceKey &&
+    config.livekitUrl &&
+    config.livekitApiKey &&
+    config.livekitApiSecret,
+  );
+  const orchestrator = pipelineConfigured
+    ? new BatchVoiceOrchestrator({
+      stt: new GoogleBatchSttAdapter({
+        projectId: config.googleCloudProject!,
+        location: config.googleCloudLocation,
+        model: config.googleSttModel,
+        languageCode: config.googleSttLanguage,
+        timeoutMs: config.sttTimeoutMs,
+      }),
+      ai: new MeetingAiClient(
+        config.meetingAiInternalUrl!,
+        config.meetingAiInternalServiceKey!,
+        config.meetingAiTimeoutMs,
+      ),
+      tts: new GoogleBatchTtsAdapter({
+        projectId: config.googleCloudProject!,
+        location: config.googleCloudLocation,
+        voiceName: config.googleTtsVoice,
+        audioEncoding: config.googleTtsAudioEncoding,
+        timeoutMs: config.googleTtsTimeoutMs,
+      }),
+      publisher: meetingAudioPublisher,
+      control: new VoiceControlClient(
+        config.voiceControlInternalUrl!,
+        config.voiceInternalServiceKey!,
+      ),
+      logger,
+      timeoutMs: config.pipelineTimeoutMs,
+    })
+    : null;
+
+  const server = createVoiceHttpServer({
+    logger,
+    isReady: () => Boolean(turnTokenVerifier && orchestrator),
+    turnTokenVerifier,
+    onBatchAudio: orchestrator
+      ? async (upload) => {
+        if (!orchestrator.enqueue(upload)) {
+          throw new Error('VOICE_TURN_EXPIRED');
+        }
+      }
+      : undefined,
+  });
   const shutdown = createGracefulShutdown({
     server,
     logger,
     timeoutMs: config.shutdownTimeoutMs,
-    onClose: () => closeVoiceServiceResources({
-      closeLivekit: () => meetingAudioPublisher.closeAll(),
-      closeRedis: () => redis?.disconnect(),
-    }),
+    onClose: () => {
+      orchestrator?.cancelAll();
+      return closeVoiceServiceResources({
+        closeLivekit: () => meetingAudioPublisher.closeAll(),
+        closeRedis: () => redis?.disconnect(),
+      });
+    },
   });
   process.once("SIGINT", () => void shutdown("SIGINT"));
   process.once("SIGTERM", () => void shutdown("SIGTERM"));

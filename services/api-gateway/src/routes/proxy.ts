@@ -10,6 +10,7 @@ import http from 'http';
 import https from 'https';
 
 const router = Router();
+const voiceUploadRouter = Router();
 
 const SERVICES = {
   // CONSOLIDATED: auth + user + rbac → identity-service (port 3010)
@@ -32,11 +33,13 @@ const SERVICES = {
 };
 
 const MAX_VOICE_AUDIO_BYTES = 10 * 1024 * 1024;
+const SUPPORTED_VOICE_AUDIO_TYPES = new Set(['audio/webm', 'audio/ogg', 'audio/wav', 'audio/x-wav']);
 
 function forwardVoiceAudio(req: Request, res: Response, turnId: string): void {
   const contentType = req.headers['content-type'];
   const contentLength = Number(req.headers['content-length']);
-  if (!contentType || (!contentType.startsWith('audio/') && contentType !== 'application/octet-stream')) {
+  const normalizedContentType = contentType?.split(';', 1)[0].toLowerCase();
+  if (typeof contentType !== 'string' || !normalizedContentType || !SUPPORTED_VOICE_AUDIO_TYPES.has(normalizedContentType)) {
     res.status(415).json({ code: 'VOICE_AUDIO_FORMAT_UNSUPPORTED' });
     return;
   }
@@ -688,7 +691,7 @@ router.get('/messages/:chatId/media', (req, res) => {
 // ============= FILE ROUTES =============
 
 // Voice audio is raw binary: keep it out of JSON/multipart forwarding paths.
-router.post('/voice/turns/:turnId/audio', (req, res) => forwardVoiceAudio(req, res, req.params.turnId));
+voiceUploadRouter.post('/voice/turns/:turnId/audio', (req, res) => forwardVoiceAudio(req, res, req.params.turnId));
 
 // Proxy all file upload/download routes to the FILE service
 // Express 5 uses {*rest} syntax for catch-all wildcards
@@ -1034,4 +1037,5 @@ router.get('/health/notification', (req, res) => forwardRequest(req, res, SERVIC
 router.get('/health/ai', (req, res) => forwardRequest(req, res, SERVICES.SPRING_AI, '/healthz'));
 
 export const proxyRoutes = router;
+export const voiceUploadRoutes = voiceUploadRouter;
 

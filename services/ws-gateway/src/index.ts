@@ -13,8 +13,10 @@ import { AccessToken } from 'livekit-server-sdk';
 import { messagingGrpcClient } from './messagingClient.js';
 import { RedisCallParticipantRegistry } from './calls/callRegistry.js';
 import { RedisVoiceLockService } from './voice/voiceLockService.js';
+import { RedisVoiceSessionStore } from './voice/voiceSessionStore.js';
 import { getVoiceTurnTokenTtlSeconds, VoiceTurnTokenIssuer } from './voice/turnTokenService.js';
 import { VoiceTurnController } from './voice/voiceTurnController.js';
+import { createVoiceInternalRouter } from './voice/internalVoiceRouter.js';
 
 // Redis client for call status and distributed locks
 
@@ -33,10 +35,22 @@ const NATS_URL = process.env.NATS_URL || 'nats://localhost:4222';
 const LIVEKIT_API_KEY = process.env.LIVEKIT_API_KEY || 'devkey';
 const LIVEKIT_API_SECRET = process.env.LIVEKIT_API_SECRET || 'secret';
 const LIVEKIT_URL = process.env.LIVEKIT_URL || 'ws://localhost:7880';
-const VOICE_SERVICE_PUBLIC_URL = process.env.VOICE_SERVICE_PUBLIC_URL || 'http://localhost:3035';
+const VOICE_PUBLIC_API_URL = process.env.VOICE_PUBLIC_API_URL || 'http://localhost:3000/api';
+const VOICE_INTERNAL_SERVICE_KEY = process.env.VOICE_INTERNAL_SERVICE_KEY || null;
 const redis = new Redis(REDIS_URL);
 const callRegistry = new RedisCallParticipantRegistry(redis);
 const voiceLockService = new RedisVoiceLockService(redis);
+const voiceSessionStore = new RedisVoiceSessionStore(redis);
+
+if (VOICE_INTERNAL_SERVICE_KEY && VOICE_INTERNAL_SERVICE_KEY.length < 32) {
+  throw new Error('VOICE_INTERNAL_SERVICE_KEY must contain at least 32 characters');
+}
+if (process.env.NODE_ENV === 'production' && !VOICE_INTERNAL_SERVICE_KEY) {
+  throw new Error('VOICE_INTERNAL_SERVICE_KEY is required in production');
+}
+if (process.env.NODE_ENV === 'production' && !process.env.VOICE_PUBLIC_API_URL) {
+  throw new Error('VOICE_PUBLIC_API_URL is required in production');
+}
 
 function createVoiceTurnTokenIssuer(): VoiceTurnTokenIssuer | null {
   const secret = process.env.VOICE_TURN_TOKEN_SECRET;
@@ -303,10 +317,16 @@ async function synchronizeVoiceCallRegistry(roomName: string, call: ActiveCall):
     return;
   }
 
+  const chat = await messagingGrpcClient.getChat(call.chatId);
+  const workspaceId = typeof chat?.workspace_id === 'string' && chat.workspace_id.length > 0
+    ? chat.workspace_id
+    : undefined;
+
   await callRegistry.setMeta({
     meetingSessionId: roomName,
     roomName,
     chatId: call.chatId,
+    ...(workspaceId ? { workspaceId } : {}),
     status: 'active',
     updatedAt: new Date().toISOString(),
   });
@@ -430,9 +450,16 @@ const voiceTurnController = new VoiceTurnController({
   broadcaster: io,
   callRegistry,
   voiceLockService,
+  voiceSessionStore,
   tokenIssuer: voiceTurnTokenIssuer,
-  voiceServicePublicUrl: VOICE_SERVICE_PUBLIC_URL,
+  voicePublicApiUrl: VOICE_PUBLIC_API_URL,
 });
+
+app.use(
+  '/internal/voice',
+  express.json({ limit: '64kb' }),
+  createVoiceInternalRouter(voiceTurnController, VOICE_INTERNAL_SERVICE_KEY),
+);
 
 // ============= REDIS ADAPTER (Optional) =============
 
@@ -2631,7 +2658,24 @@ io.on('connection', async (socket: AuthenticatedSocket) => {
   });
 
   // ============= MEETING AI VOICE TURN CONTROL =============
-  // The data plane (audio/STT/TTS) is intentionally implemented in Voice Service later.
+  // WS Gateway owns authorization, lock state and fan-out; Voice Service owns the data plane.
+  socket.on('voice:session:sync', (payload, acknowledge) => {
+    void voiceTurnController.sync({ socket, userId, userName, payload }).then((response) => {
+      if (response && typeof acknowledge === 'function') {
+        acknowledge(response);
+      }
+    }).catch((error) => {
+      console.error('[Voice] Failed to synchronize voice session:', error);
+      socket.emit('voice:error', {
+        meetingSessionId: typeof payload?.meetingSessionId === 'string' ? payload.meetingSessionId : '',
+        turnId: null,
+        code: 'VOICE_INTERNAL_ERROR',
+        message: 'Không thể đồng bộ phiên AI Voice.',
+        retryable: true,
+      });
+    });
+  });
+
   socket.on('voice:turn:start', (payload) => {
     void voiceTurnController.start({ socket, userId, userName, payload }).catch((error) => {
       console.error('[Voice] Failed to start voice turn:', error);

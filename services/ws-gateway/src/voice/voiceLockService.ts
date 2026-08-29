@@ -45,6 +45,19 @@ const RELEASE_BY_OWNER_SCRIPT = `
   return 0
 `;
 
+const REFRESH_BY_OWNER_SCRIPT = `
+  local raw = redis.call('get', KEYS[1])
+  if not raw then
+    return 0
+  end
+
+  local lock = cjson.decode(raw)
+  if lock.turnId == ARGV[1] and lock.ownerUserId == ARGV[2] then
+    return redis.call('expire', KEYS[1], ARGV[3])
+  end
+  return 0
+`;
+
 function assertIdentifier(value: string, fieldName: string): string {
   if (
     typeof value !== 'string' ||
@@ -203,6 +216,27 @@ export class RedisVoiceLockService {
       getVoiceLockKey(meetingSessionId),
       turnId,
       ownerUserId,
+    );
+    return isRedisSuccessResult(result);
+  }
+
+  public async refreshByOwner(
+    meetingSessionId: string,
+    turnId: string,
+    ownerUserId: string,
+    ttlSeconds: number = this.ttlSeconds,
+  ): Promise<boolean> {
+    assertIdentifier(meetingSessionId, 'meetingSessionId');
+    assertIdentifier(turnId, 'turnId');
+    assertIdentifier(ownerUserId, 'ownerUserId');
+    const ttl = assertTtl(ttlSeconds);
+    const result = await this.redis.eval(
+      REFRESH_BY_OWNER_SCRIPT,
+      1,
+      getVoiceLockKey(meetingSessionId),
+      turnId,
+      ownerUserId,
+      ttl,
     );
     return isRedisSuccessResult(result);
   }

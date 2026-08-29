@@ -9,6 +9,8 @@ import {
   VoiceTurnTokenIssuer,
 } from './turnTokenService.js';
 import { VoiceTurnController, type VoiceRoomBroadcaster, type VoiceSocket } from './voiceTurnController.js';
+import type { VoiceActiveTurn, VoiceHistoryMessage, VoicePipelineEvent, VoiceTurnState } from '@ott/shared';
+import type { VoiceSessionStore } from './voiceSessionStore.js';
 
 class FakeSocket implements VoiceSocket {
   public readonly events: Array<{ event: string; payload: any }> = [];
@@ -42,6 +44,7 @@ class FakeCallRegistry {
     meetingSessionId: 'call-1',
     roomName: 'call-1',
     chatId: 'chat-1',
+    workspaceId: 'workspace-1',
     status: 'active',
     updatedAt: '2026-08-28T00:00:00.000Z',
   };
@@ -53,6 +56,10 @@ class FakeCallRegistry {
 
   public async hasParticipant(_meetingSessionId: string, userId: string): Promise<boolean> {
     return this.participants.has(userId);
+  }
+
+  public async getParticipantIds(): Promise<string[]> {
+    return [...this.participants];
   }
 }
 
@@ -93,22 +100,55 @@ class FakeVoiceLockService {
     this.owner = null;
     return true;
   }
+
+  public async refreshByOwner(_meetingSessionId: string, turnId: string, ownerUserId: string): Promise<boolean> {
+    return this.owner?.turnId === turnId && this.owner.ownerUserId === ownerUserId;
+  }
+}
+
+class FakeVoiceSessionStore implements VoiceSessionStore {
+  public active: VoiceActiveTurn | null = null;
+  public readonly history: VoiceHistoryMessage[] = [];
+
+  public async activate(_meetingSessionId: string, activeTurn: VoiceActiveTurn): Promise<void> {
+    this.active = activeTurn;
+  }
+  public async updateState(_meetingSessionId: string, turnId: string, ownerUserId: string, state: VoiceTurnState): Promise<boolean> {
+    if (!this.active || this.active.turnId !== turnId || this.active.ownerUserId !== ownerUserId) return false;
+    this.active = { ...this.active, state };
+    return true;
+  }
+  public async appendHistory(_meetingSessionId: string, turnId: string, ownerUserId: string, message: VoiceHistoryMessage): Promise<boolean> {
+    if (!this.active || this.active.turnId !== turnId || this.active.ownerUserId !== ownerUserId) return false;
+    if (!this.history.some(({ id }) => id === message.id)) this.history.push(message);
+    return true;
+  }
+  public async clearActive(_meetingSessionId: string, turnId: string, ownerUserId: string): Promise<boolean> {
+    if (!this.active || this.active.turnId !== turnId || this.active.ownerUserId !== ownerUserId) return false;
+    this.active = null;
+    return true;
+  }
+  public async getActive(): Promise<VoiceActiveTurn | null> { return this.active; }
+  public async getHistory(): Promise<VoiceHistoryMessage[]> { return this.history; }
+  public async clearSession(): Promise<void> { this.active = null; this.history.length = 0; }
 }
 
 function createController() {
   const broadcaster = new FakeBroadcaster();
   const callRegistry = new FakeCallRegistry();
   const voiceLockService = new FakeVoiceLockService();
+  const voiceSessionStore = new FakeVoiceSessionStore();
   const issuer = new VoiceTurnTokenIssuer({ secret: 'test-voice-turn-secret-with-sufficient-length' });
   const controller = new VoiceTurnController({
     broadcaster,
     callRegistry: callRegistry as unknown as RedisCallParticipantRegistry,
     voiceLockService: voiceLockService as unknown as RedisVoiceLockService,
+    voiceSessionStore,
     tokenIssuer: issuer,
-    voiceServicePublicUrl: 'http://voice.example.test',
+    voicePublicApiUrl: 'http://gateway.example.test/api',
   });
 
-  return { broadcaster, callRegistry, voiceLockService, controller };
+  return { broadcaster, callRegistry, voiceLockService, voiceSessionStore, controller };
 }
 
 test('VoiceTurnTokenIssuer creates short-lived Voice Service credentials with bound claims', () => {
@@ -150,7 +190,7 @@ test('VoiceTurnController denies a user outside the active call registry', async
     payload: {
       meetingSessionId: 'call-1',
       chatId: 'chat-1',
-      workspaceId: 'client-workspace-id',
+      workspaceId: 'workspace-1',
       clientRequestId: 'request-1',
       mode: 'rag',
     },
@@ -173,7 +213,7 @@ test('VoiceTurnController keeps the lock after speech ends and releases only its
   const startPayload = {
     meetingSessionId: 'call-1',
     chatId: 'chat-1',
-    workspaceId: 'untrusted-workspace-id',
+    workspaceId: 'workspace-1',
     clientRequestId: 'request-1',
     mode: 'rag' as const,
   };
@@ -182,8 +222,8 @@ test('VoiceTurnController keeps the lock after speech ends and releases only its
 
   const accepted = ownerSocket.events.find(({ event }) => event === 'voice:turn:accepted');
   assert.ok(accepted);
-  assert.match(accepted.payload.uploadUrl, /\/v1\/voice\/turns\/.+\/audio$/);
-  assert.match(accepted.payload.streamUrl, /\/v1\/voice\/turns\/.+\/stream$/);
+  assert.match(accepted.payload.uploadUrl, /\/api\/voice\/turns\/.+\/audio$/);
+  assert.match(accepted.payload.streamUrl, /\/api\/voice\/turns\/.+\/stream$/);
   assert.equal(ownerSocket.rooms.has('call:call-1'), true);
   assert.equal(broadcaster.events.some(({ event }) => event === 'voice:lock:changed'), true);
 
@@ -215,4 +255,83 @@ test('VoiceTurnController keeps the lock after speech ends and releases only its
   assert.equal(voiceLockService.owner, null);
   assert.equal(voiceLockService.releaseAttempts, 1);
   assert.equal(broadcaster.events.at(-1)?.event, 'voice:ready');
+});
+
+test('VoiceTurnController fans out pipeline events and synchronizes transient history', async () => {
+  const { broadcaster, callRegistry, controller, voiceLockService } = createController();
+  const ownerSocket = new FakeSocket();
+  const observerSocket = new FakeSocket();
+  callRegistry.participants.add('user-2');
+
+  await controller.start({
+    socket: ownerSocket,
+    userId: 'user-1',
+    userName: 'User One',
+    payload: {
+      meetingSessionId: 'call-1',
+      chatId: 'chat-1',
+      workspaceId: 'workspace-1',
+      clientRequestId: 'request-sync',
+      mode: 'rag',
+    },
+  });
+  const accepted = ownerSocket.events.find(({ event }) => event === 'voice:turn:accepted')!.payload;
+  const base = { meetingSessionId: 'call-1', turnId: accepted.turnId, ownerUserId: 'user-1' };
+
+  assert.equal(await controller.handlePipelineEvent({ ...base, kind: 'state', state: 'THINKING' }), true);
+  assert.equal(await controller.handlePipelineEvent({
+    ...base,
+    kind: 'transcript',
+    speakerName: 'ignored-service-value',
+    text: 'Câu hỏi đã nhận diện',
+    confidence: 0.92,
+  }), true);
+  assert.equal(await controller.handlePipelineEvent({
+    ...base,
+    kind: 'message',
+    displayText: 'Câu trả lời của AI',
+    sources: [],
+  }), true);
+
+  const sync = await controller.sync({
+    socket: observerSocket,
+    userId: 'user-2',
+    userName: 'User Two',
+    payload: { meetingSessionId: 'call-1' },
+  });
+  assert.equal(sync?.activeTurn?.state, 'THINKING');
+  assert.equal(sync?.activeTurn?.ownerName, 'User One');
+  assert.deepEqual(sync?.messages.map(({ role, displayText }) => ({ role, displayText })), [
+    { role: 'user', displayText: 'Câu hỏi đã nhận diện' },
+    { role: 'assistant', displayText: 'Câu trả lời của AI' },
+  ]);
+  assert.equal(broadcaster.events.some(({ event }) => event === 'voice:transcript'), true);
+  assert.equal(broadcaster.events.some(({ event }) => event === 'voice:message'), true);
+
+  const malformedTerminal = { ...base, kind: 'terminal', state: 'UNLOCK' } as unknown as VoicePipelineEvent;
+  assert.equal(await controller.handlePipelineEvent(malformedTerminal), false);
+  assert.equal(voiceLockService.owner?.turnId, accepted.turnId);
+
+  assert.equal(await controller.handlePipelineEvent({ ...base, kind: 'terminal', state: 'COMPLETED' }), true);
+  assert.equal(voiceLockService.owner, null);
+  assert.equal(await controller.handlePipelineEvent({ ...base, kind: 'terminal', state: 'COMPLETED' }), false);
+});
+
+test('VoiceTurnController rejects workspace spoofing before acquiring a lock', async () => {
+  const { controller, voiceLockService } = createController();
+  const socket = new FakeSocket();
+  await controller.start({
+    socket,
+    userId: 'user-1',
+    userName: 'User One',
+    payload: {
+      meetingSessionId: 'call-1',
+      chatId: 'chat-1',
+      workspaceId: 'other-workspace',
+      clientRequestId: 'request-spoof',
+      mode: 'rag',
+    },
+  });
+  assert.equal(voiceLockService.owner, null);
+  assert.equal(socket.events.at(-1)?.payload.code, 'VOICE_NOT_IN_CALL');
 });

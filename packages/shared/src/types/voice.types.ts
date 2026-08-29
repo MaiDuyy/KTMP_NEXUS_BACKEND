@@ -164,11 +164,66 @@ export interface VoiceSessionSyncResponse {
   messages: VoiceHistoryMessage[];
 }
 
+export interface VoicePipelineContextRequest {
+  meetingSessionId: string;
+  turnId: string;
+  ownerUserId: string;
+}
+
+export interface VoicePipelineContextResponse extends VoiceMeetingContext {
+  turnId: string;
+  ownerUserId: string;
+  ownerName: string;
+  roomName: string;
+  participantIds: string[];
+}
+
+interface VoicePipelineEventBase {
+  meetingSessionId: string;
+  turnId: string;
+  ownerUserId: string;
+}
+
+export interface VoicePipelineStateEvent extends VoicePipelineEventBase {
+  kind: 'state';
+  state: 'FINALIZING_STT' | 'THINKING' | 'RESPONDING';
+}
+
+export interface VoicePipelineTranscriptEvent extends VoicePipelineEventBase {
+  kind: 'transcript';
+  speakerName: string;
+  text: string;
+  confidence: number | null;
+}
+
+export interface VoicePipelineMessageEvent extends VoicePipelineEventBase {
+  kind: 'message';
+  displayText: string;
+  sources: VoiceMessageSource[];
+}
+
+export interface VoicePipelineTerminalEvent extends VoicePipelineEventBase {
+  kind: 'terminal';
+  state: 'COMPLETED' | 'FAILED' | 'CANCELLED';
+  code?: VoiceErrorCode;
+  message?: string;
+  retryable?: boolean;
+}
+
+export type VoicePipelineEvent =
+  | VoicePipelineStateEvent
+  | VoicePipelineTranscriptEvent
+  | VoicePipelineMessageEvent
+  | VoicePipelineTerminalEvent;
+
 export interface MeetingVoiceClientToServerEvents {
   'voice:turn:start': (payload: VoiceTurnStartPayload) => void;
   'voice:turn:end': (payload: VoiceTurnEndPayload) => void;
   'voice:turn:cancel': (payload: VoiceTurnCancelPayload) => void;
-  'voice:session:sync': (payload: VoiceSessionSyncPayload) => void;
+  'voice:session:sync': (
+    payload: VoiceSessionSyncPayload,
+    acknowledge?: (response: VoiceSessionSyncResponse) => void,
+  ) => void;
 }
 
 export interface MeetingVoiceServerToClientEvents {

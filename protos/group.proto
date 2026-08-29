@@ -28,6 +28,7 @@ message ChatItem {
   int32 participant_count = 10;
   string updated_at = 11;
   string created_at = 12;
+  optional string workspace_id = 13;
 }
 
 message GetChatsRequest {
