@@ -481,36 +481,32 @@ export class VoiceTurnController {
     }
 
     const owner = await this.dependencies.voiceLockService.get(meetingSessionId);
-    if (!owner) {
-      return;
-    }
-
-    const meta = await this.dependencies.callRegistry.getMeta(meetingSessionId);
     const callRoom = getCallRoom(meetingSessionId);
-    await this.dependencies.voiceLockService.releaseByOwner(meetingSessionId, owner.turnId, owner.ownerUserId);
-    await this.dependencies.voiceSessionStore.updateState(
-      meetingSessionId,
-      owner.turnId,
-      owner.ownerUserId,
-      'CANCELLED',
-    );
-    await this.dependencies.voiceSessionStore.clearActive(meetingSessionId, owner.turnId, owner.ownerUserId);
-    emitState(this.dependencies.broadcaster, callRoom, meetingSessionId, owner.turnId, 'CANCELLED');
-    emitLockChanged(this.dependencies.broadcaster, callRoom, {
-      meetingSessionId,
-      locked: false,
-      turnId: null,
-      ownerUserId: null,
-      ownerName: null,
-      state: 'IDLE',
-    });
-    this.dependencies.broadcaster.to(callRoom).emit('voice:ready', {
-      meetingSessionId,
-      completedTurnId: owner.turnId,
-    });
-
-    // Meta may have expired while the lock was still alive. The broadcasts above are harmless in that case.
-    void meta;
+    if (owner) {
+      const released = await this.dependencies.voiceLockService.releaseByOwner(
+        meetingSessionId,
+        owner.turnId,
+        owner.ownerUserId,
+      );
+      if (released) {
+        await this.dependencies.voiceSessionStore.updateState(
+          meetingSessionId,
+          owner.turnId,
+          owner.ownerUserId,
+          'CANCELLED',
+        );
+        emitState(this.dependencies.broadcaster, callRoom, meetingSessionId, owner.turnId, 'CANCELLED');
+        emitLockChanged(this.dependencies.broadcaster, callRoom, {
+          meetingSessionId,
+          locked: false,
+          turnId: null,
+          ownerUserId: null,
+          ownerName: null,
+          state: 'IDLE',
+        });
+      }
+    }
+    await this.dependencies.voiceSessionStore.clearSession(meetingSessionId);
   }
 
   public async cancelForParticipantDeparture(meetingSessionId: string, userId: string): Promise<void> {

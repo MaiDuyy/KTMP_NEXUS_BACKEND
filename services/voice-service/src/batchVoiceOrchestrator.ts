@@ -7,7 +7,7 @@ import { VoiceError } from './livekit/MeetingAudioPublisher.js';
 import type { VoiceServiceLogger } from './logger.js';
 
 export interface BatchSttProvider {
-  transcribe(audio: Buffer, mimeType: string): Promise<BatchSttResult>;
+  transcribe(audio: Buffer, mimeType: string, signal?: AbortSignal): Promise<BatchSttResult>;
 }
 
 export interface BatchTtsProvider {
@@ -83,7 +83,12 @@ function failure(error: unknown): { code: VoiceErrorCode; message: string; retry
 }
 
 export class BatchVoiceOrchestrator {
-  private readonly active = new Map<string, AbortController>();
+  private readonly active = new Map<string, {
+    meetingSessionId: string;
+    controller: AbortController;
+    settled: Promise<void>;
+  }>();
+  private readonly closingMeetings = new Set<string>();
 
   public constructor(private readonly dependencies: BatchVoiceOrchestratorDependencies) {
     if (!Number.isInteger(dependencies.timeoutMs) || dependencies.timeoutMs <= 0) {
@@ -93,23 +98,30 @@ export class BatchVoiceOrchestrator {
 
   public enqueue(upload: BatchAudioUpload): boolean {
     const turnId = upload.token.turnId;
-    if (this.active.has(turnId)) return false;
+    if (this.active.has(turnId) || this.closingMeetings.has(upload.token.meetingSessionId)) return false;
     const controller = new AbortController();
-    this.active.set(turnId, controller);
-    void this.run(upload, controller).finally(() => this.active.delete(turnId));
+    const settled = this.run(upload, controller).finally(() => this.active.delete(turnId));
+    this.active.set(turnId, { meetingSessionId: upload.token.meetingSessionId, controller, settled });
     return true;
   }
 
   public cancel(turnId: string): boolean {
-    const controller = this.active.get(turnId);
-    if (!controller) return false;
-    controller.abort('cancelled');
+    const active = this.active.get(turnId);
+    if (!active) return false;
+    active.controller.abort('cancelled');
     return true;
   }
 
+  public async cancelMeeting(meetingSessionId: string): Promise<void> {
+    this.closingMeetings.add(meetingSessionId);
+    const matching = [...this.active.values()].filter((active) => active.meetingSessionId === meetingSessionId);
+    for (const active of matching) active.controller.abort('meeting-ended');
+    await Promise.allSettled(matching.map((active) => active.settled));
+  }
+
   public cancelAll(): void {
-    for (const controller of this.active.values()) {
-      controller.abort('shutdown');
+    for (const active of this.active.values()) {
+      active.controller.abort('shutdown');
     }
   }
 
@@ -123,7 +135,7 @@ export class BatchVoiceOrchestrator {
       const context = await this.dependencies.control.getContext(base, controller.signal);
       stage = 'STT';
       await this.dependencies.control.emit({ ...base, kind: 'state', state: 'FINALIZING_STT' }, controller.signal);
-      const transcript = await this.dependencies.stt.transcribe(upload.audio, upload.contentType);
+      const transcript = await this.dependencies.stt.transcribe(upload.audio, upload.contentType, controller.signal);
       await this.dependencies.control.emit({
         ...base,
         kind: 'transcript',

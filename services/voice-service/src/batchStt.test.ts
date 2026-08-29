@@ -14,3 +14,14 @@ test("maps empty and timeout results", async () => {
   const timeout = new GoogleBatchSttAdapter(config, { recognize: async () => { throw { code: 4 }; } });
   await assert.rejects(() => timeout.transcribe(Buffer.from([1]), "audio/webm"), (error: unknown) => error instanceof BatchSttError && error.code === "VOICE_STT_TIMEOUT");
 });
+
+test('aborts the caller immediately and ignores a late provider result', async () => {
+  let resolveProvider!: (value: [any]) => void;
+  const provider = new Promise<[any]>((resolve) => { resolveProvider = resolve; });
+  const adapter = new GoogleBatchSttAdapter(config, { recognize: async () => provider });
+  const controller = new AbortController();
+  const result = adapter.transcribe(Buffer.from([1]), 'audio/webm', controller.signal);
+  controller.abort();
+  await assert.rejects(result, (error: unknown) => error instanceof BatchSttError && error.code === 'VOICE_CANCELLED');
+  resolveProvider([{ results: [{ alternatives: [{ transcript: 'late' }] }] }]);
+});

@@ -140,4 +140,36 @@ export class MeetingAiClient {
       unavailableCode: 'VOICE_AI_UNAVAILABLE',
     });
   }
+
+  private meetingLifecycleUrl(meetingSessionId: string, action: 'ending' | 'cleanup'): string {
+    const url = new URL(this.url);
+    url.pathname = `${url.pathname.replace(/\/$/, '')}/meetings/${encodeURIComponent(meetingSessionId)}/${action}`;
+    return url.toString();
+  }
+
+  public async beginMeetingCleanup(meetingSessionId: string, signal?: AbortSignal): Promise<void> {
+    await requestJson({
+      url: this.meetingLifecycleUrl(meetingSessionId, 'ending'),
+      serviceKeyHeader: 'x-meeting-ai-service-key',
+      serviceKey: this.serviceKey,
+      body: {},
+      timeoutMs: this.timeoutMs,
+      signal,
+      timeoutCode: 'VOICE_AI_TIMEOUT',
+      unavailableCode: 'VOICE_AI_UNAVAILABLE',
+    });
+  }
+
+  public async completeMeetingCleanup(meetingSessionId: string, signal?: AbortSignal): Promise<void> {
+    await requestJson({
+      url: this.meetingLifecycleUrl(meetingSessionId, 'cleanup'),
+      serviceKeyHeader: 'x-meeting-ai-service-key',
+      serviceKey: this.serviceKey,
+      body: {},
+      timeoutMs: this.timeoutMs,
+      signal,
+      timeoutCode: 'VOICE_AI_TIMEOUT',
+      unavailableCode: 'VOICE_AI_UNAVAILABLE',
+    });
+  }
 }

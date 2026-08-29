@@ -335,3 +335,21 @@ test('VoiceTurnController rejects workspace spoofing before acquiring a lock', a
   assert.equal(voiceLockService.owner, null);
   assert.equal(socket.events.at(-1)?.payload.code, 'VOICE_NOT_IN_CALL');
 });
+
+test('call cleanup clears transient history even when no active lock remains', async () => {
+  const { controller, voiceSessionStore } = createController();
+  voiceSessionStore.history.push({
+    id: 'old:user',
+    turnId: 'old',
+    role: 'user',
+    speakerUserId: 'user-1',
+    speakerName: 'User One',
+    displayText: 'old transcript',
+    createdAt: '2026-08-30T00:00:00.000Z',
+    status: 'COMPLETED',
+  });
+
+  await controller.cancelForCallCleanup('call-1');
+  assert.equal(voiceSessionStore.active, null);
+  assert.deepEqual(voiceSessionStore.history, []);
+});

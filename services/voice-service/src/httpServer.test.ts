@@ -61,6 +61,32 @@ test("returns 503 when readiness is false", async () => {
   });
 });
 
+test('protects and executes idempotent meeting cleanup through the internal boundary', async () => {
+  const calls: Array<{ meetingSessionId: string; cleanupId: string }> = [];
+  const internalServiceKey = 'test-voice-internal-key-with-32-characters';
+  await withServer(() => true, async (baseUrl) => {
+    const unauthorized = await fetch(`${baseUrl}/internal/voice/meetings/call-1/cleanup`, {
+      method: 'POST',
+      headers: { 'x-voice-cleanup-id': 'cleanup-1' },
+    });
+    assert.equal(unauthorized.status, 401);
+
+    const response = await fetch(`${baseUrl}/internal/voice/meetings/call-1/cleanup`, {
+      method: 'POST',
+      headers: {
+        'x-voice-internal-service-key': internalServiceKey,
+        'x-voice-cleanup-id': 'cleanup-1',
+      },
+    });
+    assert.equal(response.status, 200);
+    assert.deepEqual(calls, [{ meetingSessionId: 'call-1', cleanupId: 'cleanup-1' }]);
+  }, {
+    logger,
+    internalServiceKey,
+    onMeetingCleanup: async (meetingSessionId, cleanupId) => { calls.push({ meetingSessionId, cleanupId }); },
+  });
+});
+
 test("does not expose unimplemented routes", async () => {
   await withServer(() => true, async (baseUrl) => {
     const response = await fetch(`${baseUrl}/voice/turns/example/audio`, { method: "POST" });

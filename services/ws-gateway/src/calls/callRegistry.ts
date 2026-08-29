@@ -117,6 +117,29 @@ export class RedisCallParticipantRegistry {
     };
   }
 
+  public async updateStatus(meetingSessionId: string, status: CallRegistryStatus): Promise<boolean> {
+    if (!isCallRegistryStatus(status)) {
+      throw new Error('status must be a valid call registry status');
+    }
+    const key = getCallMetaKey(meetingSessionId);
+    const result = await this.redis.eval(
+      `
+        if redis.call('EXISTS', KEYS[1]) == 0 then
+          return 0
+        end
+        redis.call('HSET', KEYS[1], 'status', ARGV[1], 'updatedAt', ARGV[2])
+        redis.call('EXPIRE', KEYS[1], ARGV[3])
+        return 1
+      `,
+      1,
+      key,
+      status,
+      new Date().toISOString(),
+      this.ttlSeconds,
+    );
+    return Number(result) === 1;
+  }
+
   public async addParticipant(meetingSessionId: string, userId: string): Promise<void> {
     assertIdentifier(userId, 'userId');
     const key = getCallParticipantsKey(meetingSessionId);
