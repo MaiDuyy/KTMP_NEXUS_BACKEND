@@ -8,7 +8,8 @@
         "dev": "tsx watch --max-old-space-size=256  src/index.ts",
         "build": "tsc",
         "start": "node  --max-old-space-size=256  dist/index.js",
-        "test": "jest"
+        "test": "jest",
+        "test:voice": "tsx --test src/routes/proxy.voice.test.ts"
     },
     "dependencies": {
         "@grpc/grpc-js": "^1.14.3",

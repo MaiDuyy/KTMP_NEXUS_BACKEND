@@ -8,7 +8,7 @@ import { gatewayAuthMiddleware } from './middleware/auth.js';
 import { rateLimiter, strictRateLimiter } from './middleware/rateLimit.js';
 import { errorHandler } from './middleware/errorHandler.js';
 import { healthRoutes } from './routes/health.js';
-import { proxyRoutes } from './routes/proxy.js';
+import { proxyRoutes, voiceUploadRoutes } from './routes/proxy.js';
 import { demoRoutes } from './routes/demo.js';
 import { logger } from './lib/logger.js';
 import { connectNats, disconnectNats } from './lib/nats.js';
@@ -103,6 +103,8 @@ app.use(['/api/otp', '/otp'], strictRateLimiter);
 import { workspaceMiddleware } from './middleware/workspace.js';
 
 // Gateway auth: public paths bypass, protected paths enforce JWT
+// Voice upload uses a short-lived turn token verified by Voice Service, not a user access JWT.
+app.use(['/api', '/'], voiceUploadRoutes);
 app.use(['/api', '/'], gatewayAuthMiddleware, workspaceMiddleware, proxyRoutes);
 
 app.use((_req, res) => {

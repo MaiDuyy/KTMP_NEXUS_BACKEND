@@ -62,7 +62,8 @@ export function startGrpcServer() {
             participant_ids: chat.participants.map((p: any) => p.accountId),
             participant_count: chat.participantCount,
             updated_at: chat.updatedAt.toISOString(),
-            created_at: chat.createdAt.toISOString()
+            created_at: chat.createdAt.toISOString(),
+            workspace_id: chat.workspaceId || undefined
           }
         });
       } catch (err) {
