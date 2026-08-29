@@ -1,4 +1,4 @@
-import { SpeechClient } from "@google-cloud/speech";
+import { v2 } from "@google-cloud/speech";
 
 export interface BatchSttConfig { projectId: string; location: string; model: string; languageCode: string; timeoutMs: number; }
 export interface BatchSttResult { transcript: string; confidence: number | null; }
@@ -17,14 +17,22 @@ function withAbort<T>(operation: Promise<T>, signal?: AbortSignal): Promise<T> {
 }
 
 export class GoogleBatchSttAdapter {
-  public constructor(private readonly config: BatchSttConfig, private readonly client: SpeechRecognizerClient = new SpeechClient() as unknown as SpeechRecognizerClient) {}
+  public constructor(
+    private readonly config: BatchSttConfig,
+    private readonly client: SpeechRecognizerClient = new v2.SpeechClient({
+      projectId: config.projectId,
+      apiEndpoint: config.location && config.location !== "global"
+        ? config.location + "-speech.googleapis.com"
+        : undefined,
+    }) as unknown as SpeechRecognizerClient,
+  ) {}
   public async transcribe(audio: Buffer, mimeType: string, signal?: AbortSignal): Promise<BatchSttResult> {
     try {
       if (signal?.aborted) throw new BatchSttError("VOICE_CANCELLED");
       const recognition = this.client.recognize({
         recognizer: `projects/${this.config.projectId}/locations/${this.config.location}/recognizers/_`,
         config: { autoDecodingConfig: {}, languageCodes: [this.config.languageCode], model: this.config.model },
-        content: audio.toString("base64"),
+        content: audio,
       }, { timeout: this.config.timeoutMs });
       const [response] = await withAbort(recognition, signal);
       const alternatives = response.results?.flatMap((result: any) => result.alternatives ?? []) ?? [];
