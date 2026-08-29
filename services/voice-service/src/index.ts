@@ -6,6 +6,10 @@ import { createGracefulShutdown } from "./shutdown.js";
 import { Redis } from "ioredis";
 import { RedisTurnTokenReplayGuard } from "./turnTokenReplayGuard.js";
 import { VoiceTurnTokenVerifier } from "./turnTokenVerifier.js";
+import { MeetingAudioPublisher } from "./livekit/MeetingAudioPublisher.js";
+import { LivekitTokenService } from "./livekit/LivekitTokenService.js";
+import { DefaultLivekitAdapter } from "./livekit/LivekitAdapter.js";
+import { closeVoiceServiceResources } from "./resourceCleanup.js";
 
 export interface VoiceServiceInstance {
   config: VoiceServiceConfig;
@@ -21,12 +25,20 @@ export function createVoiceService(
   const turnTokenVerifier = config.voiceTurnTokenSecret && redis
     ? new VoiceTurnTokenVerifier({ secret: config.voiceTurnTokenSecret, replayGuard: new RedisTurnTokenReplayGuard(redis) })
     : undefined;
+
+  const tokenService = new LivekitTokenService(config);
+  const adapter = new DefaultLivekitAdapter();
+  const meetingAudioPublisher = new MeetingAudioPublisher(config, tokenService, adapter);
+
   const server = createVoiceHttpServer({ logger, turnTokenVerifier, onBatchAudio: async () => undefined });
   const shutdown = createGracefulShutdown({
     server,
     logger,
     timeoutMs: config.shutdownTimeoutMs,
-    onClose: () => redis?.disconnect(),
+    onClose: () => closeVoiceServiceResources({
+      closeLivekit: () => meetingAudioPublisher.closeAll(),
+      closeRedis: () => redis?.disconnect(),
+    }),
   });
   process.once("SIGINT", () => void shutdown("SIGINT"));
   process.once("SIGTERM", () => void shutdown("SIGTERM"));
