@@ -31,6 +31,7 @@ export type VoiceTurnCancelReason =
   | 'system';
 
 export type VoiceErrorCode =
+  | 'VOICE_FEATURE_DISABLED'
   | 'VOICE_NOT_IN_CALL'
   | 'VOICE_MEETING_NOT_ACTIVE'
   | 'VOICE_MEETING_ENDING'

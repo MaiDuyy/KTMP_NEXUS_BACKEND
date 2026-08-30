@@ -53,6 +53,55 @@ test("accepts bounded audio only after the turn token is consumed", async () => 
   }, { logger, turnTokenVerifier: verifier, onBatchAudio: (upload) => { uploads.push(upload); } });
 });
 
+test('rejects batch audio before token verification when the feature is disabled', async () => {
+  let verificationCalls = 0;
+  let uploadCalls = 0;
+  const verifier = {
+    verifyAndConsume: async () => {
+      verificationCalls += 1;
+      throw new Error('must not run');
+    },
+  } as unknown as VoiceTurnTokenVerifier;
+  await withServer(() => true, async (baseUrl) => {
+    const response = await fetch(`${baseUrl}/v1/voice/turns/turn-1/audio`, {
+      method: 'POST',
+      headers: { authorization: 'Bearer test', 'content-type': 'audio/webm', 'content-length': '3' },
+      body: new Uint8Array([1, 2, 3]),
+    });
+    assert.equal(response.status, 503);
+    assert.deepEqual(await response.json(), { code: 'VOICE_FEATURE_DISABLED' });
+    assert.equal(verificationCalls, 0);
+    assert.equal(uploadCalls, 0);
+  }, {
+    logger,
+    featureEnabled: false,
+    turnTokenVerifier: verifier,
+    onBatchAudio: () => { uploadCalls += 1; },
+  });
+});
+
+test('protects internal metrics and hides the endpoint when disabled', async () => {
+  const internalServiceKey = 'test-voice-internal-key-with-32-characters';
+  await withServer(() => true, async (baseUrl) => {
+    assert.equal((await fetch(`${baseUrl}/internal/voice/metrics`)).status, 404);
+  });
+
+  await withServer(() => true, async (baseUrl) => {
+    assert.equal((await fetch(`${baseUrl}/internal/voice/metrics`)).status, 401);
+    const response = await fetch(`${baseUrl}/internal/voice/metrics`, {
+      headers: { 'x-voice-internal-service-key': internalServiceKey },
+    });
+    assert.equal(response.status, 200);
+    assert.equal(response.headers.get('cache-control'), 'no-store');
+    assert.match(response.headers.get('content-type') ?? '', /text\/plain/);
+    assert.equal(await response.text(), '# metrics\n');
+  }, {
+    logger,
+    internalServiceKey,
+    metrics: { contentType: 'text/plain; version=0.0.4', render: async () => '# metrics\n' },
+  });
+});
+
 test("returns 503 when readiness is false", async () => {
   await withServer(() => false, async (baseUrl) => {
     const response = await fetch(`${baseUrl}/readyz`);

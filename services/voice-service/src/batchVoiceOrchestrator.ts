@@ -5,6 +5,12 @@ import { BatchTtsError, type BatchTtsResult } from './batchTts.js';
 import { InternalServiceError, type MeetingAiRequest, type MeetingAiResponse } from './internalClients.js';
 import { VoiceError } from './livekit/MeetingAudioPublisher.js';
 import type { VoiceServiceLogger } from './logger.js';
+import type {
+  VoicePipelineMetrics,
+  VoicePipelineOutcome,
+  VoicePipelineStage,
+  VoiceStageOutcome,
+} from './voiceMetrics.js';
 
 export interface BatchSttProvider {
   transcribe(audio: Buffer, mimeType: string, signal?: AbortSignal): Promise<BatchSttResult>;
@@ -54,7 +60,13 @@ export interface BatchVoiceOrchestratorDependencies {
   control: VoiceControlProvider;
   logger: VoiceServiceLogger;
   timeoutMs: number;
+  metrics?: VoicePipelineMetrics;
 }
+
+const NOOP_METRICS: VoicePipelineMetrics = {
+  recordStage: () => undefined,
+  recordPipeline: () => undefined,
+};
 
 function failure(error: unknown): { code: VoiceErrorCode; message: string; retryable: boolean } {
   const code = error instanceof BatchSttError ||
@@ -128,12 +140,30 @@ export class BatchVoiceOrchestrator {
   private async run(upload: BatchAudioUpload, controller: AbortController): Promise<void> {
     const { meetingSessionId, turnId, userId } = upload.token;
     const startedAt = Date.now();
+    const monotonicStartedAt = performance.now();
     const timeout = setTimeout(() => controller.abort('pipeline-timeout'), this.dependencies.timeoutMs);
     const base = { meetingSessionId, turnId, ownerUserId: userId } as const;
-    let stage = 'CONTEXT';
+    const metrics = this.dependencies.metrics ?? NOOP_METRICS;
+    let stage: VoicePipelineStage = 'context';
+    let stageStartedAt = monotonicStartedAt;
+    let stageRecorded = false;
+    const recordStage = (outcome: VoiceStageOutcome): void => {
+      if (stageRecorded) return;
+      metrics.recordStage(stage, outcome, (performance.now() - stageStartedAt) / 1000);
+      stageRecorded = true;
+    };
+    const moveToStage = (next: VoicePipelineStage): void => {
+      recordStage('completed');
+      stage = next;
+      stageStartedAt = performance.now();
+      stageRecorded = false;
+    };
+    const recordPipeline = (outcome: VoicePipelineOutcome, code: VoiceErrorCode | 'none'): void => {
+      metrics.recordPipeline(outcome, code, (performance.now() - monotonicStartedAt) / 1000);
+    };
     try {
       const context = await this.dependencies.control.getContext(base, controller.signal);
-      stage = 'STT';
+      moveToStage('stt');
       await this.dependencies.control.emit({ ...base, kind: 'state', state: 'FINALIZING_STT' }, controller.signal);
       const transcript = await this.dependencies.stt.transcribe(upload.audio, upload.contentType, controller.signal);
       await this.dependencies.control.emit({
@@ -144,7 +174,7 @@ export class BatchVoiceOrchestrator {
         confidence: transcript.confidence,
       }, controller.signal);
 
-      stage = 'AI';
+      moveToStage('ai');
       await this.dependencies.control.emit({ ...base, kind: 'state', state: 'THINKING' }, controller.signal);
       const answer = await this.dependencies.ai.answer({
         meetingSessionId,
@@ -166,11 +196,11 @@ export class BatchVoiceOrchestrator {
         sources: [],
       }, controller.signal);
 
-      stage = 'TTS';
+      moveToStage('tts');
       await this.dependencies.control.emit({ ...base, kind: 'state', state: 'RESPONDING' }, controller.signal);
       const audio = await this.dependencies.tts.synthesize(answer.speechText, controller.signal);
 
-      stage = 'LIVEKIT';
+      moveToStage('livekit');
       const published = await this.dependencies.publisher.publish({
         meetingSessionId,
         roomName: context.roomName,
@@ -182,18 +212,24 @@ export class BatchVoiceOrchestrator {
         throw new VoiceError('VOICE_LIVEKIT_PUBLISH_FAILED');
       }
 
-      stage = 'COMPLETED';
+      recordStage('completed');
       await this.dependencies.control.emit({ ...base, kind: 'terminal', state: 'COMPLETED' });
+      recordPipeline('completed', 'none');
       this.dependencies.logger.info({ meetingSessionId, turnId, durationMs: Date.now() - startedAt }, 'Voice turn completed');
     } catch (error) {
       if (error instanceof InternalServiceError && error.code === 'VOICE_CANCELLED') {
+        recordStage('cancelled');
+        recordPipeline('ownership_expired', 'VOICE_CANCELLED');
         this.dependencies.logger.info({ meetingSessionId, turnId, stage }, 'Voice turn stopped because ownership expired');
         return;
       }
       if (controller.signal.aborted && controller.signal.reason !== 'pipeline-timeout') {
+        recordStage('cancelled');
+        recordPipeline('cancelled', 'VOICE_CANCELLED');
         this.dependencies.logger.info({ meetingSessionId, turnId, stage }, 'Voice turn cancelled');
         return;
       }
+      const timedOut = controller.signal.reason === 'pipeline-timeout';
       const resolved = controller.signal.reason === 'pipeline-timeout'
         ? {
           code: 'VOICE_INTERNAL_ERROR' as const,
@@ -201,6 +237,8 @@ export class BatchVoiceOrchestrator {
           retryable: true,
         }
         : failure(error);
+      recordStage(timedOut ? 'timeout' : 'failed');
+      recordPipeline(timedOut ? 'timeout' : 'failed', resolved.code);
       await this.dependencies.control.emit({
         ...base,
         kind: 'terminal',

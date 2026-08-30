@@ -7,10 +7,14 @@ import type { VoiceTurnController } from './voiceTurnController.js';
 
 const serviceKey = 'test-internal-service-key-with-32-characters';
 
-async function withServer(controller: Partial<VoiceTurnController>, run: (baseUrl: string) => Promise<void>) {
+async function withServer(
+  controller: Partial<VoiceTurnController>,
+  run: (baseUrl: string) => Promise<void>,
+  metrics?: { contentType: string; render(): Promise<string> },
+) {
   const app = express();
   app.use(express.json());
-  app.use('/internal/voice', createVoiceInternalRouter(controller as VoiceTurnController, serviceKey));
+  app.use('/internal/voice', createVoiceInternalRouter(controller as VoiceTurnController, serviceKey, metrics));
   const server = createServer(app);
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
   const address = server.address();
@@ -37,6 +41,23 @@ test('internal voice routes reject missing and incorrect service credentials', a
       assert.equal(response.headers.get('cache-control'), 'no-store');
     }
   });
+});
+
+test('internal metrics are hidden when disabled and protected when enabled', async () => {
+  await withServer({}, async (baseUrl) => {
+    assert.equal((await fetch(`${baseUrl}/metrics`)).status, 404);
+  });
+
+  await withServer({}, async (baseUrl) => {
+    assert.equal((await fetch(`${baseUrl}/metrics`)).status, 401);
+    const response = await fetch(`${baseUrl}/metrics`, {
+      headers: { 'x-voice-internal-service-key': serviceKey },
+    });
+    assert.equal(response.status, 200);
+    assert.equal(response.headers.get('cache-control'), 'no-store');
+    assert.match(response.headers.get('content-type') ?? '', /text\/plain/);
+    assert.equal(await response.text(), '# metrics\n');
+  }, { contentType: 'text/plain; version=0.0.4', render: async () => '# metrics\n' });
 });
 
 test('internal voice routes expose only current context and reject stale events', async () => {

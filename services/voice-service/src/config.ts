@@ -1,4 +1,6 @@
 export interface VoiceServiceConfig {
+  meetingVoiceEnabled: boolean;
+  voiceMetricsEnabled: boolean;
   host: string;
   port: number;
   shutdownTimeoutMs: number;
@@ -31,6 +33,13 @@ export interface VoiceServiceConfig {
 
 const DEFAULT_PORT = 3035;
 const DEFAULT_SHUTDOWN_TIMEOUT_MS = 10_000;
+
+function readBoolean(value: string | undefined, fallback: boolean, variableName: string): boolean {
+  if (value === undefined || value === '') return fallback;
+  if (value === 'true' || value === '1') return true;
+  if (value === 'false' || value === '0') return false;
+  throw new Error(`${variableName} must be true, false, 1, or 0`);
+}
 
 function readPositiveInteger(
   value: string | undefined,
@@ -135,6 +144,8 @@ export function loadVoiceServiceConfig(env: NodeJS.ProcessEnv = process.env): Vo
   const lkCredentials = readLiveKitCredentials(env, nodeEnv);
 
   return {
+    meetingVoiceEnabled: readBoolean(env.MEETING_VOICE_ENABLED, nodeEnv !== 'production', 'MEETING_VOICE_ENABLED'),
+    voiceMetricsEnabled: readBoolean(env.VOICE_METRICS_ENABLED, nodeEnv !== 'production', 'VOICE_METRICS_ENABLED'),
     host: readNonEmptyString(env.VOICE_SERVICE_HOST, "0.0.0.0", "VOICE_SERVICE_HOST"),
     port: readPositiveInteger(env.VOICE_SERVICE_PORT ?? env.PORT, DEFAULT_PORT, "VOICE_SERVICE_PORT"),
     shutdownTimeoutMs: readPositiveInteger(

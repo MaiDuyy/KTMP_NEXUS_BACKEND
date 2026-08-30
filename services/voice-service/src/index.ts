@@ -15,6 +15,7 @@ import { GoogleBatchTtsAdapter } from './batchTts.js';
 import { MeetingAiClient, VoiceControlClient } from './internalClients.js';
 import { BatchVoiceOrchestrator } from './batchVoiceOrchestrator.js';
 import { MeetingCleanupCoordinator } from './meetingCleanupCoordinator.js';
+import { VoiceServiceMetrics } from './voiceMetrics.js';
 
 export interface VoiceServiceInstance {
   config: VoiceServiceConfig;
@@ -26,7 +27,8 @@ export function createVoiceService(
   config: VoiceServiceConfig = loadVoiceServiceConfig(),
   logger: VoiceServiceLogger = createVoiceServiceLogger(config),
 ): VoiceServiceInstance {
-  const redis = config.voiceTurnTokenSecret ? new Redis(config.redisUrl) : null;
+  const voiceMetrics = config.voiceMetricsEnabled ? new VoiceServiceMetrics() : undefined;
+  const redis = config.meetingVoiceEnabled && config.voiceTurnTokenSecret ? new Redis(config.redisUrl) : null;
   const turnTokenVerifier = config.voiceTurnTokenSecret && redis
     ? new VoiceTurnTokenVerifier({ secret: config.voiceTurnTokenSecret, replayGuard: new RedisTurnTokenReplayGuard(redis) })
     : undefined;
@@ -35,7 +37,7 @@ export function createVoiceService(
   const adapter = new DefaultLivekitAdapter();
   const meetingAudioPublisher = new MeetingAudioPublisher(config, tokenService, adapter);
 
-  const pipelineConfigured = Boolean(
+  const pipelineConfigured = config.meetingVoiceEnabled && Boolean(
     config.googleCloudProject &&
     config.meetingAiInternalUrl &&
     config.meetingAiInternalServiceKey &&
@@ -76,6 +78,7 @@ export function createVoiceService(
       ),
       logger,
       timeoutMs: config.pipelineTimeoutMs,
+      metrics: voiceMetrics,
     })
     : null;
   const meetingCleanupCoordinator = meetingAiClient
@@ -90,9 +93,11 @@ export function createVoiceService(
 
   const server = createVoiceHttpServer({
     logger,
-    isReady: () => Boolean(turnTokenVerifier && orchestrator),
+    isReady: () => !config.meetingVoiceEnabled || Boolean(turnTokenVerifier && orchestrator),
     turnTokenVerifier,
     internalServiceKey: config.voiceInternalServiceKey,
+    featureEnabled: config.meetingVoiceEnabled,
+    metrics: voiceMetrics,
     onMeetingCleanup: meetingCleanupCoordinator
       ? (meetingSessionId, cleanupId) => meetingCleanupCoordinator.cleanup(meetingSessionId, cleanupId)
       : undefined,

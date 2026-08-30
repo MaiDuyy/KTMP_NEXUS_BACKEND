@@ -19,6 +19,8 @@ import { getVoiceTurnTokenTtlSeconds, VoiceTurnTokenIssuer } from './voice/turnT
 import { VoiceTurnController } from './voice/voiceTurnController.js';
 import { createVoiceInternalRouter } from './voice/internalVoiceRouter.js';
 import { VoiceMeetingCleanupClient } from './voice/voiceMeetingCleanupClient.js';
+import { loadVoiceFeaturePolicy, readVoiceMetricsEnabled } from './voice/voiceFeaturePolicy.js';
+import { VoiceControlMetrics } from './voice/voiceMetrics.js';
 
 // Redis client for call status and distributed locks
 
@@ -40,6 +42,8 @@ const LIVEKIT_URL = process.env.LIVEKIT_URL || 'ws://localhost:7880';
 const VOICE_PUBLIC_API_URL = process.env.VOICE_PUBLIC_API_URL || 'http://localhost:3000/api';
 const VOICE_INTERNAL_SERVICE_KEY = process.env.VOICE_INTERNAL_SERVICE_KEY || null;
 const VOICE_SERVICE_INTERNAL_URL = process.env.VOICE_SERVICE_INTERNAL_URL || 'http://localhost:3035/internal/voice';
+const voiceFeaturePolicy = loadVoiceFeaturePolicy();
+const voiceMetrics = readVoiceMetricsEnabled() ? new VoiceControlMetrics() : undefined;
 const redis = new Redis(REDIS_URL);
 const callRegistry = new RedisCallParticipantRegistry(redis);
 const voiceLockService = new RedisVoiceLockService(redis);
@@ -67,6 +71,9 @@ let orphanCleanupInterval: NodeJS.Timeout | null = null;
 let voiceCleanupRetryInterval: NodeJS.Timeout | null = null;
 
 function createVoiceTurnTokenIssuer(): VoiceTurnTokenIssuer | null {
+  if (!voiceFeaturePolicy.enabled) {
+    return null;
+  }
   const secret = process.env.VOICE_TURN_TOKEN_SECRET;
   if (!secret) {
     if (process.env.NODE_ENV === 'production') {
@@ -256,12 +263,28 @@ async function generateLiveKitToken(userId: string, userName: string, roomName: 
 async function sendVoiceMeetingCleanup(roomName: string, cleanupId: string): Promise<void> {
   if (!voiceMeetingCleanupClient) return;
   await redis.hset(PENDING_VOICE_CLEANUP_KEY, roomName, cleanupId);
-  await voiceMeetingCleanupClient.cleanupMeeting(roomName, cleanupId);
-  await redis.hdel(PENDING_VOICE_CLEANUP_KEY, roomName);
+  await refreshPendingVoiceCleanupMetric();
+  try {
+    await voiceMeetingCleanupClient.cleanupMeeting(roomName, cleanupId);
+    await redis.hdel(PENDING_VOICE_CLEANUP_KEY, roomName);
+    voiceMetrics?.recordCleanup('completed');
+  } catch (error) {
+    voiceMetrics?.recordCleanup('failed');
+    throw error;
+  } finally {
+    await refreshPendingVoiceCleanupMetric();
+  }
+}
+
+async function refreshPendingVoiceCleanupMetric(): Promise<void> {
+  if (!voiceMetrics) return;
+  const count = await redis.hlen(PENDING_VOICE_CLEANUP_KEY).catch(() => null);
+  if (count !== null) voiceMetrics.setPendingCleanup(count);
 }
 
 async function retryPendingVoiceCleanups(): Promise<void> {
   if (!voiceMeetingCleanupClient) return;
+  await refreshPendingVoiceCleanupMetric();
   let cursor = '0';
   do {
     const [nextCursor, entries] = await redis.hscan(PENDING_VOICE_CLEANUP_KEY, cursor, 'COUNT', 20);
@@ -270,11 +293,18 @@ async function retryPendingVoiceCleanups(): Promise<void> {
       const roomName = entries[index];
       const cleanupId = entries[index + 1];
       await voiceMeetingCleanupClient.cleanupMeeting(roomName, cleanupId)
-        .then(() => redis.hdel(PENDING_VOICE_CLEANUP_KEY, roomName))
-        .catch((error) => console.error('[Voice] Pending meeting cleanup retry failed:', {
-          roomName,
-          message: error instanceof Error ? error.message : 'unknown error',
-        }));
+        .then(async () => {
+          await redis.hdel(PENDING_VOICE_CLEANUP_KEY, roomName);
+          voiceMetrics?.recordCleanup('retry_completed');
+        })
+        .catch((error) => {
+          voiceMetrics?.recordCleanup('retry_failed');
+          console.error('[Voice] Pending meeting cleanup retry failed:', {
+            roomName,
+            message: error instanceof Error ? error.message : 'unknown error',
+          });
+        });
+      await refreshPendingVoiceCleanupMetric();
     }
   } while (cursor !== '0');
 }
@@ -529,12 +559,14 @@ const voiceTurnController = new VoiceTurnController({
   voiceSessionStore,
   tokenIssuer: voiceTurnTokenIssuer,
   voicePublicApiUrl: VOICE_PUBLIC_API_URL,
+  featurePolicy: voiceFeaturePolicy,
+  metrics: voiceMetrics,
 });
 
 app.use(
   '/internal/voice',
   express.json({ limit: '64kb' }),
-  createVoiceInternalRouter(voiceTurnController, VOICE_INTERNAL_SERVICE_KEY),
+  createVoiceInternalRouter(voiceTurnController, VOICE_INTERNAL_SERVICE_KEY, voiceMetrics),
 );
 
 // ============= REDIS ADAPTER (Optional) =============
