@@ -17,6 +17,8 @@ import type { CallRegistryMeta, RedisCallParticipantRegistry } from '../calls/ca
 import type { RedisVoiceLockService } from './voiceLockService.js';
 import type { VoiceSessionStore } from './voiceSessionStore.js';
 import type { VoiceTurnTokenIssuer } from './turnTokenService.js';
+import type { VoiceFeaturePolicy } from './voiceFeaturePolicy.js';
+import type { VoiceTurnMetrics, VoiceTurnStartOutcome } from './voiceMetrics.js';
 
 const MAX_IDENTIFIER_LENGTH = 256;
 const PIPELINE_STATES = new Set(['FINALIZING_STT', 'THINKING', 'RESPONDING']);
@@ -47,7 +49,20 @@ export interface VoiceTurnControllerDependencies {
   voiceSessionStore: VoiceSessionStore;
   tokenIssuer: VoiceTurnTokenIssuer | null;
   voicePublicApiUrl: string;
+  featurePolicy?: VoiceFeaturePolicy;
+  metrics?: VoiceTurnMetrics;
 }
+
+const DEFAULT_FEATURE_POLICY: VoiceFeaturePolicy = {
+  enabled: true,
+  allowedWorkspaceIds: new Set(),
+  isWorkspaceAllowed: () => true,
+};
+
+const NOOP_METRICS: VoiceTurnMetrics = {
+  recordStart: () => undefined,
+  recordTerminal: () => undefined,
+};
 
 export interface VoiceTurnRequestContext {
   socket: VoiceSocket;
@@ -139,22 +154,36 @@ export class VoiceTurnController {
 
   public async start(request: VoiceTurnStartRequest): Promise<void> {
     const { payload, socket, userId, userName } = request;
+    const startedAt = performance.now();
+    const recordStart = (outcome: VoiceTurnStartOutcome): void => {
+      this.metrics.recordStart(outcome, (performance.now() - startedAt) / 1000);
+    };
     if (!this.isValidStartPayload(payload)) {
       emitError(socket, this.getMeetingSessionId(payload), null, 'VOICE_INTERNAL_ERROR', 'Yêu cầu AI Voice không hợp lệ.', false);
+      recordStart('invalid');
       return;
     }
 
     const authorized = await this.authorizeMember(socket, userId, payload.meetingSessionId, payload.chatId);
     if (!authorized) {
+      recordStart('unauthorized');
       return;
     }
     if (!authorized.meta.workspaceId || authorized.meta.workspaceId !== payload.workspaceId) {
       emitError(socket, payload.meetingSessionId, null, 'VOICE_NOT_IN_CALL', 'Ngữ cảnh workspace của cuộc họp không khớp.', false);
+      recordStart('unauthorized');
+      return;
+    }
+
+    if (!this.featurePolicy.isWorkspaceAllowed(payload.workspaceId)) {
+      emitError(socket, payload.meetingSessionId, null, 'VOICE_FEATURE_DISABLED', 'AI Voice chưa được bật cho workspace này.', false);
+      recordStart('feature_disabled');
       return;
     }
 
     if (!this.dependencies.tokenIssuer) {
       emitError(socket, payload.meetingSessionId, null, 'VOICE_INTERNAL_ERROR', 'AI Voice chưa được cấu hình.', false);
+      recordStart('unconfigured');
       return;
     }
 
@@ -163,6 +192,7 @@ export class VoiceTurnController {
     if (!lock) {
       const owner = await this.dependencies.voiceLockService.get(payload.meetingSessionId);
       emitError(socket, payload.meetingSessionId, owner?.turnId ?? null, 'VOICE_LOCKED_BY_OTHER', 'Một thành viên khác đang hỏi AI.', true);
+      recordStart('locked');
       return;
     }
 
@@ -197,10 +227,12 @@ export class VoiceTurnController {
         streamUrl: getVoicePublicUrl(this.dependencies.voicePublicApiUrl, turnId, 'stream'),
         expiresAt: issuedToken.expiresAt,
       });
+      recordStart('accepted');
     } catch (error) {
       await this.dependencies.voiceLockService.release(lock).catch(() => false);
       await this.dependencies.voiceSessionStore.clearActive(payload.meetingSessionId, turnId, userId).catch(() => false);
       emitError(socket, payload.meetingSessionId, turnId, 'VOICE_INTERNAL_ERROR', 'Không thể khởi tạo lượt AI Voice.', true);
+      recordStart('internal_error');
     }
   }
 
@@ -255,6 +287,10 @@ export class VoiceTurnController {
     const meetingSessionId = this.getMeetingSessionId(request.payload);
     const authorized = await this.authorizeMember(request.socket, request.userId, meetingSessionId);
     if (!authorized) {
+      return null;
+    }
+    if (!authorized.meta.workspaceId || !this.featurePolicy.isWorkspaceAllowed(authorized.meta.workspaceId)) {
+      emitError(request.socket, meetingSessionId, null, 'VOICE_FEATURE_DISABLED', 'AI Voice chưa được bật cho workspace này.', false);
       return null;
     }
 
@@ -472,6 +508,7 @@ export class VoiceTurnController {
       meetingSessionId: event.meetingSessionId,
       completedTurnId: event.turnId,
     });
+    this.metrics.recordTerminal(event.state);
     return true;
   }
 
@@ -504,6 +541,7 @@ export class VoiceTurnController {
           ownerName: null,
           state: 'IDLE',
         });
+        this.metrics.recordTerminal('CANCELLED');
       }
     }
     await this.dependencies.voiceSessionStore.clearSession(meetingSessionId);
@@ -576,6 +614,15 @@ export class VoiceTurnController {
       state: 'IDLE',
     });
     this.dependencies.broadcaster.to(callRoom).emit('voice:ready', { meetingSessionId, completedTurnId: turnId });
+    this.metrics.recordTerminal(state);
+  }
+
+  private get featurePolicy(): VoiceFeaturePolicy {
+    return this.dependencies.featurePolicy ?? DEFAULT_FEATURE_POLICY;
+  }
+
+  private get metrics(): VoiceTurnMetrics {
+    return this.dependencies.metrics ?? NOOP_METRICS;
   }
 
   private async authorizeMember(

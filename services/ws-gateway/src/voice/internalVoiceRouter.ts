@@ -3,6 +3,11 @@ import { Router } from 'express';
 import type { VoicePipelineContextRequest, VoicePipelineEvent } from '@ott/shared';
 import type { VoiceTurnController } from './voiceTurnController.js';
 
+export interface VoiceMetricsEndpoint {
+  contentType: string;
+  render(): Promise<string>;
+}
+
 export const VOICE_INTERNAL_SERVICE_KEY_HEADER = 'x-voice-internal-service-key';
 
 function digest(value: string): Buffer {
@@ -19,8 +24,22 @@ function authorized(provided: unknown, expected: string | null): boolean {
 export function createVoiceInternalRouter(
   controller: VoiceTurnController,
   serviceKey: string | null,
+  metrics?: VoiceMetricsEndpoint,
 ): Router {
   const router = Router();
+  router.get('/metrics', async (request, response) => {
+    response.setHeader('Cache-Control', 'no-store');
+    if (!metrics) {
+      response.status(404).json({ error: 'not_found' });
+      return;
+    }
+    if (!authorized(request.headers[VOICE_INTERNAL_SERVICE_KEY_HEADER], serviceKey)) {
+      response.status(401).json({ code: 'VOICE_INTERNAL_UNAUTHORIZED' });
+      return;
+    }
+    response.status(200).type(metrics.contentType).send(await metrics.render());
+  });
+
   router.use((request, response, next) => {
     response.setHeader('Cache-Control', 'no-store');
     if (!authorized(request.headers[VOICE_INTERNAL_SERVICE_KEY_HEADER], serviceKey)) {

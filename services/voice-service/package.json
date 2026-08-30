@@ -19,6 +19,7 @@
     "@google-cloud/text-to-speech": "^6.0.0",
     "@livekit/rtc-node": "0.13.34",
     "@ott/shared": "file:../../packages/shared",
+    "@prometheus-io/client": "^0.16.1",
     "ioredis": "^5.4.1",
     "jsonwebtoken": "^9.0.2",
     "livekit-server-sdk": "2.18.0",

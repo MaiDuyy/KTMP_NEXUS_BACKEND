@@ -133,7 +133,11 @@ class FakeVoiceSessionStore implements VoiceSessionStore {
   public async clearSession(): Promise<void> { this.active = null; this.history.length = 0; }
 }
 
-function createController() {
+function createController(options: {
+  featureEnabled?: boolean;
+  allowedWorkspaceIds?: string[];
+  startOutcomes?: string[];
+} = {}) {
   const broadcaster = new FakeBroadcaster();
   const callRegistry = new FakeCallRegistry();
   const voiceLockService = new FakeVoiceLockService();
@@ -146,6 +150,17 @@ function createController() {
     voiceSessionStore,
     tokenIssuer: issuer,
     voicePublicApiUrl: 'http://gateway.example.test/api',
+    featurePolicy: {
+      enabled: options.featureEnabled ?? true,
+      allowedWorkspaceIds: new Set(options.allowedWorkspaceIds ?? []),
+      isWorkspaceAllowed: (workspaceId) => (options.featureEnabled ?? true) && (
+        !options.allowedWorkspaceIds?.length || options.allowedWorkspaceIds.includes(workspaceId)
+      ),
+    },
+    metrics: {
+      recordStart: (outcome) => options.startOutcomes?.push(outcome),
+      recordTerminal: () => undefined,
+    },
   });
 
   return { broadcaster, callRegistry, voiceLockService, voiceSessionStore, controller };
@@ -169,6 +184,34 @@ test('VoiceTurnTokenIssuer creates short-lived Voice Service credentials with bo
   assert.equal(decoded.chatId, 'chat-1');
   assert.equal(decoded.exp! - decoded.iat!, 90);
   assert.equal(issued.expiresAt, '2026-08-28T00:01:30.000Z');
+});
+
+test('VoiceTurnController rejects a disabled workspace before acquiring a lock or issuing a token', async () => {
+  const outcomes: string[] = [];
+  const { controller, voiceLockService, voiceSessionStore } = createController({
+    allowedWorkspaceIds: ['workspace-allowed'],
+    startOutcomes: outcomes,
+  });
+  const socket = new FakeSocket();
+
+  await controller.start({
+    socket,
+    userId: 'user-1',
+    userName: 'User One',
+    payload: {
+      meetingSessionId: 'call-1',
+      chatId: 'chat-1',
+      workspaceId: 'workspace-1',
+      clientRequestId: 'request-disabled',
+      mode: 'rag',
+    },
+  });
+
+  assert.equal(voiceLockService.owner, null);
+  assert.equal(await voiceSessionStore.getActive(), null);
+  assert.deepEqual(outcomes, ['feature_disabled']);
+  assert.equal(socket.events.at(-1)?.event, 'voice:error');
+  assert.equal((socket.events.at(-1)?.payload as { code: string }).code, 'VOICE_FEATURE_DISABLED');
 });
 
 test('VoiceTurnTokenIssuer rejects weak secrets and TTL values above the replay window', () => {

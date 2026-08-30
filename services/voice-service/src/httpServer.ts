@@ -11,6 +11,8 @@ export interface VoiceHttpServerOptions {
   onBatchAudio?: (upload: BatchAudioUpload) => Promise<void> | void;
   internalServiceKey?: string | null;
   onMeetingCleanup?: (meetingSessionId: string, cleanupId: string) => Promise<void>;
+  featureEnabled?: boolean;
+  metrics?: { contentType: string; render(): Promise<string> };
 }
 
 function internalAuthorized(request: IncomingMessage, expected?: string | null): boolean {
@@ -28,6 +30,14 @@ function writeJson(response: ServerResponse, statusCode: number, body: Record<st
   response.end(JSON.stringify(body));
 }
 
+function writeMetrics(response: ServerResponse, contentType: string, body: string): void {
+  response.writeHead(200, {
+    'cache-control': 'no-store',
+    'content-type': contentType,
+  });
+  response.end(body);
+}
+
 async function handleRequest(
   request: IncomingMessage,
   response: ServerResponse,
@@ -36,7 +46,22 @@ async function handleRequest(
   onBatchAudio?: (upload: BatchAudioUpload) => Promise<void> | void,
   internalServiceKey?: string | null,
   onMeetingCleanup?: (meetingSessionId: string, cleanupId: string) => Promise<void>,
+  featureEnabled = true,
+  metrics?: { contentType: string; render(): Promise<string> },
 ): Promise<void> {
+  if (request.method === 'GET' && request.url === '/internal/voice/metrics') {
+    if (!metrics) {
+      writeJson(response, 404, { error: 'not_found' });
+      return;
+    }
+    if (!internalAuthorized(request, internalServiceKey)) {
+      writeJson(response, 401, { code: 'VOICE_INTERNAL_UNAUTHORIZED' });
+      return;
+    }
+    writeMetrics(response, metrics.contentType, await metrics.render());
+    return;
+  }
+
   if (request.method === "GET" && request.url === "/healthz") {
     writeJson(response, 200, { status: "ok", service: "voice-service" });
     return;
@@ -77,6 +102,10 @@ async function handleRequest(
 
   const match = request.url?.match(/^\/v1\/voice\/turns\/([^/]+)\/audio$/);
   if (request.method === "POST" && match) {
+    if (!featureEnabled) {
+      writeJson(response, 503, { code: 'VOICE_FEATURE_DISABLED' });
+      return;
+    }
     if (!turnTokenVerifier || !onBatchAudio) {
       writeJson(response, 503, { code: "VOICE_INTERNAL_ERROR" });
       return;
@@ -105,6 +134,8 @@ export function createVoiceHttpServer(options: VoiceHttpServerOptions): Server {
     options.onBatchAudio,
     options.internalServiceKey,
     options.onMeetingCleanup,
+    options.featureEnabled,
+    options.metrics,
   ));
 
   server.on("clientError", (_error, socket) => {

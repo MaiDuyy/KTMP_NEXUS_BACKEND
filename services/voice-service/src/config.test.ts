@@ -6,6 +6,8 @@ test("uses safe defaults without provider credentials", () => {
   const config = loadVoiceServiceConfig({ NODE_ENV: "test" });
 
   assert.equal(config.host, "0.0.0.0");
+  assert.equal(config.meetingVoiceEnabled, true);
+  assert.equal(config.voiceMetricsEnabled, true);
   assert.equal(config.port, 3035);
   assert.equal(config.shutdownTimeoutMs, 10_000);
   assert.equal(config.logLevel, "info");
@@ -20,6 +22,30 @@ test("uses safe defaults without provider credentials", () => {
   assert.equal(config.livekitAiParticipantName, "Nexus AI");
   assert.equal(config.livekitConnectTimeoutMs, 15000);
   assert.equal(config.livekitPlayoutTimeoutMs, 70000);
+});
+
+test('feature and metrics flags default off in production and reject invalid values', () => {
+  const production = loadVoiceServiceConfig({
+    NODE_ENV: 'production',
+    VOICE_TURN_TOKEN_SECRET: '12345678901234567890123456789012',
+    VOICE_INTERNAL_SERVICE_KEY: '12345678901234567890123456789012',
+    MEETING_AI_INTERNAL_SERVICE_KEY: '12345678901234567890123456789012',
+    VOICE_CONTROL_INTERNAL_URL: 'http://voice-control.test',
+    MEETING_AI_INTERNAL_URL: 'http://meeting-ai.test',
+    LIVEKIT_URL: 'wss://livekit.test',
+    LIVEKIT_API_KEY: 'key',
+    LIVEKIT_API_SECRET: 'secret',
+  });
+  assert.equal(production.meetingVoiceEnabled, false);
+  assert.equal(production.voiceMetricsEnabled, false);
+  assert.throws(
+    () => loadVoiceServiceConfig({ MEETING_VOICE_ENABLED: 'yes' }),
+    /MEETING_VOICE_ENABLED must be true, false, 1, or 0/,
+  );
+  assert.throws(
+    () => loadVoiceServiceConfig({ VOICE_METRICS_ENABLED: 'yes' }),
+    /VOICE_METRICS_ENABLED must be true, false, 1, or 0/,
+  );
 });
 
 test("rejects invalid numeric configuration", () => {

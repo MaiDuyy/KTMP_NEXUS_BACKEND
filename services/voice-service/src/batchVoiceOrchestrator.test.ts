@@ -105,9 +105,14 @@ test('runs the complete batch pipeline and unlocks only after LiveKit publish', 
 
 test('maps provider failure to a terminal event without invoking later stages', async () => {
   let aiCalled = false;
+  const pipelines: Array<{ outcome: string; code: string }> = [];
   const { orchestrator, events, terminal } = fixture({
     stt: { transcribe: async () => { throw new BatchSttError('VOICE_NO_SPEECH'); } },
     ai: { answer: async () => { aiCalled = true; throw new Error('unexpected'); } },
+    metrics: {
+      recordStage: () => undefined,
+      recordPipeline: (outcome, code) => { pipelines.push({ outcome, code }); },
+    },
   });
 
   orchestrator.enqueue(upload());
@@ -117,6 +122,7 @@ test('maps provider failure to a terminal event without invoking later stages', 
   assert.deepEqual(events.map(({ kind }) => kind), ['state', 'terminal']);
   assert.equal((events.at(-1) as any).state, 'FAILED');
   assert.equal((events.at(-1) as any).code, 'VOICE_NO_SPEECH');
+  assert.deepEqual(pipelines, [{ outcome: 'failed', code: 'VOICE_NO_SPEECH' }]);
 });
 
 test('does not emit a stale terminal event after Gateway reports expired ownership', async () => {
@@ -135,6 +141,7 @@ test('does not emit a stale terminal event after Gateway reports expired ownersh
 
 test('cancels every active stage by meeting and rejects enqueue after meeting end', async () => {
   let sttAborted = false;
+  const pipelines: Array<{ outcome: string; code: string }> = [];
   const { orchestrator, events } = fixture({
     stt: {
       transcribe: async (_audio, _mimeType, signal) => new Promise((_resolve, reject) => {
@@ -144,6 +151,10 @@ test('cancels every active stage by meeting and rejects enqueue after meeting en
         }, { once: true });
       }),
     },
+    metrics: {
+      recordStage: () => undefined,
+      recordPipeline: (outcome, code) => { pipelines.push({ outcome, code }); },
+    },
   });
 
   assert.equal(orchestrator.enqueue(upload()), true);
@@ -152,4 +163,29 @@ test('cancels every active stage by meeting and rejects enqueue after meeting en
   assert.equal(sttAborted, true);
   assert.deepEqual(events.map(({ kind }) => kind), ['state']);
   assert.equal(orchestrator.enqueue(upload()), false);
+  assert.deepEqual(pipelines, [{ outcome: 'cancelled', code: 'VOICE_CANCELLED' }]);
+});
+
+test('records bounded stage and pipeline metrics for a completed turn', async () => {
+  const stages: Array<{ stage: string; outcome: string }> = [];
+  const pipelines: Array<{ outcome: string; code: string }> = [];
+  const { orchestrator, terminal } = fixture({
+    metrics: {
+      recordStage: (stage, outcome) => { stages.push({ stage, outcome }); },
+      recordPipeline: (outcome, code) => { pipelines.push({ outcome, code }); },
+    },
+  });
+
+  assert.equal(orchestrator.enqueue(upload()), true);
+  await terminal;
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.deepEqual(stages, [
+    { stage: 'context', outcome: 'completed' },
+    { stage: 'stt', outcome: 'completed' },
+    { stage: 'ai', outcome: 'completed' },
+    { stage: 'tts', outcome: 'completed' },
+    { stage: 'livekit', outcome: 'completed' },
+  ]);
+  assert.deepEqual(pipelines, [{ outcome: 'completed', code: 'none' }]);
 });
