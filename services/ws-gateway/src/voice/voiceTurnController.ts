@@ -13,6 +13,12 @@ import type {
   VoiceTurnEndPayload,
   VoiceTurnStartPayload,
 } from '@ott/shared';
+import {
+  VOICE_STREAM_CHANNEL_COUNT,
+  VOICE_STREAM_CHUNK_DURATION_MS,
+  VOICE_STREAM_PROTOCOL_VERSION,
+  VOICE_STREAM_SAMPLE_RATE_HZ,
+} from '@ott/shared';
 import type { CallRegistryMeta, RedisCallParticipantRegistry } from '../calls/callRegistry.js';
 import type { RedisVoiceLockService } from './voiceLockService.js';
 import type { VoiceSessionStore } from './voiceSessionStore.js';
@@ -49,6 +55,7 @@ export interface VoiceTurnControllerDependencies {
   voiceSessionStore: VoiceSessionStore;
   tokenIssuer: VoiceTurnTokenIssuer | null;
   voicePublicApiUrl: string;
+  voicePublicStreamUrl?: string | null;
   featurePolicy?: VoiceFeaturePolicy;
   metrics?: VoiceTurnMetrics;
 }
@@ -105,9 +112,15 @@ function getCallRoom(meetingSessionId: string): string {
   return `call:${meetingSessionId}`;
 }
 
-function getVoicePublicUrl(baseUrl: string, turnId: string, suffix: 'audio' | 'stream'): string {
+function getVoicePublicUrl(baseUrl: string, turnId: string, suffix: 'audio'): string {
   const url = new URL(baseUrl);
   url.pathname = `${url.pathname.replace(/\/$/, '')}/voice/turns/${encodeURIComponent(turnId)}/${suffix}`;
+  return url.toString();
+}
+
+function getVoiceStreamUrl(baseUrl: string, turnId: string): string {
+  const url = new URL(baseUrl);
+  url.pathname = `${url.pathname.replace(/\/$/, '')}/v1/voice/turns/${encodeURIComponent(turnId)}/stream`;
   return url.toString();
 }
 
@@ -219,12 +232,28 @@ export class VoiceTurnController {
         state: 'LISTENING',
       });
       emitState(this.dependencies.broadcaster, callRoom, payload.meetingSessionId, turnId, 'LISTENING');
+      const streamUrl = this.dependencies.voicePublicStreamUrl
+        ? getVoiceStreamUrl(this.dependencies.voicePublicStreamUrl, turnId)
+        : '';
       socket.emit('voice:turn:accepted', {
         meetingSessionId: payload.meetingSessionId,
         turnId,
         turnToken: issuedToken.token,
         uploadUrl: getVoicePublicUrl(this.dependencies.voicePublicApiUrl, turnId, 'audio'),
-        streamUrl: getVoicePublicUrl(this.dependencies.voicePublicApiUrl, turnId, 'stream'),
+        streamUrl,
+        ...(streamUrl ? {
+          stream: {
+            protocolVersion: VOICE_STREAM_PROTOCOL_VERSION,
+            audioFormat: {
+              encoding: 'LINEAR16',
+              sampleRateHz: VOICE_STREAM_SAMPLE_RATE_HZ,
+              channelCount: VOICE_STREAM_CHANNEL_COUNT,
+              chunkDurationMs: VOICE_STREAM_CHUNK_DURATION_MS,
+            },
+            authTimeoutMs: 5_000,
+            maxQueuedBytes: 256 * 1024,
+          },
+        } : {}),
         expiresAt: issuedToken.expiresAt,
       });
       recordStart('accepted');

@@ -3,6 +3,7 @@ import { createHash, timingSafeEqual } from 'node:crypto';
 import type { VoiceServiceLogger } from "./logger.js";
 import { readBatchAudioUpload, type BatchAudioUpload } from "./audioUpload.js";
 import type { VoiceTurnTokenVerifier } from "./turnTokenVerifier.js";
+import { attachVoiceWebSocketServer, type VoiceWebSocketServerOptions } from './streaming/voiceWebSocketServer.js';
 
 export interface VoiceHttpServerOptions {
   logger: VoiceServiceLogger;
@@ -13,6 +14,7 @@ export interface VoiceHttpServerOptions {
   onMeetingCleanup?: (meetingSessionId: string, cleanupId: string) => Promise<void>;
   featureEnabled?: boolean;
   metrics?: { contentType: string; render(): Promise<string> };
+  streaming?: VoiceWebSocketServerOptions;
 }
 
 function internalAuthorized(request: IncomingMessage, expected?: string | null): boolean {
@@ -142,6 +144,8 @@ export function createVoiceHttpServer(options: VoiceHttpServerOptions): Server {
     options.logger.warn("Rejected malformed HTTP request");
     socket.end("HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n");
   });
+
+  if (options.streaming) attachVoiceWebSocketServer(server, options.streaming);
 
   return server;
 }
