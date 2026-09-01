@@ -18,6 +18,7 @@ import { MeetingCleanupCoordinator } from './meetingCleanupCoordinator.js';
 import { VoiceServiceMetrics } from './voiceMetrics.js';
 import { GoogleStreamingSttAdapter } from './streaming/googleStreamingStt.js';
 import { StreamingVoiceSinkFactory } from './streaming/streamingVoiceSink.js';
+import { CachedSpeechAdaptationProvider, ConfiguredSpeechPhraseSource } from './streaming/speechAdaptation.js';
 
 export interface VoiceServiceInstance {
   config: VoiceServiceConfig;
@@ -94,11 +95,16 @@ export function createVoiceService(
       }),
       control: voiceControlClient,
       pipeline: orchestrator,
+      adaptation: new CachedSpeechAdaptationProvider(
+        new ConfiguredSpeechPhraseSource(config.googleStreamingSttPhrases),
+      ),
+      metrics: voiceMetrics,
     })
     : null;
   const meetingCleanupCoordinator = meetingAiClient
     ? new MeetingCleanupCoordinator({
       orchestrator,
+      streaming: streamingSinkFactory,
       publisher: meetingAudioPublisher,
       meetingAi: meetingAiClient,
       logger,
@@ -135,6 +141,7 @@ export function createVoiceService(
         idleTimeoutMs: config.voiceStreamIdleTimeoutMs,
         maxDurationMs: config.voiceStreamMaxDurationMs,
         maxQueuedBytes: config.voiceStreamMaxQueuedBytes,
+        metrics: voiceMetrics,
       }
       : undefined,
   });

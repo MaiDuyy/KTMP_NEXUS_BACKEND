@@ -1,5 +1,6 @@
 import { v2 } from '@google-cloud/speech';
 import type { CancellableStream } from 'google-gax';
+import { normalizeSpeechPhrases } from './speechAdaptation.js';
 
 export interface StreamingSttConfig {
   projectId: string;
@@ -7,6 +8,7 @@ export interface StreamingSttConfig {
   model: string;
   languageCode: string;
   timeoutMs: number;
+  phrases?: readonly string[];
 }
 
 export interface StreamingSttResult {
@@ -71,7 +73,11 @@ export class GoogleStreamingSttAdapter {
     }) as unknown as StreamingSpeechClient,
   ) {}
 
-  public open(callbacks: StreamingSttCallbacks, signal?: AbortSignal): StreamingSttSession {
+  public open(
+    callbacks: StreamingSttCallbacks,
+    signal?: AbortSignal,
+    turnPhrases: readonly string[] = [],
+  ): StreamingSttSession {
     const stream = this.client._streamingRecognize({ timeout: this.config.timeoutMs });
     let settled = false;
     let settledError: StreamingSttError | null = null;
@@ -121,6 +127,7 @@ export class GoogleStreamingSttAdapter {
     });
     signal?.addEventListener('abort', onAbort, { once: true });
 
+    const phrases = normalizeSpeechPhrases([...(this.config.phrases ?? []), ...turnPhrases]);
     stream.write({
       recognizer: `projects/${this.config.projectId}/locations/${this.config.location}/recognizers/_`,
       streamingConfig: {
@@ -133,6 +140,13 @@ export class GoogleStreamingSttAdapter {
           languageCodes: [this.config.languageCode],
           model: this.config.model,
           features: { enableAutomaticPunctuation: true },
+          ...(phrases.length > 0 ? {
+            adaptation: {
+              phraseSets: [{
+                inlinePhraseSet: { phrases: phrases.map((value) => ({ value })) },
+              }],
+            },
+          } : {}),
         },
         streamingFeatures: { interimResults: true },
       },

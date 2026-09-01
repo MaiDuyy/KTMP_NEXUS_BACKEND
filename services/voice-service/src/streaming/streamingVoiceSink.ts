@@ -12,6 +12,8 @@ import {
   type StreamingSttResult,
   type StreamingSttSession,
 } from './googleStreamingStt.js';
+import type { SpeechAdaptationProvider } from './speechAdaptation.js';
+import type { StreamingSttOutcome, VoiceStreamingMetrics } from '../voiceMetrics.js';
 
 export interface FinalTranscriptPipeline {
   enqueueTranscript(input: {
@@ -28,10 +30,14 @@ interface FinalSegment {
 }
 
 export class StreamingVoiceSinkFactory implements VoicePcmStreamSinkFactory {
+  private readonly activeByMeeting = new Map<string, Set<VoicePcmStreamSink>>();
+
   public constructor(private readonly dependencies: {
     stt: GoogleStreamingSttAdapter;
     control: VoiceControlProvider;
     pipeline: FinalTranscriptPipeline;
+    adaptation?: SpeechAdaptationProvider;
+    metrics?: Pick<VoiceStreamingMetrics, 'recordStreamingStt'>;
   }) {}
 
   public async open(token: VerifiedVoiceTurnToken, signal: AbortSignal): Promise<VoicePcmStreamSink> {
@@ -48,6 +54,13 @@ export class StreamingVoiceSinkFactory implements VoicePcmStreamSinkFactory {
     let ending = false;
     let emitQueue = Promise.resolve();
     let terminalEmitted = false;
+    const startedAt = performance.now();
+    let metricRecorded = false;
+    const recordStt = (outcome: StreamingSttOutcome) => {
+      if (metricRecorded) return;
+      metricRecorded = true;
+      this.dependencies.metrics?.recordStreamingStt(outcome, (performance.now() - startedAt) / 1000);
+    };
 
     const emitTerminal = async (event: Extract<VoicePipelineEvent, { kind: 'terminal' }>) => {
       if (terminalEmitted) return;
@@ -57,6 +70,7 @@ export class StreamingVoiceSinkFactory implements VoicePcmStreamSinkFactory {
 
     const emitProviderFailure = async (error: unknown) => {
       const code = error instanceof StreamingSttError ? error.code : 'VOICE_STT_UNAVAILABLE';
+      recordStt(code === 'VOICE_CANCELLED' ? 'cancelled' : code === 'VOICE_STT_TIMEOUT' ? 'timeout' : 'unavailable');
       if (code === 'VOICE_CANCELLED') {
         await emitTerminal({
           ...base,
@@ -108,15 +122,23 @@ export class StreamingVoiceSinkFactory implements VoicePcmStreamSinkFactory {
       emitQueue = emitQueue.then(() => this.dependencies.control.emit(event, signal));
     };
 
-    const session: StreamingSttSession = this.dependencies.stt.open({ onResult: enqueuePartial }, signal);
+    const phrases = await this.dependencies.adaptation?.getPhrases(context).catch(() => []) ?? [];
+    const session: StreamingSttSession = this.dependencies.stt.open({ onResult: enqueuePartial }, signal, phrases);
 
-    return {
+    let sink!: VoicePcmStreamSink;
+    const untrack = () => {
+      const meetingSinks = this.activeByMeeting.get(token.meetingSessionId);
+      meetingSinks?.delete(sink);
+      if (meetingSinks?.size === 0) this.activeByMeeting.delete(token.meetingSessionId);
+    };
+    sink = {
       write: async (chunk: VoicePcmChunk) => {
         try {
           await session.write(chunk.pcm);
         } catch (error) {
           terminal = true;
           await emitProviderFailure(error);
+          untrack();
           throw error;
         }
       },
@@ -128,6 +150,7 @@ export class StreamingVoiceSinkFactory implements VoicePcmStreamSinkFactory {
         } catch (error) {
           terminal = true;
           await emitProviderFailure(error);
+          untrack();
           throw error;
         }
         await emitQueue;
@@ -135,6 +158,7 @@ export class StreamingVoiceSinkFactory implements VoicePcmStreamSinkFactory {
         const segments = orderedFinals();
         const transcript = segments.map(({ text }) => text).join(' ').trim();
         if (!transcript) {
+          recordStt('no_speech');
           await emitTerminal({
             ...base,
             kind: 'terminal',
@@ -143,6 +167,7 @@ export class StreamingVoiceSinkFactory implements VoicePcmStreamSinkFactory {
             message: 'Không nhận diện được giọng nói trong lượt hỏi.',
             retryable: false,
           });
+          untrack();
           return;
         }
         const confidences = segments.map(({ confidence }) => confidence).filter((value): value is number => value !== null);
@@ -150,12 +175,17 @@ export class StreamingVoiceSinkFactory implements VoicePcmStreamSinkFactory {
           ? confidences.reduce((sum, value) => sum + value, 0) / confidences.length
           : null;
         if (!this.dependencies.pipeline.enqueueTranscript({ token, transcript, confidence })) {
+          recordStt('unavailable');
+          untrack();
           throw new Error('VOICE_TURN_EXPIRED');
         }
+        recordStt('completed');
+        untrack();
       },
       cancel: async () => {
         if (terminal) return;
         terminal = true;
+        recordStt('cancelled');
         session.cancel();
         await emitQueue.catch(() => undefined);
         await emitTerminal({
@@ -166,7 +196,18 @@ export class StreamingVoiceSinkFactory implements VoicePcmStreamSinkFactory {
           message: 'Lượt truyền âm thanh đã bị hủy.',
           retryable: true,
         });
+        untrack();
       },
     };
+    const meetingSinks = this.activeByMeeting.get(token.meetingSessionId) ?? new Set<VoicePcmStreamSink>();
+    meetingSinks.add(sink);
+    this.activeByMeeting.set(token.meetingSessionId, meetingSinks);
+    return sink;
+  }
+
+  public async cancelMeeting(meetingSessionId: string): Promise<void> {
+    const sinks = [...(this.activeByMeeting.get(meetingSessionId) ?? [])];
+    await Promise.allSettled(sinks.map((sink) => Promise.resolve(sink.cancel('call_ended'))));
+    this.activeByMeeting.delete(meetingSessionId);
   }
 }

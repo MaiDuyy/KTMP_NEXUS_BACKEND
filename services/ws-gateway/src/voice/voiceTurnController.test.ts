@@ -137,6 +137,7 @@ function createController(options: {
   featureEnabled?: boolean;
   allowedWorkspaceIds?: string[];
   startOutcomes?: string[];
+  transportSelections?: string[];
 } = {}) {
   const broadcaster = new FakeBroadcaster();
   const callRegistry = new FakeCallRegistry();
@@ -161,6 +162,7 @@ function createController(options: {
     metrics: {
       recordStart: (outcome) => options.startOutcomes?.push(outcome),
       recordTerminal: () => undefined,
+      recordTransportSelection: (selection) => options.transportSelections?.push(selection),
     },
   });
 
@@ -260,6 +262,7 @@ test('VoiceTurnController keeps the lock after speech ends and releases only its
     workspaceId: 'workspace-1',
     clientRequestId: 'request-1',
     mode: 'rag' as const,
+    transportMode: 'streaming' as const,
   };
 
   await controller.start({ socket: ownerSocket, userId: 'user-1', userName: 'User One', payload: startPayload });
@@ -301,6 +304,29 @@ test('VoiceTurnController keeps the lock after speech ends and releases only its
   assert.equal(voiceLockService.owner, null);
   assert.equal(voiceLockService.releaseAttempts, 1);
   assert.equal(broadcaster.events.at(-1)?.event, 'voice:ready');
+});
+
+test('issues streaming credentials only when the client selected streaming', async () => {
+  const selections: string[] = [];
+  const { controller } = createController({ transportSelections: selections });
+  const socket = new FakeSocket();
+  await controller.start({
+    socket,
+    userId: 'user-1',
+    userName: 'User One',
+    payload: {
+      meetingSessionId: 'call-1',
+      chatId: 'chat-1',
+      workspaceId: 'workspace-1',
+      clientRequestId: 'request-batch',
+      mode: 'rag',
+      transportMode: 'batch',
+    },
+  });
+  const accepted = socket.events.find(({ event }) => event === 'voice:turn:accepted')!.payload;
+  assert.equal(accepted.streamUrl, '');
+  assert.equal(accepted.stream, undefined);
+  assert.deepEqual(selections, ['batch_capability']);
 });
 
 test('VoiceTurnController fans out pipeline events and synchronizes transient history', async () => {

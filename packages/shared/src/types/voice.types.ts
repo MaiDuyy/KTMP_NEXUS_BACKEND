@@ -147,6 +147,7 @@ export interface VoiceMeetingContext {
 export interface VoiceTurnStartPayload extends VoiceMeetingContext {
   clientRequestId: string;
   mode: VoiceTurnMode;
+  transportMode?: VoiceTransportMode;
 }
 
 export interface VoiceTurnEndPayload {

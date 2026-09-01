@@ -10,6 +10,7 @@ export class MeetingCleanupCoordinator {
 
   public constructor(private readonly dependencies: {
     orchestrator: Pick<BatchVoiceOrchestrator, 'cancelMeeting'> | null;
+    streaming?: { cancelMeeting(meetingSessionId: string): Promise<void> } | null;
     publisher: MeetingAudioPublisher;
     meetingAi: MeetingAiClient;
     logger: VoiceServiceLogger;
@@ -32,6 +33,10 @@ export class MeetingCleanupCoordinator {
     try {
       await this.dependencies.meetingAi.beginMeetingCleanup(meetingSessionId, controller.signal)
         .catch(() => failures.push('ai-ending'));
+      if (this.dependencies.streaming) {
+        await this.dependencies.streaming.cancelMeeting(meetingSessionId)
+          .catch(() => failures.push('stream-cancel'));
+      }
       if (this.dependencies.orchestrator) {
         await this.dependencies.orchestrator.cancelMeeting(meetingSessionId)
           .catch(() => failures.push('pipeline-cancel'));
