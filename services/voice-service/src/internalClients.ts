@@ -1,8 +1,10 @@
 import type {
+  MeetingAiStreamEvent,
   VoicePipelineContextRequest,
   VoicePipelineContextResponse,
   VoicePipelineEvent,
 } from '@ott/shared';
+import { parseMeetingAiStreamEvent } from '@ott/shared';
 
 export class InternalServiceError extends Error {
   public constructor(
@@ -30,6 +32,68 @@ export interface MeetingAiResponse {
   displayText: string;
   speechText: string;
   replayed: boolean;
+}
+
+interface ParsedSseEvent {
+  event: string;
+  data: string;
+}
+
+class SseEventDecoder {
+  private readonly decoder = new TextDecoder();
+  private buffer = '';
+  private eventName = '';
+  private readonly dataLines: string[] = [];
+
+  public push(chunk: Uint8Array): ParsedSseEvent[] {
+    this.buffer += this.decoder.decode(chunk, { stream: true });
+    return this.consumeLines(false);
+  }
+
+  public finish(): ParsedSseEvent[] {
+    this.buffer += this.decoder.decode();
+    return this.consumeLines(true);
+  }
+
+  private consumeLines(final: boolean): ParsedSseEvent[] {
+    const events: ParsedSseEvent[] = [];
+    while (true) {
+      const lineEnd = this.buffer.indexOf('\n');
+      if (lineEnd < 0) break;
+      const line = this.buffer.slice(0, lineEnd).replace(/\r$/, '');
+      this.buffer = this.buffer.slice(lineEnd + 1);
+      this.consumeLine(line, events);
+    }
+    if (final && this.buffer.length > 0) {
+      this.consumeLine(this.buffer.replace(/\r$/, ''), events);
+      this.buffer = '';
+    }
+    if (final) this.dispatch(events);
+    return events;
+  }
+
+  private consumeLine(line: string, events: ParsedSseEvent[]): void {
+    if (line === '') {
+      this.dispatch(events);
+      return;
+    }
+    if (line.startsWith(':')) return;
+    const separator = line.indexOf(':');
+    const field = separator < 0 ? line : line.slice(0, separator);
+    const value = separator < 0 ? '' : line.slice(separator + 1).replace(/^ /, '');
+    if (field === 'event') this.eventName = value;
+    if (field === 'data') this.dataLines.push(value);
+  }
+
+  private dispatch(events: ParsedSseEvent[]): void {
+    if (this.dataLines.length === 0) {
+      this.eventName = '';
+      return;
+    }
+    events.push({ event: this.eventName || 'message', data: this.dataLines.join('\n') });
+    this.eventName = '';
+    this.dataLines.length = 0;
+  }
 }
 
 async function requestJson<T>(options: {
@@ -126,6 +190,8 @@ export class MeetingAiClient {
     private readonly url: string,
     private readonly serviceKey: string,
     private readonly timeoutMs: number,
+    private readonly firstEventTimeoutMs: number = 10_000,
+    private readonly idleEventTimeoutMs: number = 20_000,
   ) {}
 
   public answer(request: MeetingAiRequest, signal?: AbortSignal): Promise<MeetingAiResponse> {
@@ -139,6 +205,122 @@ export class MeetingAiClient {
       timeoutCode: 'VOICE_AI_TIMEOUT',
       unavailableCode: 'VOICE_AI_UNAVAILABLE',
     });
+  }
+
+  public async *stream(request: MeetingAiRequest, signal?: AbortSignal): AsyncGenerator<MeetingAiStreamEvent> {
+    const controller = new AbortController();
+    const onAbort = () => controller.abort('cancelled');
+    const totalTimer = setTimeout(() => controller.abort('timeout'), this.timeoutMs);
+    let eventTimer: ReturnType<typeof setTimeout> | null = null;
+    let hasReceivedEvent = false;
+    const armEventTimer = (): void => {
+      if (eventTimer) clearTimeout(eventTimer);
+      const delay = hasReceivedEvent ? this.idleEventTimeoutMs : this.firstEventTimeoutMs;
+      eventTimer = setTimeout(() => controller.abort(hasReceivedEvent ? 'idle-timeout' : 'first-event-timeout'), delay);
+    };
+    const clearTimers = (): void => {
+      clearTimeout(totalTimer);
+      if (eventTimer) clearTimeout(eventTimer);
+      signal?.removeEventListener('abort', onAbort);
+    };
+
+    signal?.addEventListener('abort', onAbort, { once: true });
+    armEventTimer();
+    try {
+      const streamUrl = new URL(this.url);
+      streamUrl.pathname = `${streamUrl.pathname.replace(/\/$/, '')}/stream`;
+      const response = await fetch(streamUrl, {
+        method: 'POST',
+        headers: {
+          accept: 'text/event-stream',
+          'content-type': 'application/json',
+          'x-meeting-ai-service-key': this.serviceKey,
+        },
+        body: JSON.stringify(request),
+        signal: controller.signal,
+      });
+      if (response.status === 409) throw new InternalServiceError('VOICE_CANCELLED');
+      if (!response.ok || !response.headers.get('content-type')?.toLowerCase().includes('text/event-stream')) {
+        throw new InternalServiceError('VOICE_AI_UNAVAILABLE');
+      }
+      if (!response.body) throw new InternalServiceError('VOICE_AI_UNAVAILABLE');
+
+      const decoder = new SseEventDecoder();
+      const expectedSequences = new Map<string, number>([
+        ['speech.delta', 0],
+        ['display.delta', 0],
+        ['source', 0],
+      ]);
+      const sourceIdentity = new Set<string>();
+      let done = false;
+      const reader = response.body.getReader();
+      try {
+        while (true) {
+          const next = await reader.read();
+          if (next.done) break;
+          for (const raw of decoder.push(next.value)) {
+            const event = this.validateStreamEvent(raw, request.turnId, expectedSequences, sourceIdentity, done);
+            if (!event) continue;
+            hasReceivedEvent = true;
+            armEventTimer();
+            if (event.type === 'done') done = true;
+            yield event;
+          }
+        }
+        for (const raw of decoder.finish()) {
+          const event = this.validateStreamEvent(raw, request.turnId, expectedSequences, sourceIdentity, done);
+          if (!event) continue;
+          hasReceivedEvent = true;
+          if (event.type === 'done') done = true;
+          yield event;
+        }
+      } finally {
+        reader.releaseLock();
+      }
+      if (!done) throw new InternalServiceError('VOICE_AI_UNAVAILABLE');
+    } catch (error) {
+      if (error instanceof InternalServiceError) throw error;
+      if (signal?.aborted || controller.signal.reason === 'cancelled') {
+        throw new InternalServiceError('VOICE_CANCELLED');
+      }
+      if (controller.signal.aborted) throw new InternalServiceError('VOICE_AI_TIMEOUT');
+      throw new InternalServiceError('VOICE_AI_UNAVAILABLE');
+    } finally {
+      clearTimers();
+    }
+  }
+
+  private validateStreamEvent(
+    raw: ParsedSseEvent,
+    turnId: string,
+    expectedSequences: Map<string, number>,
+    sourceIdentity: Set<string>,
+    done: boolean,
+  ): MeetingAiStreamEvent | null {
+    let parsed: MeetingAiStreamEvent;
+    try {
+      parsed = parseMeetingAiStreamEvent(JSON.parse(raw.data));
+    } catch {
+      throw new InternalServiceError('VOICE_AI_UNAVAILABLE');
+    }
+    if (parsed.type !== raw.event || parsed.turnId !== turnId || done) {
+      throw new InternalServiceError('VOICE_AI_UNAVAILABLE');
+    }
+    if (parsed.type === 'done') return parsed;
+
+    const expected = expectedSequences.get(parsed.type);
+    if (expected === undefined || parsed.sequence !== expected) {
+      throw new InternalServiceError('VOICE_AI_UNAVAILABLE');
+    }
+    expectedSequences.set(parsed.type, expected + 1);
+    if (parsed.type === 'source') {
+      const identity = `${parsed.documentId}:${parsed.chunkId}`;
+      if (sourceIdentity.has(identity)) {
+        return null;
+      }
+      sourceIdentity.add(identity);
+    }
+    return parsed;
   }
 
   private meetingLifecycleUrl(meetingSessionId: string, action: 'ending' | 'cleanup'): string {

@@ -21,6 +21,8 @@ test("uses safe defaults without provider credentials", () => {
   assert.equal(config.googleStreamingSttLocation, 'us');
   assert.equal(config.googleStreamingSttModel, 'chirp_3');
   assert.deepEqual(config.googleStreamingSttPhrases, []);
+  assert.equal(config.meetingAiStreamFirstEventTimeoutMs, 10_000);
+  assert.equal(config.meetingAiStreamIdleEventTimeoutMs, 20_000);
 
   assert.equal(config.livekitUrl, null);
   assert.equal(config.livekitApiKey, null);
@@ -47,6 +49,10 @@ test('feature and metrics flags default off in production and reject invalid val
   assert.throws(
     () => loadVoiceServiceConfig({ MEETING_VOICE_ENABLED: 'yes' }),
     /MEETING_VOICE_ENABLED must be true, false, 1, or 0/,
+  );
+  assert.throws(
+    () => loadVoiceServiceConfig({ MEETING_AI_STREAM_FIRST_EVENT_TIMEOUT_MS: '0' }),
+    /MEETING_AI_STREAM_FIRST_EVENT_TIMEOUT_MS must be a positive integer/,
   );
   assert.throws(
     () => loadVoiceServiceConfig({ VOICE_METRICS_ENABLED: 'yes' }),

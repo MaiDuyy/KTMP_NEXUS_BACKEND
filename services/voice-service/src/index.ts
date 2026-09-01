@@ -55,6 +55,8 @@ export function createVoiceService(
       config.meetingAiInternalUrl,
       config.meetingAiInternalServiceKey,
       config.meetingAiTimeoutMs,
+      config.meetingAiStreamFirstEventTimeoutMs,
+      config.meetingAiStreamIdleEventTimeoutMs,
     )
     : null;
   const voiceControlClient = config.voiceControlInternalUrl && config.voiceInternalServiceKey
