@@ -115,3 +115,4 @@ export type SearchMessageInput = z.infer<typeof searchMessageSchema>;
 export type PresignUploadInput = z.infer<typeof presignUploadSchema>;
 export type StatsQueryInput = z.infer<typeof statsQuerySchema>;
 export type PaginationInput = z.infer<typeof paginationSchema>;
+export * from './meetingAiStream.schema.js';

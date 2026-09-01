@@ -30,6 +30,54 @@ export const VOICE_STREAM_CHUNK_DURATION_MS = 20 as const;
 export const VOICE_STREAM_SAMPLES_PER_CHUNK = 320 as const;
 export const VOICE_STREAM_PCM_BYTES_PER_CHUNK = 640 as const;
 export const VOICE_STREAM_MAX_PCM_PAYLOAD_BYTES = 15_000 as const;
+export const MEETING_AI_STREAM_VERSION = 1 as const;
+
+export interface MeetingAiSpeechDeltaEvent {
+  type: 'speech.delta';
+  version: typeof MEETING_AI_STREAM_VERSION;
+  turnId: string;
+  sequence: number;
+  text: string;
+}
+
+export interface MeetingAiDisplayDeltaEvent {
+  type: 'display.delta';
+  version: typeof MEETING_AI_STREAM_VERSION;
+  turnId: string;
+  sequence: number;
+  text: string;
+}
+
+export interface MeetingAiSourceEvent {
+  type: 'source';
+  version: typeof MEETING_AI_STREAM_VERSION;
+  turnId: string;
+  sequence: number;
+  documentId: string;
+  title: string;
+  chunkId: string;
+}
+
+export interface MeetingAiDoneEvent {
+  type: 'done';
+  version: typeof MEETING_AI_STREAM_VERSION;
+  turnId: string;
+  replayed: boolean;
+  usage?: {
+    inputTokens?: number;
+    outputTokens?: number;
+  } | null;
+  latency?: {
+    firstDeltaMs: number;
+    totalMs: number;
+  } | null;
+}
+
+export type MeetingAiStreamEvent =
+  | MeetingAiSpeechDeltaEvent
+  | MeetingAiDisplayDeltaEvent
+  | MeetingAiSourceEvent
+  | MeetingAiDoneEvent;
 
 export interface VoiceStreamingAudioFormat {
   encoding: 'LINEAR16';

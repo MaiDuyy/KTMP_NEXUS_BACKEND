@@ -29,6 +29,8 @@ export interface VoiceServiceConfig {
   meetingAiInternalUrl: string | null;
   meetingAiInternalServiceKey: string | null;
   meetingAiTimeoutMs: number;
+  meetingAiStreamFirstEventTimeoutMs: number;
+  meetingAiStreamIdleEventTimeoutMs: number;
   voiceControlInternalUrl: string | null;
   voiceInternalServiceKey: string | null;
   pipelineTimeoutMs: number;
@@ -251,6 +253,16 @@ export function loadVoiceServiceConfig(env: NodeJS.ProcessEnv = process.env): Vo
       nodeEnv,
     ),
     meetingAiTimeoutMs: readPositiveInteger(env.MEETING_AI_TIMEOUT_MS, 45_000, 'MEETING_AI_TIMEOUT_MS'),
+    meetingAiStreamFirstEventTimeoutMs: readPositiveInteger(
+      env.MEETING_AI_STREAM_FIRST_EVENT_TIMEOUT_MS,
+      10_000,
+      'MEETING_AI_STREAM_FIRST_EVENT_TIMEOUT_MS',
+    ),
+    meetingAiStreamIdleEventTimeoutMs: readPositiveInteger(
+      env.MEETING_AI_STREAM_IDLE_EVENT_TIMEOUT_MS,
+      20_000,
+      'MEETING_AI_STREAM_IDLE_EVENT_TIMEOUT_MS',
+    ),
     voiceControlInternalUrl: readOptionalHttpUrl(env.VOICE_CONTROL_INTERNAL_URL, 'VOICE_CONTROL_INTERNAL_URL', nodeEnv),
     voiceInternalServiceKey: readOptionalServiceSecret(
       env.VOICE_INTERNAL_SERVICE_KEY,
