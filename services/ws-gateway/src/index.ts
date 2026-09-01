@@ -40,6 +40,7 @@ const LIVEKIT_API_KEY = process.env.LIVEKIT_API_KEY || 'devkey';
 const LIVEKIT_API_SECRET = process.env.LIVEKIT_API_SECRET || 'secret';
 const LIVEKIT_URL = process.env.LIVEKIT_URL || 'ws://localhost:7880';
 const VOICE_PUBLIC_API_URL = process.env.VOICE_PUBLIC_API_URL || 'http://localhost:3000/api';
+const VOICE_PUBLIC_STREAM_URL = process.env.VOICE_PUBLIC_STREAM_URL || null;
 const VOICE_INTERNAL_SERVICE_KEY = process.env.VOICE_INTERNAL_SERVICE_KEY || null;
 const VOICE_SERVICE_INTERNAL_URL = process.env.VOICE_SERVICE_INTERNAL_URL || 'http://localhost:3035/internal/voice';
 const voiceFeaturePolicy = loadVoiceFeaturePolicy();
@@ -57,6 +58,12 @@ if (process.env.NODE_ENV === 'production' && !VOICE_INTERNAL_SERVICE_KEY) {
 }
 if (process.env.NODE_ENV === 'production' && !process.env.VOICE_PUBLIC_API_URL) {
   throw new Error('VOICE_PUBLIC_API_URL is required in production');
+}
+if (VOICE_PUBLIC_STREAM_URL) {
+  const streamUrl = new URL(VOICE_PUBLIC_STREAM_URL);
+  if (streamUrl.protocol !== 'ws:' && streamUrl.protocol !== 'wss:') {
+    throw new Error('VOICE_PUBLIC_STREAM_URL must use ws or wss');
+  }
 }
 if (process.env.NODE_ENV === 'production' && !process.env.VOICE_SERVICE_INTERNAL_URL) {
   throw new Error('VOICE_SERVICE_INTERNAL_URL is required in production');
@@ -559,6 +566,7 @@ const voiceTurnController = new VoiceTurnController({
   voiceSessionStore,
   tokenIssuer: voiceTurnTokenIssuer,
   voicePublicApiUrl: VOICE_PUBLIC_API_URL,
+  voicePublicStreamUrl: VOICE_PUBLIC_STREAM_URL,
   featurePolicy: voiceFeaturePolicy,
   metrics: voiceMetrics,
 });

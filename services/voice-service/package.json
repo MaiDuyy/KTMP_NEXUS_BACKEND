@@ -23,11 +23,13 @@
     "ioredis": "^5.4.1",
     "jsonwebtoken": "^9.0.2",
     "livekit-server-sdk": "2.18.0",
-    "pino": "^9.4.0"
+    "pino": "^9.4.0",
+    "ws": "^8.21.3"
   },
   "devDependencies": {
     "@types/jsonwebtoken": "^9.0.7",
     "@types/node": "^22.0.0",
+    "@types/ws": "^8.5.13",
     "tsx": "^4.19.1",
     "typescript": "^5.6.0"
   }

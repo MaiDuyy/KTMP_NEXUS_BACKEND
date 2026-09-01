@@ -150,6 +150,7 @@ function createController(options: {
     voiceSessionStore,
     tokenIssuer: issuer,
     voicePublicApiUrl: 'http://gateway.example.test/api',
+    voicePublicStreamUrl: 'wss://voice.example.test',
     featurePolicy: {
       enabled: options.featureEnabled ?? true,
       allowedWorkspaceIds: new Set(options.allowedWorkspaceIds ?? []),
@@ -266,7 +267,9 @@ test('VoiceTurnController keeps the lock after speech ends and releases only its
   const accepted = ownerSocket.events.find(({ event }) => event === 'voice:turn:accepted');
   assert.ok(accepted);
   assert.match(accepted.payload.uploadUrl, /\/api\/voice\/turns\/.+\/audio$/);
-  assert.match(accepted.payload.streamUrl, /\/api\/voice\/turns\/.+\/stream$/);
+  assert.match(accepted.payload.streamUrl, /^wss:\/\/voice\.example\.test\/v1\/voice\/turns\/.+\/stream$/);
+  assert.equal(accepted.payload.stream.protocolVersion, 1);
+  assert.equal(accepted.payload.stream.audioFormat.sampleRateHz, 16000);
   assert.equal(ownerSocket.rooms.has('call:call-1'), true);
   assert.equal(broadcaster.events.some(({ event }) => event === 'voice:lock:changed'), true);
 
