@@ -1,6 +1,12 @@
 export interface VoiceServiceConfig {
   meetingVoiceEnabled: boolean;
   voiceMetricsEnabled: boolean;
+  voiceStreamingEnabled: boolean;
+  voiceStreamAllowedOrigins: ReadonlySet<string>;
+  voiceStreamAuthTimeoutMs: number;
+  voiceStreamIdleTimeoutMs: number;
+  voiceStreamMaxDurationMs: number;
+  voiceStreamMaxQueuedBytes: number;
   host: string;
   port: number;
   shutdownTimeoutMs: number;
@@ -13,6 +19,9 @@ export interface VoiceServiceConfig {
   googleSttModel: string;
   googleSttLanguage: string;
   sttTimeoutMs: number;
+  streamingSttTimeoutMs: number;
+  googleStreamingSttLocation: string;
+  googleStreamingSttModel: string;
   googleTtsVoice: string;
   googleTtsAudioEncoding: string;
   googleTtsTimeoutMs: number;
@@ -114,6 +123,24 @@ function readOptionalHttpUrl(value: string | undefined, variableName: string, no
   return url.toString();
 }
 
+function readOrigins(value: string | undefined, production: boolean, enabled: boolean): ReadonlySet<string> {
+  const source = value === undefined || value.trim() === ''
+    ? (production ? [] : ['http://localhost:3000'])
+    : value.split(',').map((item) => item.trim()).filter(Boolean);
+  const origins = new Set<string>();
+  for (const item of source) {
+    const url = new URL(item);
+    if ((url.protocol !== 'http:' && url.protocol !== 'https:') || url.origin !== item) {
+      throw new Error('VOICE_STREAM_ALLOWED_ORIGINS must contain comma-separated HTTP origins');
+    }
+    origins.add(item);
+  }
+  if (production && enabled && origins.size === 0) {
+    throw new Error('VOICE_STREAM_ALLOWED_ORIGINS is required when streaming is enabled in production');
+  }
+  return origins;
+}
+
 function readLiveKitCredentials(env: NodeJS.ProcessEnv, nodeEnv: string): { livekitUrl: string | null; livekitApiKey: string | null; livekitApiSecret: string | null } {
   const url = (env.LIVEKIT_URL ?? "").trim();
   const key = (env.LIVEKIT_API_KEY ?? "").trim();
@@ -142,10 +169,17 @@ function readLiveKitCredentials(env: NodeJS.ProcessEnv, nodeEnv: string): { live
 export function loadVoiceServiceConfig(env: NodeJS.ProcessEnv = process.env): VoiceServiceConfig {
   const nodeEnv = readNonEmptyString(env.NODE_ENV, "development", "NODE_ENV");
   const lkCredentials = readLiveKitCredentials(env, nodeEnv);
+  const voiceStreamingEnabled = readBoolean(env.VOICE_STREAMING_ENABLED, false, 'VOICE_STREAMING_ENABLED');
 
   return {
     meetingVoiceEnabled: readBoolean(env.MEETING_VOICE_ENABLED, nodeEnv !== 'production', 'MEETING_VOICE_ENABLED'),
     voiceMetricsEnabled: readBoolean(env.VOICE_METRICS_ENABLED, nodeEnv !== 'production', 'VOICE_METRICS_ENABLED'),
+    voiceStreamingEnabled,
+    voiceStreamAllowedOrigins: readOrigins(env.VOICE_STREAM_ALLOWED_ORIGINS, nodeEnv === 'production', voiceStreamingEnabled),
+    voiceStreamAuthTimeoutMs: readPositiveInteger(env.VOICE_STREAM_AUTH_TIMEOUT_MS, 5_000, 'VOICE_STREAM_AUTH_TIMEOUT_MS'),
+    voiceStreamIdleTimeoutMs: readPositiveInteger(env.VOICE_STREAM_IDLE_TIMEOUT_MS, 15_000, 'VOICE_STREAM_IDLE_TIMEOUT_MS'),
+    voiceStreamMaxDurationMs: readPositiveInteger(env.VOICE_STREAM_MAX_DURATION_MS, 60_000, 'VOICE_STREAM_MAX_DURATION_MS'),
+    voiceStreamMaxQueuedBytes: readPositiveInteger(env.VOICE_STREAM_MAX_QUEUED_BYTES, 256 * 1024, 'VOICE_STREAM_MAX_QUEUED_BYTES'),
     host: readNonEmptyString(env.VOICE_SERVICE_HOST, "0.0.0.0", "VOICE_SERVICE_HOST"),
     port: readPositiveInteger(env.VOICE_SERVICE_PORT ?? env.PORT, DEFAULT_PORT, "VOICE_SERVICE_PORT"),
     shutdownTimeoutMs: readPositiveInteger(
@@ -159,9 +193,12 @@ export function loadVoiceServiceConfig(env: NodeJS.ProcessEnv = process.env): Vo
     voiceTurnTokenSecret: readOptionalVoiceTurnTokenSecret(env.VOICE_TURN_TOKEN_SECRET, nodeEnv),
     googleCloudProject: env.GOOGLE_CLOUD_PROJECT || null,
     googleCloudLocation: readNonEmptyString(env.GOOGLE_CLOUD_LOCATION, "asia-southeast1", "GOOGLE_CLOUD_LOCATION"),
-    googleSttModel: readNonEmptyString(env.GOOGLE_STT_MODEL, "chirp_2", "GOOGLE_STT_MODEL"),
+    googleSttModel: readNonEmptyString(env.GOOGLE_STT_MODEL, "chirp_3", "GOOGLE_STT_MODEL"),
     googleSttLanguage: readNonEmptyString(env.GOOGLE_STT_LANGUAGE, "vi-VN", "GOOGLE_STT_LANGUAGE"),
     sttTimeoutMs: readPositiveInteger(env.GOOGLE_STT_TIMEOUT_MS, 15_000, "GOOGLE_STT_TIMEOUT_MS"),
+    streamingSttTimeoutMs: readPositiveInteger(env.GOOGLE_STREAMING_STT_TIMEOUT_MS, 70_000, 'GOOGLE_STREAMING_STT_TIMEOUT_MS'),
+    googleStreamingSttLocation: readNonEmptyString(env.GOOGLE_STREAMING_STT_LOCATION, 'us', 'GOOGLE_STREAMING_STT_LOCATION'),
+    googleStreamingSttModel: readNonEmptyString(env.GOOGLE_STREAMING_STT_MODEL, 'chirp_3', 'GOOGLE_STREAMING_STT_MODEL'),
     googleTtsVoice: readNonEmptyString(env.GOOGLE_TTS_VOICE, "vi-VN-Chirp3-HD-Charon", "GOOGLE_TTS_VOICE"),
     googleTtsAudioEncoding: readNonEmptyString(env.GOOGLE_TTS_AUDIO_ENCODING, "LINEAR16", "GOOGLE_TTS_AUDIO_ENCODING"),
     googleTtsTimeoutMs: readPositiveInteger(env.GOOGLE_TTS_TIMEOUT_MS, 15_000, "GOOGLE_TTS_TIMEOUT_MS"),

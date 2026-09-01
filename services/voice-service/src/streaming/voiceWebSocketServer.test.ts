@@ -161,6 +161,28 @@ test('drains accepted audio before finalizing when the sink is slower than the s
   }
 });
 
+test('preserves allowlisted streaming STT errors returned by the sink', async () => {
+  const { server, url } = await listen(streamingOptions({
+    open: () => ({
+      write: () => undefined,
+      end: () => { throw new Error('VOICE_STT_TIMEOUT'); },
+      cancel: () => undefined,
+    }),
+  }));
+  try {
+    const socket = await connect(url);
+    auth(socket);
+    await nextJson(socket);
+    socket.send(JSON.stringify({ type: 'end', finalSequence: null }));
+    const response = await nextJson(socket);
+    assert.equal(response.type, 'error');
+    assert.equal(response.code, 'VOICE_STT_TIMEOUT');
+    await once(socket, 'close');
+  } finally {
+    await closeServer(server);
+  }
+});
+
 test('rejects origin, turn binding mismatch and replayed token', async () => {
   const noOpSink: VoicePcmStreamSink = { write: () => undefined, end: () => undefined, cancel: () => undefined };
   let consumed = false;

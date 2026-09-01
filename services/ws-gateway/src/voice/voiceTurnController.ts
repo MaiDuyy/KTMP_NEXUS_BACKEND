@@ -394,7 +394,7 @@ export class VoiceTurnController {
     if (
       (event.kind === 'state' && !PIPELINE_STATES.has(event.state)) ||
       (event.kind === 'terminal' && !PIPELINE_TERMINAL_STATES.has(event.state)) ||
-      !['state', 'transcript', 'message', 'terminal'].includes(event.kind)
+      !['state', 'transcript_partial', 'transcript', 'message', 'terminal'].includes(event.kind)
     ) {
       return false;
     }
@@ -419,6 +419,24 @@ export class VoiceTurnController {
       );
       if (!updated) return false;
       emitState(this.dependencies.broadcaster, callRoom, event.meetingSessionId, event.turnId, event.state);
+      return true;
+    }
+
+    if (event.kind === 'transcript_partial') {
+      const text = event.text.trim();
+      if (!text || text.length > 20_000 || !Number.isSafeInteger(event.revision) || event.revision < 0) return false;
+      const activeTurn = await this.dependencies.voiceSessionStore.getActive(event.meetingSessionId);
+      if (!activeTurn || activeTurn.turnId !== event.turnId || activeTurn.ownerUserId !== event.ownerUserId) return false;
+      this.dependencies.broadcaster.to(callRoom).emit('voice:transcript', {
+        meetingSessionId: event.meetingSessionId,
+        turnId: event.turnId,
+        speakerUserId: event.ownerUserId,
+        speakerName: activeTurn.ownerName,
+        text,
+        isFinal: false,
+        revision: event.revision,
+        ...(event.stability === null ? {} : { stability: event.stability }),
+      });
       return true;
     }
 
@@ -452,6 +470,7 @@ export class VoiceTurnController {
         speakerName: activeTurn.ownerName,
         text,
         isFinal: true,
+        revision: Number.MAX_SAFE_INTEGER,
         ...(event.confidence === null ? {} : { stability: event.confidence }),
       });
       return true;
