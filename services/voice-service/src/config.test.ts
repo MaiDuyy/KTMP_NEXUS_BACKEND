@@ -23,6 +23,10 @@ test("uses safe defaults without provider credentials", () => {
   assert.deepEqual(config.googleStreamingSttPhrases, []);
   assert.equal(config.meetingAiStreamFirstEventTimeoutMs, 10_000);
   assert.equal(config.meetingAiStreamIdleEventTimeoutMs, 20_000);
+  assert.equal(config.voiceStreamingTtsEnabled, false);
+  assert.equal(config.googleStreamingTtsLocation, 'asia-southeast1');
+  assert.equal(config.googleStreamingTtsSampleRateHertz, 24_000);
+  assert.equal(config.voiceStreamingTtsSentenceTargetChars, 160);
 
   assert.equal(config.livekitUrl, null);
   assert.equal(config.livekitApiKey, null);
@@ -76,6 +80,13 @@ test("rejects invalid numeric configuration", () => {
   assert.throws(
     () => loadVoiceServiceConfig({ VOICE_STREAM_MAX_DURATION_MS: '60001' }),
     /must be less than or equal to 60000/,
+  );
+  assert.throws(
+    () => loadVoiceServiceConfig({
+      VOICE_STREAMING_TTS_SENTENCE_MINIMUM_CHARS: '161',
+      VOICE_STREAMING_TTS_SENTENCE_TARGET_CHARS: '160',
+    }),
+    /must be ordered/,
   );
 });
 

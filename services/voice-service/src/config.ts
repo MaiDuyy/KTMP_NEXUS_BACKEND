@@ -26,6 +26,18 @@ export interface VoiceServiceConfig {
   googleTtsVoice: string;
   googleTtsAudioEncoding: string;
   googleTtsTimeoutMs: number;
+  voiceStreamingTtsEnabled: boolean;
+  googleStreamingTtsLocation: string;
+  googleStreamingTtsVoice: string;
+  googleStreamingTtsSampleRateHertz: number;
+  googleStreamingTtsFirstAudioTimeoutMs: number;
+  googleStreamingTtsIdleAudioTimeoutMs: number;
+  googleStreamingTtsTotalTimeoutMs: number;
+  googleStreamingTtsMaxQueuedBytes: number;
+  voiceStreamingTtsSentenceMinimumChars: number;
+  voiceStreamingTtsSentenceTargetChars: number;
+  voiceStreamingTtsSentenceMaximumChars: number;
+  voiceStreamingTtsSentenceFlushTimeoutMs: number;
   meetingAiInternalUrl: string | null;
   meetingAiInternalServiceKey: string | null;
   meetingAiTimeoutMs: number;
@@ -209,7 +221,7 @@ export function loadVoiceServiceConfig(env: NodeJS.ProcessEnv = process.env): Vo
   const lkCredentials = readLiveKitCredentials(env, nodeEnv);
   const voiceStreamingEnabled = readBoolean(env.VOICE_STREAMING_ENABLED, false, 'VOICE_STREAMING_ENABLED');
 
-  return {
+  const config: VoiceServiceConfig = {
     meetingVoiceEnabled: readBoolean(env.MEETING_VOICE_ENABLED, nodeEnv !== 'production', 'MEETING_VOICE_ENABLED'),
     voiceMetricsEnabled: readBoolean(env.VOICE_METRICS_ENABLED, nodeEnv !== 'production', 'VOICE_METRICS_ENABLED'),
     voiceStreamingEnabled,
@@ -246,6 +258,63 @@ export function loadVoiceServiceConfig(env: NodeJS.ProcessEnv = process.env): Vo
     googleTtsVoice: readNonEmptyString(env.GOOGLE_TTS_VOICE, "vi-VN-Chirp3-HD-Charon", "GOOGLE_TTS_VOICE"),
     googleTtsAudioEncoding: readNonEmptyString(env.GOOGLE_TTS_AUDIO_ENCODING, "LINEAR16", "GOOGLE_TTS_AUDIO_ENCODING"),
     googleTtsTimeoutMs: readPositiveInteger(env.GOOGLE_TTS_TIMEOUT_MS, 15_000, "GOOGLE_TTS_TIMEOUT_MS"),
+    voiceStreamingTtsEnabled: readBoolean(env.VOICE_STREAMING_TTS_ENABLED, false, 'VOICE_STREAMING_TTS_ENABLED'),
+    googleStreamingTtsLocation: readNonEmptyString(
+      env.GOOGLE_STREAMING_TTS_LOCATION,
+      'asia-southeast1',
+      'GOOGLE_STREAMING_TTS_LOCATION',
+    ),
+    googleStreamingTtsVoice: readNonEmptyString(
+      env.GOOGLE_STREAMING_TTS_VOICE,
+      env.GOOGLE_TTS_VOICE ?? 'vi-VN-Chirp3-HD-Charon',
+      'GOOGLE_STREAMING_TTS_VOICE',
+    ),
+    googleStreamingTtsSampleRateHertz: readBoundedPositiveInteger(
+      env.GOOGLE_STREAMING_TTS_SAMPLE_RATE_HERTZ,
+      24_000,
+      'GOOGLE_STREAMING_TTS_SAMPLE_RATE_HERTZ',
+      48_000,
+    ),
+    googleStreamingTtsFirstAudioTimeoutMs: readPositiveInteger(
+      env.GOOGLE_STREAMING_TTS_FIRST_AUDIO_TIMEOUT_MS,
+      10_000,
+      'GOOGLE_STREAMING_TTS_FIRST_AUDIO_TIMEOUT_MS',
+    ),
+    googleStreamingTtsIdleAudioTimeoutMs: readPositiveInteger(
+      env.GOOGLE_STREAMING_TTS_IDLE_AUDIO_TIMEOUT_MS,
+      15_000,
+      'GOOGLE_STREAMING_TTS_IDLE_AUDIO_TIMEOUT_MS',
+    ),
+    googleStreamingTtsTotalTimeoutMs: readPositiveInteger(
+      env.GOOGLE_STREAMING_TTS_TOTAL_TIMEOUT_MS,
+      60_000,
+      'GOOGLE_STREAMING_TTS_TOTAL_TIMEOUT_MS',
+    ),
+    googleStreamingTtsMaxQueuedBytes: readPositiveInteger(
+      env.GOOGLE_STREAMING_TTS_MAX_QUEUED_BYTES,
+      512 * 1024,
+      'GOOGLE_STREAMING_TTS_MAX_QUEUED_BYTES',
+    ),
+    voiceStreamingTtsSentenceMinimumChars: readPositiveInteger(
+      env.VOICE_STREAMING_TTS_SENTENCE_MINIMUM_CHARS,
+      24,
+      'VOICE_STREAMING_TTS_SENTENCE_MINIMUM_CHARS',
+    ),
+    voiceStreamingTtsSentenceTargetChars: readPositiveInteger(
+      env.VOICE_STREAMING_TTS_SENTENCE_TARGET_CHARS,
+      160,
+      'VOICE_STREAMING_TTS_SENTENCE_TARGET_CHARS',
+    ),
+    voiceStreamingTtsSentenceMaximumChars: readPositiveInteger(
+      env.VOICE_STREAMING_TTS_SENTENCE_MAXIMUM_CHARS,
+      280,
+      'VOICE_STREAMING_TTS_SENTENCE_MAXIMUM_CHARS',
+    ),
+    voiceStreamingTtsSentenceFlushTimeoutMs: readPositiveInteger(
+      env.VOICE_STREAMING_TTS_SENTENCE_FLUSH_TIMEOUT_MS,
+      800,
+      'VOICE_STREAMING_TTS_SENTENCE_FLUSH_TIMEOUT_MS',
+    ),
     meetingAiInternalUrl: readOptionalHttpUrl(env.MEETING_AI_INTERNAL_URL, 'MEETING_AI_INTERNAL_URL', nodeEnv),
     meetingAiInternalServiceKey: readOptionalServiceSecret(
       env.MEETING_AI_INTERNAL_SERVICE_KEY,
@@ -282,4 +351,15 @@ export function loadVoiceServiceConfig(env: NodeJS.ProcessEnv = process.env): Vo
     livekitConnectTimeoutMs: readPositiveInteger(env.LIVEKIT_CONNECT_TIMEOUT_MS, 15_000, "LIVEKIT_CONNECT_TIMEOUT_MS"),
     livekitPlayoutTimeoutMs: readPositiveInteger(env.LIVEKIT_PLAYOUT_TIMEOUT_MS, 70_000, "LIVEKIT_PLAYOUT_TIMEOUT_MS"),
   };
+
+  if (
+    config.voiceStreamingTtsSentenceMinimumChars > config.voiceStreamingTtsSentenceTargetChars
+    || config.voiceStreamingTtsSentenceTargetChars > config.voiceStreamingTtsSentenceMaximumChars
+  ) {
+    throw new Error(
+      'VOICE_STREAMING_TTS_SENTENCE_MINIMUM_CHARS, VOICE_STREAMING_TTS_SENTENCE_TARGET_CHARS, and VOICE_STREAMING_TTS_SENTENCE_MAXIMUM_CHARS must be ordered',
+    );
+  }
+
+  return config;
 }
