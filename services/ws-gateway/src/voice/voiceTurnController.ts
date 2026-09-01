@@ -232,9 +232,12 @@ export class VoiceTurnController {
         state: 'LISTENING',
       });
       emitState(this.dependencies.broadcaster, callRoom, payload.meetingSessionId, turnId, 'LISTENING');
-      const streamUrl = this.dependencies.voicePublicStreamUrl
+      const streamUrl = payload.transportMode === 'streaming' && this.dependencies.voicePublicStreamUrl
         ? getVoiceStreamUrl(this.dependencies.voicePublicStreamUrl, turnId)
         : '';
+      this.metrics.recordTransportSelection?.(
+        streamUrl ? 'streaming' : payload.transportMode === 'streaming' ? 'batch_server' : 'batch_capability',
+      );
       socket.emit('voice:turn:accepted', {
         meetingSessionId: payload.meetingSessionId,
         turnId,
@@ -714,7 +717,8 @@ export class VoiceTurnController {
       isIdentifier(value.chatId) &&
       isIdentifier(value.workspaceId) &&
       isIdentifier(value.clientRequestId) &&
-      value.mode === 'rag'
+      value.mode === 'rag' &&
+      (value.transportMode === undefined || value.transportMode === 'streaming' || value.transportMode === 'batch')
     );
   }
 

@@ -13,6 +13,7 @@ export type VoiceCleanupOutcome = 'completed' | 'failed' | 'retry_completed' | '
 export interface VoiceTurnMetrics {
   recordStart(outcome: VoiceTurnStartOutcome, durationSeconds: number): void;
   recordTerminal(state: 'COMPLETED' | 'FAILED' | 'CANCELLED'): void;
+  recordTransportSelection?(selection: 'streaming' | 'batch_capability' | 'batch_server'): void;
 }
 
 export class VoiceControlMetrics implements VoiceTurnMetrics {
@@ -47,6 +48,12 @@ export class VoiceControlMetrics implements VoiceTurnMetrics {
     help: 'Current number of meeting voice cleanup commands pending in Redis.',
     registers: [this.registry],
   });
+  private readonly transportSelections = new Counter({
+    name: 'meeting_voice_transport_selection_total',
+    help: 'Number of accepted voice turns by bounded transport selection.',
+    labelNames: ['selection'] as const,
+    registers: [this.registry],
+  });
 
   public recordStart(outcome: VoiceTurnStartOutcome, durationSeconds: number): void {
     this.starts.inc({ outcome });
@@ -55,6 +62,10 @@ export class VoiceControlMetrics implements VoiceTurnMetrics {
 
   public recordTerminal(state: 'COMPLETED' | 'FAILED' | 'CANCELLED'): void {
     this.terminals.inc({ state: state.toLowerCase() });
+  }
+
+  public recordTransportSelection(selection: 'streaming' | 'batch_capability' | 'batch_server'): void {
+    this.transportSelections.inc({ selection });
   }
 
   public recordCleanup(outcome: VoiceCleanupOutcome): void {

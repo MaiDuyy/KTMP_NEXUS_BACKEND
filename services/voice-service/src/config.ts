@@ -22,6 +22,7 @@ export interface VoiceServiceConfig {
   streamingSttTimeoutMs: number;
   googleStreamingSttLocation: string;
   googleStreamingSttModel: string;
+  googleStreamingSttPhrases: readonly string[];
   googleTtsVoice: string;
   googleTtsAudioEncoding: string;
   googleTtsTimeoutMs: number;
@@ -69,6 +70,41 @@ function readPositiveInteger(
   }
 
   return parsed;
+}
+
+function readBoundedPositiveInteger(
+  value: string | undefined,
+  fallback: number,
+  variableName: string,
+  maximum: number,
+): number {
+  const parsed = readPositiveInteger(value, fallback, variableName);
+  if (parsed > maximum) {
+    throw new Error(`${variableName} must be less than or equal to ${maximum}`);
+  }
+  return parsed;
+}
+
+function readStreamingPhrases(value: string | undefined): readonly string[] {
+  if (!value?.trim()) return [];
+  const phrases: string[] = [];
+  const seen = new Set<string>();
+  let totalBytes = 0;
+  for (const raw of value.split(',')) {
+    const phrase = raw.normalize('NFC').trim().replace(/\s+/g, ' ');
+    if (!phrase) continue;
+    const bytes = Buffer.byteLength(phrase, 'utf8');
+    if (bytes > 100) throw new Error('GOOGLE_STREAMING_STT_PHRASES contains a phrase larger than 100 bytes');
+    const key = phrase.toLocaleLowerCase('vi-VN');
+    if (seen.has(key)) continue;
+    if (phrases.length >= 100 || totalBytes + bytes > 5_000) {
+      throw new Error('GOOGLE_STREAMING_STT_PHRASES exceeds 100 phrases or 5000 bytes');
+    }
+    seen.add(key);
+    phrases.push(phrase);
+    totalBytes += bytes;
+  }
+  return phrases;
 }
 
 function readNonEmptyString(value: string | undefined, fallback: string, variableName: string): string {
@@ -178,7 +214,12 @@ export function loadVoiceServiceConfig(env: NodeJS.ProcessEnv = process.env): Vo
     voiceStreamAllowedOrigins: readOrigins(env.VOICE_STREAM_ALLOWED_ORIGINS, nodeEnv === 'production', voiceStreamingEnabled),
     voiceStreamAuthTimeoutMs: readPositiveInteger(env.VOICE_STREAM_AUTH_TIMEOUT_MS, 5_000, 'VOICE_STREAM_AUTH_TIMEOUT_MS'),
     voiceStreamIdleTimeoutMs: readPositiveInteger(env.VOICE_STREAM_IDLE_TIMEOUT_MS, 15_000, 'VOICE_STREAM_IDLE_TIMEOUT_MS'),
-    voiceStreamMaxDurationMs: readPositiveInteger(env.VOICE_STREAM_MAX_DURATION_MS, 60_000, 'VOICE_STREAM_MAX_DURATION_MS'),
+    voiceStreamMaxDurationMs: readBoundedPositiveInteger(
+      env.VOICE_STREAM_MAX_DURATION_MS,
+      60_000,
+      'VOICE_STREAM_MAX_DURATION_MS',
+      60_000,
+    ),
     voiceStreamMaxQueuedBytes: readPositiveInteger(env.VOICE_STREAM_MAX_QUEUED_BYTES, 256 * 1024, 'VOICE_STREAM_MAX_QUEUED_BYTES'),
     host: readNonEmptyString(env.VOICE_SERVICE_HOST, "0.0.0.0", "VOICE_SERVICE_HOST"),
     port: readPositiveInteger(env.VOICE_SERVICE_PORT ?? env.PORT, DEFAULT_PORT, "VOICE_SERVICE_PORT"),
@@ -199,6 +240,7 @@ export function loadVoiceServiceConfig(env: NodeJS.ProcessEnv = process.env): Vo
     streamingSttTimeoutMs: readPositiveInteger(env.GOOGLE_STREAMING_STT_TIMEOUT_MS, 70_000, 'GOOGLE_STREAMING_STT_TIMEOUT_MS'),
     googleStreamingSttLocation: readNonEmptyString(env.GOOGLE_STREAMING_STT_LOCATION, 'us', 'GOOGLE_STREAMING_STT_LOCATION'),
     googleStreamingSttModel: readNonEmptyString(env.GOOGLE_STREAMING_STT_MODEL, 'chirp_3', 'GOOGLE_STREAMING_STT_MODEL'),
+    googleStreamingSttPhrases: readStreamingPhrases(env.GOOGLE_STREAMING_STT_PHRASES),
     googleTtsVoice: readNonEmptyString(env.GOOGLE_TTS_VOICE, "vi-VN-Chirp3-HD-Charon", "GOOGLE_TTS_VOICE"),
     googleTtsAudioEncoding: readNonEmptyString(env.GOOGLE_TTS_AUDIO_ENCODING, "LINEAR16", "GOOGLE_TTS_AUDIO_ENCODING"),
     googleTtsTimeoutMs: readPositiveInteger(env.GOOGLE_TTS_TIMEOUT_MS, 15_000, "GOOGLE_TTS_TIMEOUT_MS"),

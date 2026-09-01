@@ -43,6 +43,7 @@ test('streams synthetic Vietnamese PCM through Google Speech V2 Chirp 3', {
     model: config.googleStreamingSttModel,
     languageCode: 'vi-VN',
     timeoutMs: config.streamingSttTimeoutMs,
+    phrases: ['Nexus'],
   });
   const startedAt = performance.now();
   const session = adapter.open({ onResult: (result) => results.push(result) });

@@ -20,6 +20,7 @@ test("uses safe defaults without provider credentials", () => {
   assert.equal(config.googleSttModel, 'chirp_3');
   assert.equal(config.googleStreamingSttLocation, 'us');
   assert.equal(config.googleStreamingSttModel, 'chirp_3');
+  assert.deepEqual(config.googleStreamingSttPhrases, []);
 
   assert.equal(config.livekitUrl, null);
   assert.equal(config.livekitApiKey, null);
@@ -65,6 +66,22 @@ test("rejects invalid numeric configuration", () => {
   assert.throws(
     () => loadVoiceServiceConfig({ LIVEKIT_PLAYOUT_TIMEOUT_MS: "0" }),
     /LIVEKIT_PLAYOUT_TIMEOUT_MS must be a positive integer/,
+  );
+  assert.throws(
+    () => loadVoiceServiceConfig({ VOICE_STREAM_MAX_DURATION_MS: '60001' }),
+    /must be less than or equal to 60000/,
+  );
+});
+
+test('normalizes and bounds configured streaming speech phrases', () => {
+  const config = loadVoiceServiceConfig({
+    NODE_ENV: 'test',
+    GOOGLE_STREAMING_STT_PHRASES: ' Nexus ERP,  Công nghệ   thông tin ,nexus erp ',
+  });
+  assert.deepEqual(config.googleStreamingSttPhrases, ['Nexus ERP', 'Công nghệ thông tin']);
+  assert.throws(
+    () => loadVoiceServiceConfig({ GOOGLE_STREAMING_STT_PHRASES: 'x'.repeat(101) }),
+    /larger than 100 bytes/,
   );
 });
 

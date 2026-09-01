@@ -20,13 +20,14 @@ function harness() {
   let finish: () => Promise<void> = async () => undefined;
   const events: VoicePipelineEvent[] = [];
   const inputs: unknown[] = [];
+  let providerCancellations = 0;
   const stt = {
     open: (value: StreamingSttCallbacks) => {
       callbacks = value;
       return {
         write: async () => undefined,
         finish: () => finish(),
-        cancel: () => undefined,
+        cancel: () => { providerCancellations += 1; },
       };
     },
   } as unknown as GoogleStreamingSttAdapter;
@@ -43,7 +44,14 @@ function harness() {
       enqueueTranscript: (input) => { inputs.push(input); return true; },
     },
   });
-  return { factory, events, inputs, get callbacks() { return callbacks; }, setFinish(value: () => Promise<void>) { finish = value; } };
+  return {
+    factory,
+    events,
+    inputs,
+    get callbacks() { return callbacks; },
+    get providerCancellations() { return providerCancellations; },
+    setFinish(value: () => Promise<void>) { finish = value; },
+  };
 }
 
 test('fans out revisions, deduplicates final offsets and enqueues one ordered transcript', async () => {
@@ -104,4 +112,16 @@ test('maps provider failure and cancellation to one terminal control event', asy
   await cancelledSink.cancel('owner_disconnected');
   assert.equal(cancelled.events.filter(({ kind }) => kind === 'terminal').length, 1);
   assert.equal((cancelled.events.at(-1) as any).state, 'CANCELLED');
+});
+
+test('meeting cleanup cancels only active sinks from the target meeting', async () => {
+  const testHarness = harness();
+  await testHarness.factory.open(token, new AbortController().signal);
+  await testHarness.factory.open({ ...token, meetingSessionId: 'meeting-2', turnId: 'turn-2' }, new AbortController().signal);
+  await testHarness.factory.cancelMeeting('meeting-1');
+  assert.equal(testHarness.providerCancellations, 1);
+  await testHarness.factory.cancelMeeting('meeting-1');
+  assert.equal(testHarness.providerCancellations, 1);
+  await testHarness.factory.cancelMeeting('meeting-2');
+  assert.equal(testHarness.providerCancellations, 2);
 });

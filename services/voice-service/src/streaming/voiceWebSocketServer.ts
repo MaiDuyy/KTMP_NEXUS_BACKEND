@@ -15,6 +15,7 @@ import {
 import { WebSocket, WebSocketServer, type RawData } from 'ws';
 import type { VoiceServiceLogger } from '../logger.js';
 import type { VerifiedVoiceTurnToken, VoiceTurnTokenVerifier } from '../turnTokenVerifier.js';
+import type { VoiceStreamingMetrics, VoiceStreamOutcome } from '../voiceMetrics.js';
 
 const MAX_AUTH_FRAME_BYTES = 8_192;
 const CANCEL_REASONS = new Set<VoiceTurnCancelReason>([
@@ -38,6 +39,16 @@ function mapSinkError(error: unknown): VoiceErrorCode {
     return error.message as VoiceErrorCode;
   }
   return 'VOICE_INTERNAL_ERROR';
+}
+
+function streamOutcome(code: VoiceErrorCode): VoiceStreamOutcome {
+  if (code === 'VOICE_STREAM_AUTH_TIMEOUT') return 'auth_timeout';
+  if (code === 'VOICE_STREAM_TIMEOUT') return 'idle_or_duration_timeout';
+  if (code === 'VOICE_STREAM_PROTOCOL_ERROR' || code === 'VOICE_TOKEN_INVALID') return 'protocol_error';
+  if (code === 'VOICE_STREAM_SEQUENCE_ERROR') return 'sequence_error';
+  if (code === 'VOICE_STREAM_BACKPRESSURE') return 'backpressure';
+  if (code === 'VOICE_CANCELLED') return 'cancelled';
+  return 'sink_error';
 }
 
 export interface VoicePcmChunk {
@@ -64,6 +75,7 @@ export interface VoiceWebSocketServerOptions {
   idleTimeoutMs: number;
   maxDurationMs: number;
   maxQueuedBytes: number;
+  metrics?: Pick<VoiceStreamingMetrics, 'recordStream'>;
 }
 
 interface ParsedBinaryFrame {
@@ -180,9 +192,16 @@ class VoiceWebSocketConnection {
       return;
     }
     this.authenticating = true;
+    let token: VerifiedVoiceTurnToken;
     try {
-      const token = await this.options.verifier.verifyAndConsume(value.turnToken);
+      token = await this.options.verifier.verifyAndConsume(value.turnToken);
       if (token.turnId !== this.turnId || this.terminal) throw new Error('invalid turn binding');
+    } catch {
+      this.authenticating = false;
+      this.fail('VOICE_TOKEN_INVALID', 'Invalid or already used streaming credentials.', false, 4401);
+      return;
+    }
+    try {
       this.sink = await this.options.sinkFactory.open(token, this.abortController.signal);
       if (this.terminal) {
         await this.sink.cancel('system');
@@ -195,6 +214,7 @@ class VoiceWebSocketConnection {
       this.durationTimer = setTimeout(() => {
         this.fail('VOICE_STREAM_TIMEOUT', 'Streaming duration limit reached.', false, 4408);
       }, this.options.maxDurationMs);
+      this.options.metrics?.recordStream('authenticated');
       this.send({
         type: 'ready',
         protocolVersion: VOICE_STREAM_PROTOCOL_VERSION,
@@ -206,9 +226,9 @@ class VoiceWebSocketConnection {
         },
         maxQueuedBytes: this.options.maxQueuedBytes,
       });
-    } catch {
+    } catch (error) {
       this.authenticating = false;
-      this.fail('VOICE_TOKEN_INVALID', 'Invalid or already used streaming credentials.', false, 4401);
+      this.failSink(error, 'Unable to initialize streaming audio.');
     }
   }
 
@@ -256,6 +276,7 @@ class VoiceWebSocketConnection {
       this.clearTimers();
       this.queue = this.queue.then(async () => {
         await this.sink?.end(frame.finalSequence as number | null);
+        this.options.metrics?.recordStream('finalized');
         this.send({ type: 'finalized', finalSequence: frame.finalSequence });
         this.socket.close(1000, 'finalized');
       }).catch((error: unknown) => this.closeAfterSinkFailure(error));
@@ -265,6 +286,7 @@ class VoiceWebSocketConnection {
       this.terminal = true;
       this.clearTimers();
       this.abortController.abort();
+      this.options.metrics?.recordStream('cancelled');
       void Promise.resolve(this.sink?.cancel(frame.reason as VoiceTurnCancelReason)).finally(() => {
         this.socket.close(1000, 'cancelled');
       });
@@ -287,6 +309,7 @@ class VoiceWebSocketConnection {
   private fail(code: VoiceErrorCode, message: string, retryable: boolean, closeCode: number): void {
     if (this.terminal) return;
     this.terminal = true;
+    this.options.metrics?.recordStream(streamOutcome(code));
     this.clearTimers();
     this.abortController.abort();
     void Promise.resolve(this.sink?.cancel(code === 'VOICE_STREAM_TIMEOUT' ? 'timeout' : 'provider_error')).catch(() => undefined);
@@ -312,6 +335,7 @@ class VoiceWebSocketConnection {
     this.abortController.abort();
     if (!this.terminal && this.sink) {
       this.terminal = true;
+      this.options.metrics?.recordStream('disconnected');
       await Promise.resolve(this.sink.cancel('owner_disconnected')).catch(() => undefined);
     }
   }

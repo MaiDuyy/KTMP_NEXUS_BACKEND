@@ -36,12 +36,20 @@ function createAdapter(stream: FakeStream): GoogleStreamingSttAdapter {
 test('writes V2 config first, then bounded PCM, and surfaces partial/final results', async () => {
   const stream = new FakeStream();
   const results: unknown[] = [];
-  const session = createAdapter(stream).open({ onResult: (result) => results.push(result) });
+  const session = createAdapter(stream).open(
+    { onResult: (result) => results.push(result) },
+    undefined,
+    ['Nexus ERP'],
+  );
   const config = stream.writes[0] as any;
   assert.equal(config.recognizer, 'projects/project-1/locations/asia-southeast1/recognizers/_');
   assert.equal(config.streamingConfig.config.model, 'chirp_3');
   assert.equal(config.streamingConfig.config.explicitDecodingConfig.sampleRateHertz, 16000);
   assert.equal(config.streamingConfig.streamingFeatures.interimResults, true);
+  assert.deepEqual(
+    config.streamingConfig.config.adaptation.phraseSets[0].inlinePhraseSet.phrases,
+    [{ value: 'Nexus ERP' }],
+  );
   assert.equal(config.audio, undefined);
 
   await session.write(Buffer.alloc(640));

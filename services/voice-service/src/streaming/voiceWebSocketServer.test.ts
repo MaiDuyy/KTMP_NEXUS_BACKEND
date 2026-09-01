@@ -279,3 +279,44 @@ test('enforces auth timeout and cancels an authenticated sink on disconnect', as
     await closeServer(server);
   }
 });
+
+test('does not misclassify sink initialization failure as an invalid token', async () => {
+  const { server, url } = await listen(streamingOptions({
+    open: () => { throw new Error('VOICE_STT_UNAVAILABLE'); },
+  }));
+  try {
+    const socket = await connect(url);
+    auth(socket);
+    const response = await nextJson(socket);
+    assert.equal(response.code, 'VOICE_STT_UNAVAILABLE');
+    await once(socket, 'close');
+  } finally {
+    await closeServer(server);
+  }
+});
+
+test('enforces the configured hard duration and records bounded stream outcomes', async () => {
+  const cancellations: string[] = [];
+  const outcomes: string[] = [];
+  const { server, url } = await listen(streamingOptions({
+    open: () => ({
+      write: () => undefined,
+      end: () => undefined,
+      cancel: (reason) => { cancellations.push(reason); },
+    }),
+  }, {
+    maxDurationMs: 30,
+    metrics: { recordStream: (outcome) => { outcomes.push(outcome); } },
+  }));
+  try {
+    const socket = await connect(url);
+    auth(socket);
+    await nextJson(socket);
+    assert.equal((await nextJson(socket)).code, 'VOICE_STREAM_TIMEOUT');
+    await once(socket, 'close');
+    assert.deepEqual(cancellations, ['timeout']);
+    assert.deepEqual(outcomes, ['authenticated', 'idle_or_duration_timeout']);
+  } finally {
+    await closeServer(server);
+  }
+});
