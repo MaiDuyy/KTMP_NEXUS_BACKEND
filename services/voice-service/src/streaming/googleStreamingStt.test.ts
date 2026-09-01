@@ -1,0 +1,89 @@
+import assert from 'node:assert/strict';
+import { EventEmitter } from 'node:events';
+import test from 'node:test';
+import type { CancellableStream } from 'google-gax';
+import { GoogleStreamingSttAdapter, StreamingSttError } from './googleStreamingStt.js';
+
+class FakeStream extends EventEmitter {
+  public readonly writes: unknown[] = [];
+  public cancelled = false;
+  public backpressure = false;
+
+  public write(value: unknown): boolean {
+    this.writes.push(value);
+    return !this.backpressure;
+  }
+
+  public end(): void {
+    queueMicrotask(() => this.emit('end'));
+  }
+
+  public cancel(): void {
+    this.cancelled = true;
+  }
+}
+
+function createAdapter(stream: FakeStream): GoogleStreamingSttAdapter {
+  return new GoogleStreamingSttAdapter({
+    projectId: 'project-1',
+    location: 'asia-southeast1',
+    model: 'chirp_3',
+    languageCode: 'vi-VN',
+    timeoutMs: 70_000,
+  }, { _streamingRecognize: () => stream as unknown as CancellableStream });
+}
+
+test('writes V2 config first, then bounded PCM, and surfaces partial/final results', async () => {
+  const stream = new FakeStream();
+  const results: unknown[] = [];
+  const session = createAdapter(stream).open({ onResult: (result) => results.push(result) });
+  const config = stream.writes[0] as any;
+  assert.equal(config.recognizer, 'projects/project-1/locations/asia-southeast1/recognizers/_');
+  assert.equal(config.streamingConfig.config.model, 'chirp_3');
+  assert.equal(config.streamingConfig.config.explicitDecodingConfig.sampleRateHertz, 16000);
+  assert.equal(config.streamingConfig.streamingFeatures.interimResults, true);
+  assert.equal(config.audio, undefined);
+
+  await session.write(Buffer.alloc(640));
+  assert.deepEqual(stream.writes[1], { audio: Buffer.alloc(640) });
+  stream.emit('data', {
+    results: [
+      { alternatives: [{ transcript: 'xin chào', confidence: 0.8 }], isFinal: false, stability: 0.7, resultEndOffset: { seconds: 1, nanos: 2 } },
+      { alternatives: [{ transcript: 'xin chào Nexus', confidence: 0.9 }], isFinal: true, resultEndOffset: { seconds: 2, nanos: 0 } },
+    ],
+  });
+  assert.equal(results.length, 2);
+  assert.deepEqual(results[1], {
+    text: 'xin chào Nexus',
+    isFinal: true,
+    stability: null,
+    confidence: 0.9,
+    resultEndOffset: '000000000002.000000000',
+  });
+  await session.finish();
+});
+
+test('waits for gRPC drain and maps abort/provider failures', async () => {
+  const stream = new FakeStream();
+  stream.backpressure = true;
+  const session = createAdapter(stream).open({ onResult: () => undefined });
+  const writing = session.write(Buffer.alloc(640));
+  queueMicrotask(() => stream.emit('drain'));
+  await writing;
+
+  const controller = new AbortController();
+  const abortedStream = new FakeStream();
+  const aborted = createAdapter(abortedStream).open({ onResult: () => undefined }, controller.signal);
+  controller.abort();
+  assert.equal(abortedStream.cancelled, true);
+  await assert.rejects(aborted.finish(), (error) => error instanceof StreamingSttError && error.code === 'VOICE_CANCELLED');
+});
+
+test('rejects audio larger than the V2 streaming request limit', async () => {
+  const session = createAdapter(new FakeStream()).open({ onResult: () => undefined });
+  await assert.rejects(
+    session.write(Buffer.alloc(15_002)),
+    (error: unknown) => error instanceof StreamingSttError && error.code === 'VOICE_STT_UNAVAILABLE',
+  );
+  session.cancel();
+});

@@ -16,6 +16,8 @@ import { MeetingAiClient, VoiceControlClient } from './internalClients.js';
 import { BatchVoiceOrchestrator } from './batchVoiceOrchestrator.js';
 import { MeetingCleanupCoordinator } from './meetingCleanupCoordinator.js';
 import { VoiceServiceMetrics } from './voiceMetrics.js';
+import { GoogleStreamingSttAdapter } from './streaming/googleStreamingStt.js';
+import { StreamingVoiceSinkFactory } from './streaming/streamingVoiceSink.js';
 
 export interface VoiceServiceInstance {
   config: VoiceServiceConfig;
@@ -54,6 +56,9 @@ export function createVoiceService(
       config.meetingAiTimeoutMs,
     )
     : null;
+  const voiceControlClient = config.voiceControlInternalUrl && config.voiceInternalServiceKey
+    ? new VoiceControlClient(config.voiceControlInternalUrl, config.voiceInternalServiceKey)
+    : null;
   const orchestrator = pipelineConfigured
     ? new BatchVoiceOrchestrator({
       stt: new GoogleBatchSttAdapter({
@@ -72,13 +77,23 @@ export function createVoiceService(
         timeoutMs: config.googleTtsTimeoutMs,
       }),
       publisher: meetingAudioPublisher,
-      control: new VoiceControlClient(
-        config.voiceControlInternalUrl!,
-        config.voiceInternalServiceKey!,
-      ),
+      control: voiceControlClient!,
       logger,
       timeoutMs: config.pipelineTimeoutMs,
       metrics: voiceMetrics,
+    })
+    : null;
+  const streamingSinkFactory = config.voiceStreamingEnabled && orchestrator && voiceControlClient && config.googleCloudProject
+    ? new StreamingVoiceSinkFactory({
+      stt: new GoogleStreamingSttAdapter({
+        projectId: config.googleCloudProject,
+        location: config.googleStreamingSttLocation,
+        model: config.googleStreamingSttModel,
+        languageCode: config.googleSttLanguage,
+        timeoutMs: config.streamingSttTimeoutMs,
+      }),
+      control: voiceControlClient,
+      pipeline: orchestrator,
     })
     : null;
   const meetingCleanupCoordinator = meetingAiClient
@@ -93,7 +108,9 @@ export function createVoiceService(
 
   const server = createVoiceHttpServer({
     logger,
-    isReady: () => !config.meetingVoiceEnabled || Boolean(turnTokenVerifier && orchestrator),
+    isReady: () => !config.meetingVoiceEnabled || Boolean(
+      turnTokenVerifier && orchestrator && (!config.voiceStreamingEnabled || streamingSinkFactory),
+    ),
     turnTokenVerifier,
     internalServiceKey: config.voiceInternalServiceKey,
     featureEnabled: config.meetingVoiceEnabled,
@@ -106,6 +123,18 @@ export function createVoiceService(
         if (!orchestrator.enqueue(upload)) {
           throw new Error('VOICE_TURN_EXPIRED');
         }
+      }
+      : undefined,
+    streaming: config.voiceStreamingEnabled && turnTokenVerifier && streamingSinkFactory
+      ? {
+        logger,
+        verifier: turnTokenVerifier,
+        sinkFactory: streamingSinkFactory,
+        allowedOrigins: config.voiceStreamAllowedOrigins,
+        authTimeoutMs: config.voiceStreamAuthTimeoutMs,
+        idleTimeoutMs: config.voiceStreamIdleTimeoutMs,
+        maxDurationMs: config.voiceStreamMaxDurationMs,
+        maxQueuedBytes: config.voiceStreamMaxQueuedBytes,
       }
       : undefined,
   });

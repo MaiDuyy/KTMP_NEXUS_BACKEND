@@ -1,5 +1,6 @@
 import type { VoiceErrorCode, VoicePipelineEvent } from '@ott/shared';
 import type { BatchAudioUpload } from './audioUpload.js';
+import type { VerifiedVoiceTurnToken } from './turnTokenVerifier.js';
 import { BatchSttError, type BatchSttResult } from './batchStt.js';
 import { BatchTtsError, type BatchTtsResult } from './batchTts.js';
 import { InternalServiceError, type MeetingAiRequest, type MeetingAiResponse } from './internalClients.js';
@@ -63,6 +64,12 @@ export interface BatchVoiceOrchestratorDependencies {
   metrics?: VoicePipelineMetrics;
 }
 
+interface FinalTranscriptVoiceInput {
+  token: VerifiedVoiceTurnToken;
+  transcript: string;
+  confidence: number | null;
+}
+
 const NOOP_METRICS: VoicePipelineMetrics = {
   recordStage: () => undefined,
   recordPipeline: () => undefined,
@@ -109,11 +116,20 @@ export class BatchVoiceOrchestrator {
   }
 
   public enqueue(upload: BatchAudioUpload): boolean {
-    const turnId = upload.token.turnId;
-    if (this.active.has(turnId) || this.closingMeetings.has(upload.token.meetingSessionId)) return false;
+    return this.enqueueInput(upload);
+  }
+
+  public enqueueTranscript(input: FinalTranscriptVoiceInput): boolean {
+    if (!input.transcript.trim()) return false;
+    return this.enqueueInput({ ...input, transcript: input.transcript.trim() });
+  }
+
+  private enqueueInput(input: BatchAudioUpload | FinalTranscriptVoiceInput): boolean {
+    const turnId = input.token.turnId;
+    if (this.active.has(turnId) || this.closingMeetings.has(input.token.meetingSessionId)) return false;
     const controller = new AbortController();
-    const settled = this.run(upload, controller).finally(() => this.active.delete(turnId));
-    this.active.set(turnId, { meetingSessionId: upload.token.meetingSessionId, controller, settled });
+    const settled = this.run(input, controller).finally(() => this.active.delete(turnId));
+    this.active.set(turnId, { meetingSessionId: input.token.meetingSessionId, controller, settled });
     return true;
   }
 
@@ -137,8 +153,8 @@ export class BatchVoiceOrchestrator {
     }
   }
 
-  private async run(upload: BatchAudioUpload, controller: AbortController): Promise<void> {
-    const { meetingSessionId, turnId, userId } = upload.token;
+  private async run(input: BatchAudioUpload | FinalTranscriptVoiceInput, controller: AbortController): Promise<void> {
+    const { meetingSessionId, turnId, userId } = input.token;
     const startedAt = Date.now();
     const monotonicStartedAt = performance.now();
     const timeout = setTimeout(() => controller.abort('pipeline-timeout'), this.dependencies.timeoutMs);
@@ -165,7 +181,9 @@ export class BatchVoiceOrchestrator {
       const context = await this.dependencies.control.getContext(base, controller.signal);
       moveToStage('stt');
       await this.dependencies.control.emit({ ...base, kind: 'state', state: 'FINALIZING_STT' }, controller.signal);
-      const transcript = await this.dependencies.stt.transcribe(upload.audio, upload.contentType, controller.signal);
+      const transcript = 'audio' in input
+        ? await this.dependencies.stt.transcribe(input.audio, input.contentType, controller.signal)
+        : { transcript: input.transcript, confidence: input.confidence };
       await this.dependencies.control.emit({
         ...base,
         kind: 'transcript',

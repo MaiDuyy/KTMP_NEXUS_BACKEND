@@ -327,6 +327,22 @@ test('VoiceTurnController fans out pipeline events and synchronizes transient hi
   assert.equal(await controller.handlePipelineEvent({ ...base, kind: 'state', state: 'THINKING' }), true);
   assert.equal(await controller.handlePipelineEvent({
     ...base,
+    kind: 'transcript_partial',
+    speakerName: 'ignored-service-value',
+    text: 'Câu hỏi đang nhận',
+    stability: 0.7,
+    revision: 1,
+  }), true);
+  assert.equal((broadcaster.events.at(-1)?.payload as { isFinal: boolean }).isFinal, false);
+  assert.equal((broadcaster.events.at(-1)?.payload as { revision: number }).revision, 1);
+  assert.equal((await controller.sync({
+    socket: observerSocket,
+    userId: 'user-2',
+    userName: 'User Two',
+    payload: { meetingSessionId: 'call-1' },
+  }))?.messages.length, 0);
+  assert.equal(await controller.handlePipelineEvent({
+    ...base,
     kind: 'transcript',
     speakerName: 'ignored-service-value',
     text: 'Câu hỏi đã nhận diện',

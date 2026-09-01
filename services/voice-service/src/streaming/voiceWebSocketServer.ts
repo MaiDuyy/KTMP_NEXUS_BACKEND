@@ -26,6 +26,19 @@ const CANCEL_REASONS = new Set<VoiceTurnCancelReason>([
   'provider_error',
   'system',
 ]);
+const STREAMING_SINK_ERROR_CODES = new Set<VoiceErrorCode>([
+  'VOICE_STT_TIMEOUT',
+  'VOICE_STT_UNAVAILABLE',
+  'VOICE_CANCELLED',
+  'VOICE_TURN_EXPIRED',
+]);
+
+function mapSinkError(error: unknown): VoiceErrorCode {
+  if (error instanceof Error && STREAMING_SINK_ERROR_CODES.has(error.message as VoiceErrorCode)) {
+    return error.message as VoiceErrorCode;
+  }
+  return 'VOICE_INTERNAL_ERROR';
+}
 
 export interface VoicePcmChunk {
   sequence: number;
@@ -224,7 +237,7 @@ class VoiceWebSocketConnection {
         this.queuedBytes -= frame.pcm.length;
         this.send({ type: 'ack', sequence: frame.sequence, queuedBytes: this.queuedBytes });
       })
-      .catch(() => this.fail('VOICE_INTERNAL_ERROR', 'Unable to process streaming audio.', true, 4500));
+      .catch((error: unknown) => this.failSink(error, 'Unable to process streaming audio.'));
   }
 
   private acceptControl(value: unknown): void {
@@ -245,7 +258,7 @@ class VoiceWebSocketConnection {
         await this.sink?.end(frame.finalSequence as number | null);
         this.send({ type: 'finalized', finalSequence: frame.finalSequence });
         this.socket.close(1000, 'finalized');
-      }).catch(() => this.closeAfterSinkFailure());
+      }).catch((error: unknown) => this.closeAfterSinkFailure(error));
       return;
     }
     if (frame.type === 'cancel' && typeof frame.reason === 'string' && CANCEL_REASONS.has(frame.reason as VoiceTurnCancelReason)) {
@@ -284,9 +297,14 @@ class VoiceWebSocketConnection {
     }
   }
 
-  private closeAfterSinkFailure(): void {
+  private failSink(error: unknown, fallbackMessage: string): void {
+    const code = mapSinkError(error);
+    this.fail(code, code === 'VOICE_INTERNAL_ERROR' ? fallbackMessage : code, true, 4500);
+  }
+
+  private closeAfterSinkFailure(error: unknown): void {
     this.terminal = false;
-    this.fail('VOICE_INTERNAL_ERROR', 'Unable to finalize streaming audio.', true, 4500);
+    this.failSink(error, 'Unable to finalize streaming audio.');
   }
 
   private async onClose(): Promise<void> {

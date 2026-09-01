@@ -192,6 +192,7 @@ export interface VoiceTranscriptEvent {
   text: string;
   isFinal: boolean;
   stability?: number;
+  revision?: number;
 }
 
 export interface VoiceMessageEvent {
@@ -283,6 +284,14 @@ export interface VoicePipelineTranscriptEvent extends VoicePipelineEventBase {
   confidence: number | null;
 }
 
+export interface VoicePipelinePartialTranscriptEvent extends VoicePipelineEventBase {
+  kind: 'transcript_partial';
+  speakerName: string;
+  text: string;
+  stability: number | null;
+  revision: number;
+}
+
 export interface VoicePipelineMessageEvent extends VoicePipelineEventBase {
   kind: 'message';
   displayText: string;
@@ -299,6 +308,7 @@ export interface VoicePipelineTerminalEvent extends VoicePipelineEventBase {
 
 export type VoicePipelineEvent =
   | VoicePipelineStateEvent
+  | VoicePipelinePartialTranscriptEvent
   | VoicePipelineTranscriptEvent
   | VoicePipelineMessageEvent
   | VoicePipelineTerminalEvent;

@@ -8,6 +8,8 @@ test("uses safe defaults without provider credentials", () => {
   assert.equal(config.host, "0.0.0.0");
   assert.equal(config.meetingVoiceEnabled, true);
   assert.equal(config.voiceMetricsEnabled, true);
+  assert.equal(config.voiceStreamingEnabled, false);
+  assert.deepEqual([...config.voiceStreamAllowedOrigins], ['http://localhost:3000']);
   assert.equal(config.port, 3035);
   assert.equal(config.shutdownTimeoutMs, 10_000);
   assert.equal(config.logLevel, "info");
@@ -15,6 +17,9 @@ test("uses safe defaults without provider credentials", () => {
   assert.equal(config.voiceTurnTokenSecret, null);
   assert.equal(config.googleCloudLocation, "asia-southeast1");
   assert.equal(config.googleSttLanguage, "vi-VN");
+  assert.equal(config.googleSttModel, 'chirp_3');
+  assert.equal(config.googleStreamingSttLocation, 'us');
+  assert.equal(config.googleStreamingSttModel, 'chirp_3');
 
   assert.equal(config.livekitUrl, null);
   assert.equal(config.livekitApiKey, null);
