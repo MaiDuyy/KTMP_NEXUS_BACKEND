@@ -19,6 +19,7 @@ export type StreamingSttOutcome = 'completed' | 'no_speech' | 'timeout' | 'unava
 export type StreamingOutputOutcome = 'completed' | 'fallback_batch_before_first_audio' | 'failed_before_first_audio' | 'failed_after_first_audio' | 'cancelled';
 export type StreamingOutputLatency = 'ai_start_to_first_audio' | 'ai_start_to_first_frame' | 'ai_done_to_playout' | 'total';
 export type StreamingOutputVolume = 'speech_delta_count' | 'audio_chunk_count' | 'frame_count' | 'padded_sample_count';
+export type VoiceCleanupResource = 'ai_ending' | 'stream_input' | 'pipeline' | 'batch_livekit' | 'streaming_livekit' | 'ai_cleanup';
 
 export interface VoicePipelineMetrics {
   recordStage(stage: VoicePipelineStage, outcome: VoiceStageOutcome, durationSeconds: number): void;
@@ -31,6 +32,7 @@ export interface VoiceStreamingMetrics {
   recordStreamingOutput(outcome: StreamingOutputOutcome, durationSeconds: number): void;
   recordStreamingOutputLatency(stage: StreamingOutputLatency, durationSeconds: number): void;
   recordStreamingOutputVolume(kind: StreamingOutputVolume, value: number): void;
+  recordLifecycleCleanup(resource: VoiceCleanupResource, outcome: 'completed' | 'failed'): void;
 }
 
 export class VoiceServiceMetrics implements VoicePipelineMetrics {
@@ -89,6 +91,12 @@ export class VoiceServiceMetrics implements VoicePipelineMetrics {
     buckets: [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 4096],
     registers: [this.registry],
   });
+  private readonly lifecycleCleanup = new Counter({
+    name: 'meeting_voice_lifecycle_cleanup_total',
+    help: 'Number of lifecycle cleanup steps by bounded resource and outcome.',
+    labelNames: ['resource', 'outcome'] as const,
+    registers: [this.registry],
+  });
 
   public recordStage(stage: VoicePipelineStage, outcome: VoiceStageOutcome, durationSeconds: number): void {
     this.stageDuration.observe({ stage, outcome }, Math.max(0, durationSeconds));
@@ -121,6 +129,10 @@ export class VoiceServiceMetrics implements VoicePipelineMetrics {
 
   public recordStreamingOutputVolume(kind: StreamingOutputVolume, value: number): void {
     this.streamingOutputVolume.observe({ kind }, Math.max(0, value));
+  }
+
+  public recordLifecycleCleanup(resource: VoiceCleanupResource, outcome: 'completed' | 'failed'): void {
+    this.lifecycleCleanup.inc({ resource, outcome });
   }
 
   public render(): Promise<string> {

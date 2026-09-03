@@ -39,6 +39,7 @@ test('meeting cleanup is concurrent-idempotent and follows ending, cancel, close
 
 test('meeting cleanup attempts later resources when an earlier step fails', async () => {
   const attempted: string[] = [];
+  const metricEvents: Array<{ resource: string; outcome: string }> = [];
   const coordinator = new MeetingCleanupCoordinator({
     streaming: { cancelMeeting: async () => { attempted.push('stream-cancel'); throw new Error('stream failed'); } },
     orchestrator: { cancelMeeting: async () => { attempted.push('cancel'); throw new Error('cancel failed'); } } as unknown as BatchVoiceOrchestrator,
@@ -49,10 +50,20 @@ test('meeting cleanup attempts later resources when an earlier step fails', asyn
     } as unknown as MeetingAiClient,
     logger,
     timeoutMs: 5_000,
+    metrics: {
+      recordLifecycleCleanup: (resource, outcome) => metricEvents.push({ resource, outcome }),
+    },
   });
 
   await assert.rejects(() => coordinator.cleanup('call-1', 'cleanup-1'));
   assert.deepEqual(attempted, ['ending', 'stream-cancel', 'cancel', 'close', 'cleanup']);
+  assert.deepEqual(metricEvents, [
+    { resource: 'ai_ending', outcome: 'completed' },
+    { resource: 'stream_input', outcome: 'failed' },
+    { resource: 'pipeline', outcome: 'failed' },
+    { resource: 'batch_livekit', outcome: 'completed' },
+    { resource: 'ai_cleanup', outcome: 'completed' },
+  ]);
 });
 
 test('cleans AI state and LiveKit safely when no batch pipeline was configured', async () => {

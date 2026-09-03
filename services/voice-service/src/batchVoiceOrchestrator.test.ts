@@ -167,6 +167,62 @@ test('cancels every active stage by meeting and rejects enqueue after meeting en
   assert.deepEqual(pipelines, [{ outcome: 'cancelled', code: 'VOICE_CANCELLED' }]);
 });
 
+test('turn cancellation waits for the active pipeline and cannot target another meeting', async () => {
+  let releaseAbort!: () => void;
+  let aborted = false;
+  const abortReleased = new Promise<void>((resolve) => { releaseAbort = resolve; });
+  const { orchestrator, events } = fixture({
+    stt: {
+      transcribe: async (_audio, _mimeType, signal) => new Promise((_resolve, reject) => {
+        signal?.addEventListener('abort', async () => {
+          aborted = true;
+          await abortReleased;
+          reject(new BatchSttError('VOICE_CANCELLED'));
+        }, { once: true });
+      }),
+    },
+  });
+  assert.equal(orchestrator.enqueue(upload()), true);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(await orchestrator.cancelTurn('other-call', 'turn-1'), false);
+  const cancellation = orchestrator.cancelTurn('call-1', 'turn-1');
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(aborted, true);
+  let settled = false;
+  void cancellation.then(() => { settled = true; });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(settled, false);
+  releaseAbort();
+  assert.equal(await cancellation, true);
+  assert.deepEqual(events.map(({ kind }) => kind), ['state']);
+  assert.equal(await orchestrator.cancelTurn('call-1', 'turn-1'), false);
+});
+
+test('shutdown cancellation waits for every active pipeline to settle', async () => {
+  let releaseAbort!: () => void;
+  const abortReleased = new Promise<void>((resolve) => { releaseAbort = resolve; });
+  const { orchestrator } = fixture({
+    stt: {
+      transcribe: async (_audio, _mimeType, signal) => new Promise((_resolve, reject) => {
+        signal?.addEventListener('abort', async () => {
+          await abortReleased;
+          reject(new BatchSttError('VOICE_CANCELLED'));
+        }, { once: true });
+      }),
+    },
+  });
+  orchestrator.enqueue(upload());
+  await new Promise((resolve) => setImmediate(resolve));
+  const shutdown = orchestrator.cancelAllAndWait();
+  let settled = false;
+  void shutdown.then(() => { settled = true; });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(settled, false);
+  releaseAbort();
+  await shutdown;
+  assert.equal(settled, true);
+});
+
 test('records bounded stage and pipeline metrics for a completed turn', async () => {
   const stages: Array<{ stage: string; outcome: string }> = [];
   const pipelines: Array<{ outcome: string; code: string }> = [];

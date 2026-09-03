@@ -9,6 +9,7 @@ import type {
   VoiceSessionSyncPayload,
   VoiceSessionSyncResponse,
   VoiceStateEvent,
+  VoiceTurnCancelReason,
   VoiceTurnCancelPayload,
   VoiceTurnEndPayload,
   VoiceTurnStartPayload,
@@ -58,6 +59,9 @@ export interface VoiceTurnControllerDependencies {
   voicePublicStreamUrl?: string | null;
   featurePolicy?: VoiceFeaturePolicy;
   metrics?: VoiceTurnMetrics;
+  turnCancellation?: {
+    cancelTurn(meetingSessionId: string, turnId: string, cancellationId: string): Promise<void>;
+  } | null;
 }
 
 const DEFAULT_FEATURE_POLICY: VoiceFeaturePolicy = {
@@ -290,7 +294,12 @@ export class VoiceTurnController {
       return;
     }
 
-    const updated = await this.dependencies.voiceSessionStore.updateState(
+    const refreshed = await this.dependencies.voiceLockService.refreshByOwner(
+      payload.meetingSessionId,
+      payload.turnId,
+      userId,
+    );
+    const updated = refreshed && await this.dependencies.voiceSessionStore.updateState(
       payload.meetingSessionId,
       payload.turnId,
       userId,
@@ -312,7 +321,7 @@ export class VoiceTurnController {
       return;
     }
 
-    await this.finish(request, 'CANCELLED', request.payload.reason);
+    await this.finish(request, request.payload.reason);
   }
 
   public async sync(request: VoiceSessionSyncRequest): Promise<VoiceSessionSyncResponse | null> {
@@ -331,6 +340,14 @@ export class VoiceTurnController {
       this.dependencies.voiceSessionStore.getActive(meetingSessionId),
       this.dependencies.voiceSessionStore.getHistory(meetingSessionId),
     ]);
+    if (activeTurn && (!lock || lock.turnId !== activeTurn.turnId || lock.ownerUserId !== activeTurn.ownerUserId)) {
+      const cleared = await this.dependencies.voiceSessionStore.clearActive(
+        meetingSessionId,
+        activeTurn.turnId,
+        activeTurn.ownerUserId,
+      );
+      this.metrics.recordRecovery?.(cleared ? 'stale_session_cleared' : 'stale_session_changed');
+    }
     const currentTurn = lock && activeTurn &&
       lock.turnId === activeTurn.turnId &&
       lock.ownerUserId === activeTurn.ownerUserId
@@ -607,6 +624,7 @@ export class VoiceTurnController {
           turnId: null,
           ownerUserId: null,
           ownerName: null,
+          completedTurnId: owner.turnId,
           state: 'IDLE',
         });
         this.metrics.recordTerminal('CANCELLED');
@@ -625,13 +643,12 @@ export class VoiceTurnController {
       return;
     }
 
-    await this.finishOwnedTurn(meetingSessionId, owner.turnId, userId, 'CANCELLED');
+    await this.cancelOwnedTurn(meetingSessionId, owner.turnId, userId, 'owner_disconnected');
   }
 
   private async finish(
     request: VoiceTurnCancelRequest,
-    state: 'CANCELLED',
-    _reason: string,
+    reason: VoiceTurnCancelReason,
   ): Promise<void> {
     const { payload, socket, userId } = request;
     if (!this.isValidEndPayload(payload)) {
@@ -645,8 +662,13 @@ export class VoiceTurnController {
     }
 
     const owner = await this.dependencies.voiceLockService.get(payload.meetingSessionId);
-    if (!owner || owner.turnId !== payload.turnId) {
+    if (!owner) {
+      this.metrics.recordCancellation?.(reason, 'stale');
+      return;
+    }
+    if (owner.turnId !== payload.turnId) {
       emitError(socket, payload.meetingSessionId, payload.turnId, 'VOICE_TURN_EXPIRED', 'Lượt AI Voice không còn hoạt động.', true);
+      this.metrics.recordCancellation?.(reason, 'stale');
       return;
     }
     if (owner.ownerUserId !== userId) {
@@ -654,7 +676,35 @@ export class VoiceTurnController {
       return;
     }
 
-    await this.finishOwnedTurn(payload.meetingSessionId, payload.turnId, userId, state, authorized.callRoom);
+    await this.cancelOwnedTurn(payload.meetingSessionId, payload.turnId, userId, reason, authorized.callRoom);
+  }
+
+  private async cancelOwnedTurn(
+    meetingSessionId: string,
+    turnId: string,
+    userId: string,
+    reason: VoiceTurnCancelReason,
+    callRoom: string = getCallRoom(meetingSessionId),
+  ): Promise<void> {
+    const marked = await this.dependencies.voiceSessionStore.updateState(
+      meetingSessionId,
+      turnId,
+      userId,
+      'CANCELLING',
+    );
+    if (marked) emitState(this.dependencies.broadcaster, callRoom, meetingSessionId, turnId, 'CANCELLING');
+    try {
+      await this.dependencies.turnCancellation?.cancelTurn(
+        meetingSessionId,
+        turnId,
+        randomUUID(),
+      );
+    } catch (error) {
+      this.metrics.recordCancellation?.(reason, 'failed');
+      throw error;
+    }
+    await this.finishOwnedTurn(meetingSessionId, turnId, userId, 'CANCELLED', callRoom);
+    this.metrics.recordCancellation?.(reason, 'completed');
   }
 
   private async finishOwnedTurn(
@@ -679,6 +729,7 @@ export class VoiceTurnController {
       turnId: null,
       ownerUserId: null,
       ownerName: null,
+      completedTurnId: turnId,
       state: 'IDLE',
     });
     this.dependencies.broadcaster.to(callRoom).emit('voice:ready', { meetingSessionId, completedTurnId: turnId });

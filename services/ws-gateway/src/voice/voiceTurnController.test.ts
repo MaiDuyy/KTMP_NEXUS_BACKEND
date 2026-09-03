@@ -66,6 +66,7 @@ class FakeCallRegistry {
 class FakeVoiceLockService {
   public owner: VoiceLockOwner | null = null;
   public releaseAttempts = 0;
+  public refreshAllowed = true;
 
   public async acquire(meetingSessionId: string, turnId: string, ownerUserId: string) {
     if (this.owner) {
@@ -102,7 +103,7 @@ class FakeVoiceLockService {
   }
 
   public async refreshByOwner(_meetingSessionId: string, turnId: string, ownerUserId: string): Promise<boolean> {
-    return this.owner?.turnId === turnId && this.owner.ownerUserId === ownerUserId;
+    return this.refreshAllowed && this.owner?.turnId === turnId && this.owner.ownerUserId === ownerUserId;
   }
 }
 
@@ -138,6 +139,10 @@ function createController(options: {
   allowedWorkspaceIds?: string[];
   startOutcomes?: string[];
   transportSelections?: string[];
+  cancellationCalls?: Array<{ meetingSessionId: string; turnId: string; cancellationId: string }>;
+  cancellationError?: Error;
+  cancellationOutcomes?: Array<{ reason: string; outcome: string }>;
+  recoveryOutcomes?: string[];
 } = {}) {
   const broadcaster = new FakeBroadcaster();
   const callRegistry = new FakeCallRegistry();
@@ -163,6 +168,14 @@ function createController(options: {
       recordStart: (outcome) => options.startOutcomes?.push(outcome),
       recordTerminal: () => undefined,
       recordTransportSelection: (selection) => options.transportSelections?.push(selection),
+      recordCancellation: (reason, outcome) => options.cancellationOutcomes?.push({ reason, outcome }),
+      recordRecovery: (outcome) => options.recoveryOutcomes?.push(outcome),
+    },
+    turnCancellation: {
+      cancelTurn: async (meetingSessionId, turnId, cancellationId) => {
+        options.cancellationCalls?.push({ meetingSessionId, turnId, cancellationId });
+        if (options.cancellationError) throw options.cancellationError;
+      },
     },
   });
 
@@ -253,7 +266,9 @@ test('VoiceTurnController denies a user outside the active call registry', async
 });
 
 test('VoiceTurnController keeps the lock after speech ends and releases only its owner cancellation', async () => {
-  const { broadcaster, callRegistry, controller, voiceLockService } = createController();
+  const cancellationCalls: Array<{ meetingSessionId: string; turnId: string; cancellationId: string }> = [];
+  const cancellationOutcomes: Array<{ reason: string; outcome: string }> = [];
+  const { broadcaster, callRegistry, controller, voiceLockService } = createController({ cancellationCalls, cancellationOutcomes });
   const ownerSocket = new FakeSocket();
   const otherSocket = new FakeSocket();
   const startPayload = {
@@ -303,7 +318,93 @@ test('VoiceTurnController keeps the lock after speech ends and releases only its
   });
   assert.equal(voiceLockService.owner, null);
   assert.equal(voiceLockService.releaseAttempts, 1);
+  assert.equal(cancellationCalls.length, 1);
+  assert.equal(cancellationCalls[0].turnId, accepted.payload.turnId);
+  assert.deepEqual(cancellationOutcomes, [{ reason: 'user_cancelled', outcome: 'completed' }]);
+  assert.equal(broadcaster.events.some(({ event, payload }) => event === 'voice:state' && payload.state === 'CANCELLING'), true);
   assert.equal(broadcaster.events.at(-1)?.event, 'voice:ready');
+
+  ownerSocket.events.length = 0;
+  await controller.cancel({
+    socket: ownerSocket,
+    userId: 'user-1',
+    userName: 'User One',
+    payload: { meetingSessionId: 'call-1', turnId: accepted.payload.turnId, reason: 'user_cancelled' },
+  });
+  assert.equal(cancellationCalls.length, 1);
+  assert.equal(ownerSocket.events.some(({ event }) => event === 'voice:error'), false);
+  assert.deepEqual(cancellationOutcomes.at(-1), { reason: 'user_cancelled', outcome: 'stale' });
+});
+
+test('keeps ownership when Voice Service turn cancellation fails', async () => {
+  const outcomes: Array<{ reason: string; outcome: string }> = [];
+  const { controller, voiceLockService, voiceSessionStore } = createController({
+    cancellationError: new Error('voice service unavailable'),
+    cancellationOutcomes: outcomes,
+  });
+  const socket = new FakeSocket();
+  await controller.start({
+    socket, userId: 'user-1', userName: 'User One',
+    payload: { meetingSessionId: 'call-1', chatId: 'chat-1', workspaceId: 'workspace-1', clientRequestId: 'cancel-fail', mode: 'rag' },
+  });
+  const turnId = socket.events.find(({ event }) => event === 'voice:turn:accepted')!.payload.turnId;
+  await assert.rejects(controller.cancel({
+    socket, userId: 'user-1', userName: 'User One',
+    payload: { meetingSessionId: 'call-1', turnId, reason: 'user_cancelled' },
+  }), /voice service unavailable/);
+  assert.equal(voiceLockService.owner?.turnId, turnId);
+  assert.equal(voiceSessionStore.active?.state, 'CANCELLING');
+  assert.deepEqual(outcomes, [{ reason: 'user_cancelled', outcome: 'failed' }]);
+});
+
+test('refreshes ownership before finalizing and rejects an expired lock', async () => {
+  const { controller, voiceLockService, voiceSessionStore } = createController();
+  const socket = new FakeSocket();
+  await controller.start({
+    socket, userId: 'user-1', userName: 'User One',
+    payload: { meetingSessionId: 'call-1', chatId: 'chat-1', workspaceId: 'workspace-1', clientRequestId: 'refresh', mode: 'rag' },
+  });
+  const turnId = socket.events.find(({ event }) => event === 'voice:turn:accepted')!.payload.turnId;
+  voiceLockService.refreshAllowed = false;
+  await controller.end({ socket, userId: 'user-1', userName: 'User One', payload: { meetingSessionId: 'call-1', turnId } });
+  assert.equal(voiceSessionStore.active?.state, 'LISTENING');
+  assert.equal(socket.events.at(-1)?.payload.code, 'VOICE_TURN_EXPIRED');
+});
+
+test('clears a stale active session during bounded session sync', async () => {
+  const recoveries: string[] = [];
+  const { controller, callRegistry, voiceSessionStore } = createController({ recoveryOutcomes: recoveries });
+  callRegistry.participants.add('user-2');
+  voiceSessionStore.active = { turnId: 'stale-turn', ownerUserId: 'user-1', ownerName: 'User One', state: 'THINKING' };
+  const response = await controller.sync({
+    socket: new FakeSocket(), userId: 'user-2', userName: 'User Two', payload: { meetingSessionId: 'call-1' },
+  });
+  assert.equal(response?.activeTurn, null);
+  assert.equal(voiceSessionStore.active, null);
+  assert.deepEqual(recoveries, ['stale_session_cleared']);
+});
+
+test('participant departure cancels only the departing owner turn', async () => {
+  const cancellationCalls: Array<{ meetingSessionId: string; turnId: string; cancellationId: string }> = [];
+  const cancellationOutcomes: Array<{ reason: string; outcome: string }> = [];
+  const { controller, callRegistry, voiceLockService } = createController({ cancellationCalls, cancellationOutcomes });
+  const socket = new FakeSocket();
+  await controller.start({
+    socket, userId: 'user-1', userName: 'User One',
+    payload: { meetingSessionId: 'call-1', chatId: 'chat-1', workspaceId: 'workspace-1', clientRequestId: 'departure', mode: 'rag' },
+  });
+  const turnId = socket.events.find(({ event }) => event === 'voice:turn:accepted')!.payload.turnId;
+
+  callRegistry.participants.add('user-2');
+  await controller.cancelForParticipantDeparture('call-1', 'user-2');
+  assert.equal(voiceLockService.owner?.turnId, turnId);
+  assert.equal(cancellationCalls.length, 0);
+
+  await controller.cancelForParticipantDeparture('call-1', 'user-1');
+  assert.equal(voiceLockService.owner, null);
+  assert.equal(cancellationCalls.length, 1);
+  assert.equal(cancellationCalls[0].turnId, turnId);
+  assert.deepEqual(cancellationOutcomes, [{ reason: 'owner_disconnected', outcome: 'completed' }]);
 });
 
 test('issues streaming credentials only when the client selected streaming', async () => {

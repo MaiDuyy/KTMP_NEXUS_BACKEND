@@ -18,8 +18,24 @@ export class VoiceMeetingCleanupClient {
   }
 
   public async cleanupMeeting(meetingSessionId: string, cleanupId: string): Promise<void> {
+    await this.post(
+      `/meetings/${encodeURIComponent(meetingSessionId)}/cleanup`,
+      'x-voice-cleanup-id',
+      cleanupId,
+    );
+  }
+
+  public async cancelTurn(meetingSessionId: string, turnId: string, cancellationId: string): Promise<void> {
+    await this.post(
+      `/meetings/${encodeURIComponent(meetingSessionId)}/turns/${encodeURIComponent(turnId)}/cancel`,
+      'x-voice-cancellation-id',
+      cancellationId,
+    );
+  }
+
+  private async post(path: string, operationHeader: string, operationId: string): Promise<void> {
     const url = new URL(this.baseUrl);
-    url.pathname = `${url.pathname.replace(/\/$/, '')}/meetings/${encodeURIComponent(meetingSessionId)}/cleanup`;
+    url.pathname = `${url.pathname.replace(/\/$/, '')}${path}`;
     let lastError: unknown;
     for (let attempt = 1; attempt <= this.maxAttempts; attempt += 1) {
       const controller = new AbortController();
@@ -29,7 +45,7 @@ export class VoiceMeetingCleanupClient {
           method: 'POST',
           headers: {
             'x-voice-internal-service-key': this.serviceKey,
-            'x-voice-cleanup-id': cleanupId,
+            [operationHeader]: operationId,
           },
           signal: controller.signal,
         });

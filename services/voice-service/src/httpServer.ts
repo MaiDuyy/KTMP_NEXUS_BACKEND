@@ -12,6 +12,7 @@ export interface VoiceHttpServerOptions {
   onBatchAudio?: (upload: BatchAudioUpload) => Promise<void> | void;
   internalServiceKey?: string | null;
   onMeetingCleanup?: (meetingSessionId: string, cleanupId: string) => Promise<void>;
+  onTurnCancel?: (meetingSessionId: string, turnId: string, cancellationId: string) => Promise<void>;
   featureEnabled?: boolean;
   metrics?: { contentType: string; render(): Promise<string> };
   streaming?: VoiceWebSocketServerOptions;
@@ -48,6 +49,7 @@ async function handleRequest(
   onBatchAudio?: (upload: BatchAudioUpload) => Promise<void> | void,
   internalServiceKey?: string | null,
   onMeetingCleanup?: (meetingSessionId: string, cleanupId: string) => Promise<void>,
+  onTurnCancel?: (meetingSessionId: string, turnId: string, cancellationId: string) => Promise<void>,
   featureEnabled = true,
   metrics?: { contentType: string; render(): Promise<string> },
 ): Promise<void> {
@@ -87,6 +89,34 @@ async function handleRequest(
     try {
       await onMeetingCleanup(decodeURIComponent(cleanupMatch[1]), cleanupId);
       writeJson(response, 200, { status: 'cleaned' });
+    } catch {
+      writeJson(response, 503, { code: 'VOICE_INTERNAL_ERROR' });
+    }
+    return;
+  }
+
+  const cancelMatch = request.url?.match(/^\/internal\/voice\/meetings\/([^/]+)\/turns\/([^/]+)\/cancel$/);
+  if (request.method === 'POST' && cancelMatch) {
+    if (!internalAuthorized(request, internalServiceKey)) {
+      writeJson(response, 401, { code: 'VOICE_INTERNAL_UNAUTHORIZED' });
+      return;
+    }
+    if (!onTurnCancel) {
+      writeJson(response, 503, { code: 'VOICE_INTERNAL_ERROR' });
+      return;
+    }
+    const cancellationId = request.headers['x-voice-cancellation-id'];
+    if (typeof cancellationId !== 'string' || cancellationId.length === 0 || cancellationId.length > 256) {
+      writeJson(response, 400, { code: 'VOICE_INTERNAL_ERROR' });
+      return;
+    }
+    try {
+      await onTurnCancel(
+        decodeURIComponent(cancelMatch[1]),
+        decodeURIComponent(cancelMatch[2]),
+        cancellationId,
+      );
+      writeJson(response, 200, { status: 'cancelled' });
     } catch {
       writeJson(response, 503, { code: 'VOICE_INTERNAL_ERROR' });
     }
@@ -136,6 +166,7 @@ export function createVoiceHttpServer(options: VoiceHttpServerOptions): Server {
     options.onBatchAudio,
     options.internalServiceKey,
     options.onMeetingCleanup,
+    options.onTurnCancel,
     options.featureEnabled,
     options.metrics,
   ));

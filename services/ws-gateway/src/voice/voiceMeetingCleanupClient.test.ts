@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
+import type { AddressInfo } from 'node:net';
 import test from 'node:test';
 import { VoiceMeetingCleanupClient } from './voiceMeetingCleanupClient.js';
 
@@ -33,4 +34,31 @@ test('VoiceMeetingCleanupClient authenticates, preserves cleanup id and retries 
   assert.equal(requests[1].url, '/internal/voice/meetings/call%2Fone/cleanup');
   assert.equal(requests[1].key, 'test-internal-service-key-with-32-characters');
   assert.equal(requests[1].cleanupId, 'cleanup-1');
+});
+
+test('VoiceMeetingCleanupClient sends an authenticated bounded turn cancellation command', async (context) => {
+  const requests: Array<{ url: string; key?: string; cancellationId?: string }> = [];
+  const server = createServer((request, response) => {
+    requests.push({
+      url: request.url ?? '',
+      key: typeof request.headers['x-voice-internal-service-key'] === 'string'
+        ? request.headers['x-voice-internal-service-key'] : undefined,
+      cancellationId: typeof request.headers['x-voice-cancellation-id'] === 'string'
+        ? request.headers['x-voice-cancellation-id'] : undefined,
+    });
+    response.writeHead(200).end();
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  context.after(() => new Promise<void>((resolve) => server.close(() => resolve())));
+  const address = server.address() as AddressInfo;
+  const client = new VoiceMeetingCleanupClient(
+    `http://127.0.0.1:${address.port}/internal/voice`,
+    'test-internal-key',
+  );
+  await client.cancelTurn('call/one', 'turn/two', 'cancel-1');
+  assert.deepEqual(requests, [{
+    url: '/internal/voice/meetings/call%2Fone/turns/turn%2Ftwo/cancel',
+    key: 'test-internal-key',
+    cancellationId: 'cancel-1',
+  }]);
 });

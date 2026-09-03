@@ -569,6 +569,7 @@ const voiceTurnController = new VoiceTurnController({
   voicePublicStreamUrl: VOICE_PUBLIC_STREAM_URL,
   featurePolicy: voiceFeaturePolicy,
   metrics: voiceMetrics,
+  turnCancellation: voiceMeetingCleanupClient,
 });
 
 app.use(

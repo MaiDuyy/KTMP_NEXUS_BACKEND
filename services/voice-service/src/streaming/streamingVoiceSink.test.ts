@@ -125,3 +125,15 @@ test('meeting cleanup cancels only active sinks from the target meeting', async 
   await testHarness.factory.cancelMeeting('meeting-2');
   assert.equal(testHarness.providerCancellations, 2);
 });
+
+test('turn cancellation targets one streaming sink and is idempotent', async () => {
+  const testHarness = harness();
+  await testHarness.factory.open(token, new AbortController().signal);
+  await testHarness.factory.open({ ...token, turnId: 'turn-2' }, new AbortController().signal);
+  assert.equal(await testHarness.factory.cancelTurn('meeting-1', 'turn-1'), true);
+  assert.equal(testHarness.providerCancellations, 1);
+  assert.equal(await testHarness.factory.cancelTurn('meeting-1', 'turn-1'), false);
+  assert.equal(testHarness.providerCancellations, 1);
+  assert.equal(await testHarness.factory.cancelTurn('meeting-1', 'turn-2'), true);
+  assert.equal(testHarness.providerCancellations, 2);
+});
