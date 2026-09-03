@@ -1,6 +1,7 @@
 import type { BatchVoiceOrchestrator } from './batchVoiceOrchestrator.js';
 import type { MeetingAiClient } from './internalClients.js';
 import type { MeetingAudioPublisher } from './livekit/MeetingAudioPublisher.js';
+import type { StreamingMeetingAudioPublisher } from './livekit/StreamingMeetingAudioPublisher.js';
 import type { VoiceServiceLogger } from './logger.js';
 
 export class MeetingCleanupError extends Error {}
@@ -12,6 +13,7 @@ export class MeetingCleanupCoordinator {
     orchestrator: Pick<BatchVoiceOrchestrator, 'cancelMeeting'> | null;
     streaming?: { cancelMeeting(meetingSessionId: string): Promise<void> } | null;
     publisher: MeetingAudioPublisher;
+    streamingPublisher?: Pick<StreamingMeetingAudioPublisher, 'closeMeeting'> | null;
     meetingAi: MeetingAiClient;
     logger: VoiceServiceLogger;
     timeoutMs: number;
@@ -43,6 +45,10 @@ export class MeetingCleanupCoordinator {
       }
       await this.dependencies.publisher.closeMeeting(meetingSessionId)
         .catch(() => failures.push('livekit-close'));
+      if (this.dependencies.streamingPublisher) {
+        await this.dependencies.streamingPublisher.closeMeeting(meetingSessionId)
+          .catch(() => failures.push('streaming-livekit-close'));
+      }
       await this.dependencies.meetingAi.completeMeetingCleanup(meetingSessionId, controller.signal)
         .catch(() => failures.push('ai-cleanup'));
       if (failures.length > 0) throw new MeetingCleanupError(failures.join(','));

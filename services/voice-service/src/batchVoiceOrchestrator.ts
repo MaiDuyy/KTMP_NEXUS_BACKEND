@@ -4,6 +4,11 @@ import type { VerifiedVoiceTurnToken } from './turnTokenVerifier.js';
 import { BatchSttError, type BatchSttResult } from './batchStt.js';
 import { BatchTtsError, type BatchTtsResult } from './batchTts.js';
 import { InternalServiceError, type MeetingAiRequest, type MeetingAiResponse } from './internalClients.js';
+import type { MeetingAiStreamEvent } from '@ott/shared';
+import {
+  StreamingOutputError,
+  type StreamingOutputSummary,
+} from './streaming/streamingOutputOrchestrator.js';
 import { VoiceError } from './livekit/MeetingAudioPublisher.js';
 import type { VoiceServiceLogger } from './logger.js';
 import type {
@@ -11,6 +16,7 @@ import type {
   VoicePipelineOutcome,
   VoicePipelineStage,
   VoiceStageOutcome,
+  VoiceStreamingMetrics,
 } from './voiceMetrics.js';
 
 export interface BatchSttProvider {
@@ -41,6 +47,19 @@ export interface VoiceControlProvider {
 
 export interface MeetingAiProvider {
   answer(request: MeetingAiRequest, signal?: AbortSignal): Promise<MeetingAiResponse>;
+  stream?(request: MeetingAiRequest, signal?: AbortSignal): AsyncIterable<MeetingAiStreamEvent>;
+}
+
+export interface StreamingOutputProvider {
+  run(input: {
+    meetingSessionId: string;
+    roomName: string;
+    turnId: string;
+    events: AsyncIterable<MeetingAiStreamEvent>;
+    signal?: AbortSignal;
+    onFirstFrame?: () => void;
+    onSideChannelEvent?: (event: Extract<MeetingAiStreamEvent, { type: 'display.delta' | 'source' }>) => void | Promise<void>;
+  }): Promise<StreamingOutputSummary>;
 }
 
 export interface MeetingAudioProvider {
@@ -50,6 +69,7 @@ export interface MeetingAudioProvider {
     turnId: string;
     audio: BatchTtsResult;
     signal?: AbortSignal;
+    onFirstFrame?: () => void;
   }): Promise<{ completed: boolean }>;
 }
 
@@ -61,7 +81,8 @@ export interface BatchVoiceOrchestratorDependencies {
   control: VoiceControlProvider;
   logger: VoiceServiceLogger;
   timeoutMs: number;
-  metrics?: VoicePipelineMetrics;
+  metrics?: VoicePipelineMetrics & Partial<VoiceStreamingMetrics>;
+  streamingOutput?: StreamingOutputProvider | null;
 }
 
 interface FinalTranscriptVoiceInput {
@@ -194,7 +215,7 @@ export class BatchVoiceOrchestrator {
 
       moveToStage('ai');
       await this.dependencies.control.emit({ ...base, kind: 'state', state: 'THINKING' }, controller.signal);
-      const answer = await this.dependencies.ai.answer({
+      const aiRequest = {
         meetingSessionId,
         chatId: context.chatId,
         workspaceId: context.workspaceId,
@@ -203,7 +224,16 @@ export class BatchVoiceOrchestrator {
         speakerName: context.ownerName,
         participantIds: context.participantIds,
         message: transcript.transcript,
-      }, controller.signal);
+      };
+      if (this.dependencies.streamingOutput && this.dependencies.ai.stream) {
+        await this.runStreamingOutput(base, context, aiRequest, controller.signal);
+        recordStage('completed');
+        await this.dependencies.control.emit({ ...base, kind: 'terminal', state: 'COMPLETED' });
+        recordPipeline('completed', 'none');
+        this.dependencies.logger.info({ meetingSessionId, turnId, durationMs: Date.now() - startedAt }, 'Streaming voice turn completed');
+        return;
+      }
+      const answer = await this.dependencies.ai.answer(aiRequest, controller.signal);
       if (answer.meetingSessionId !== meetingSessionId || answer.turnId !== turnId) {
         throw new InternalServiceError('VOICE_AI_UNAVAILABLE');
       }
@@ -272,6 +302,100 @@ export class BatchVoiceOrchestrator {
       }, 'Voice turn failed');
     } finally {
       clearTimeout(timeout);
+    }
+  }
+
+  private async runStreamingOutput(
+    base: { meetingSessionId: string; turnId: string; ownerUserId: string },
+    context: Awaited<ReturnType<VoiceControlProvider['getContext']>>,
+    request: MeetingAiRequest,
+    signal: AbortSignal,
+  ): Promise<void> {
+    const startedAt = performance.now();
+    let displayText = '';
+    let revision = 0;
+    let responding: Promise<void> | null = null;
+    let usedBatchFallback = false;
+    const sources: Array<{ documentId: string | number; title: string; chunkId: string }> = [];
+    try {
+      const summary = await this.dependencies.streamingOutput!.run({
+        meetingSessionId: base.meetingSessionId,
+        roomName: context.roomName,
+        turnId: base.turnId,
+        events: this.dependencies.ai.stream!(request, signal),
+        signal,
+        onFirstFrame: () => {
+          responding ??= this.dependencies.control.emit({ ...base, kind: 'state', state: 'RESPONDING' }, signal);
+        },
+        onSideChannelEvent: async (event) => {
+          if (event.type === 'source') {
+            sources.push({ documentId: event.documentId, title: event.title, chunkId: event.chunkId });
+            return;
+          }
+          displayText += event.text;
+          revision += 1;
+          const text = displayText.trim();
+          if (!text) return;
+          await this.dependencies.control.emit({
+            ...base,
+            kind: 'message_partial',
+            displayText: text,
+            revision,
+            sources: sources.slice(0, 10),
+          }, signal);
+        },
+      });
+      const measured = summary;
+      const metrics = this.dependencies.metrics;
+      if (measured.startedAtMonotonicMs !== undefined && measured.firstAudioAtMonotonicMs != null) metrics?.recordStreamingOutputLatency?.('ai_start_to_first_audio', (measured.firstAudioAtMonotonicMs - measured.startedAtMonotonicMs) / 1000);
+      if (measured.startedAtMonotonicMs !== undefined && measured.firstFrameAtMonotonicMs != null) metrics?.recordStreamingOutputLatency?.('ai_start_to_first_frame', (measured.firstFrameAtMonotonicMs - measured.startedAtMonotonicMs) / 1000);
+      if (measured.aiDoneAtMonotonicMs !== undefined && measured.playoutCompletedAtMonotonicMs !== undefined) metrics?.recordStreamingOutputLatency?.('ai_done_to_playout', (measured.playoutCompletedAtMonotonicMs - measured.aiDoneAtMonotonicMs) / 1000);
+      if (measured.startedAtMonotonicMs !== undefined && measured.playoutCompletedAtMonotonicMs !== undefined) metrics?.recordStreamingOutputLatency?.('total', (measured.playoutCompletedAtMonotonicMs - measured.startedAtMonotonicMs) / 1000);
+      if (measured.speechDeltaCount !== undefined) metrics?.recordStreamingOutputVolume?.('speech_delta_count', measured.speechDeltaCount);
+      if (measured.audioChunkCount !== undefined) metrics?.recordStreamingOutputVolume?.('audio_chunk_count', measured.audioChunkCount);
+      if (measured.audio?.frames.frameCount !== undefined) metrics?.recordStreamingOutputVolume?.('frame_count', measured.audio.frames.frameCount);
+      if (measured.audio?.frames.paddedSamples !== undefined) metrics?.recordStreamingOutputVolume?.('padded_sample_count', measured.audio.frames.paddedSamples);
+    } catch (error) {
+      if (!(error instanceof StreamingOutputError) || !error.aiDone || error.firstFramePublished || !error.fallbackSpeechText) {
+        this.dependencies.metrics?.recordStreamingOutput?.(
+          signal.aborted
+            ? 'cancelled'
+            : error instanceof StreamingOutputError && error.firstFramePublished
+              ? 'failed_after_first_audio'
+              : 'failed_before_first_audio',
+          (performance.now() - startedAt) / 1000,
+        );
+        throw error;
+      }
+      const audio = await this.dependencies.tts.synthesize(error.fallbackSpeechText, signal);
+      let fallbackResponding: Promise<void> | null = null;
+      const published = await this.dependencies.publisher.publish({
+        meetingSessionId: base.meetingSessionId,
+        roomName: context.roomName,
+        turnId: base.turnId,
+        audio,
+        signal,
+        onFirstFrame: () => {
+          fallbackResponding ??= this.dependencies.control.emit({ ...base, kind: 'state', state: 'RESPONDING' }, signal);
+        },
+      });
+      await fallbackResponding;
+      responding ??= fallbackResponding;
+      if (!published.completed) throw new VoiceError('VOICE_LIVEKIT_PUBLISH_FAILED');
+      usedBatchFallback = true;
+      this.dependencies.metrics?.recordStreamingOutput?.('fallback_batch_before_first_audio', (performance.now() - startedAt) / 1000);
+    }
+    await responding;
+    const finalDisplayText = displayText.trim();
+    if (!finalDisplayText) throw new InternalServiceError('VOICE_AI_UNAVAILABLE');
+    await this.dependencies.control.emit({
+      ...base,
+      kind: 'message',
+      displayText: finalDisplayText,
+      sources: sources.slice(0, 10),
+    }, signal);
+    if (!usedBatchFallback) {
+      this.dependencies.metrics?.recordStreamingOutput?.('completed', (performance.now() - startedAt) / 1000);
     }
   }
 }

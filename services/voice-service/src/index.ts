@@ -19,6 +19,9 @@ import { VoiceServiceMetrics } from './voiceMetrics.js';
 import { GoogleStreamingSttAdapter } from './streaming/googleStreamingStt.js';
 import { StreamingVoiceSinkFactory } from './streaming/streamingVoiceSink.js';
 import { CachedSpeechAdaptationProvider, ConfiguredSpeechPhraseSource } from './streaming/speechAdaptation.js';
+import { GoogleStreamingTtsAdapter } from './streaming/googleStreamingTts.js';
+import { StreamingOutputOrchestrator } from './streaming/streamingOutputOrchestrator.js';
+import { StreamingMeetingAudioPublisher } from './livekit/StreamingMeetingAudioPublisher.js';
 
 export interface VoiceServiceInstance {
   config: VoiceServiceConfig;
@@ -38,7 +41,9 @@ export function createVoiceService(
 
   const tokenService = new LivekitTokenService(config);
   const adapter = new DefaultLivekitAdapter();
+  const streamingAdapter = new DefaultLivekitAdapter();
   const meetingAudioPublisher = new MeetingAudioPublisher(config, tokenService, adapter);
+  const streamingAudioPublisher = new StreamingMeetingAudioPublisher(config, tokenService, streamingAdapter);
 
   const pipelineConfigured = config.meetingVoiceEnabled && Boolean(
     config.googleCloudProject &&
@@ -62,6 +67,28 @@ export function createVoiceService(
   const voiceControlClient = config.voiceControlInternalUrl && config.voiceInternalServiceKey
     ? new VoiceControlClient(config.voiceControlInternalUrl, config.voiceInternalServiceKey)
     : null;
+  const streamingOutput = pipelineConfigured && config.voiceStreamingOutputEnabled && config.voiceStreamingTtsEnabled && meetingAiClient
+    ? new StreamingOutputOrchestrator(
+      new GoogleStreamingTtsAdapter({
+        projectId: config.googleCloudProject!,
+        location: config.googleStreamingTtsLocation,
+        voiceName: config.googleStreamingTtsVoice,
+        sampleRateHertz: config.googleStreamingTtsSampleRateHertz,
+        firstAudioTimeoutMs: config.googleStreamingTtsFirstAudioTimeoutMs,
+        idleAudioTimeoutMs: config.googleStreamingTtsIdleAudioTimeoutMs,
+        totalTimeoutMs: config.googleStreamingTtsTotalTimeoutMs,
+        maximumQueuedBytes: config.googleStreamingTtsMaxQueuedBytes,
+      }),
+      streamingAudioPublisher,
+      {
+        minimumChars: config.voiceStreamingTtsSentenceMinimumChars,
+        targetChars: config.voiceStreamingTtsSentenceTargetChars,
+        maximumChars: config.voiceStreamingTtsSentenceMaximumChars,
+        maximumBytes: config.googleStreamingTtsMaxQueuedBytes,
+        flushTimeoutMs: config.voiceStreamingTtsSentenceFlushTimeoutMs,
+      },
+    )
+    : null;
   const orchestrator = pipelineConfigured
     ? new BatchVoiceOrchestrator({
       stt: new GoogleBatchSttAdapter({
@@ -84,6 +111,7 @@ export function createVoiceService(
       logger,
       timeoutMs: config.pipelineTimeoutMs,
       metrics: voiceMetrics,
+      streamingOutput,
     })
     : null;
   const streamingSinkFactory = config.voiceStreamingEnabled && orchestrator && voiceControlClient && config.googleCloudProject
@@ -108,6 +136,7 @@ export function createVoiceService(
       orchestrator,
       streaming: streamingSinkFactory,
       publisher: meetingAudioPublisher,
+      streamingPublisher: streamingAudioPublisher,
       meetingAi: meetingAiClient,
       logger,
       timeoutMs: config.meetingCleanupTimeoutMs,
@@ -154,7 +183,9 @@ export function createVoiceService(
     onClose: () => {
       orchestrator?.cancelAll();
       return closeVoiceServiceResources({
-        closeLivekit: () => meetingAudioPublisher.closeAll(),
+        closeLivekit: async () => {
+          await Promise.all([meetingAudioPublisher.closeAll(), streamingAudioPublisher.closeAll()]);
+        },
         closeRedis: () => redis?.disconnect(),
       });
     },

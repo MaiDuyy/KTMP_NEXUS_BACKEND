@@ -11,6 +11,7 @@ export interface StreamingOutputPublisher {
     signal?: AbortSignal;
     onFirstFrame?: () => void;
   }): Promise<StreamingMeetingAudioSession>;
+  closeMeeting?(meetingSessionId: string): Promise<void>;
 }
 
 export interface StreamingOutputTtsProvider {
@@ -24,13 +25,27 @@ export interface StreamingOutputInput {
   events: AsyncIterable<MeetingAiStreamEvent>;
   signal?: AbortSignal;
   onFirstFrame?: () => void;
-  onSideChannelEvent?: (event: Extract<MeetingAiStreamEvent, { type: 'display.delta' | 'source' }>) => void;
+  onSideChannelEvent?: (event: Extract<MeetingAiStreamEvent, { type: 'display.delta' | 'source' }>) => void | Promise<void>;
 }
 
 export interface StreamingOutputSummary {
   speechDeltaCount: number;
   audioChunkCount: number;
   audio: StreamingPublishSummary;
+  startedAtMonotonicMs: number;
+  firstAudioAtMonotonicMs: number | null;
+  firstFrameAtMonotonicMs: number | null;
+  aiDoneAtMonotonicMs: number;
+  ttsDoneAtMonotonicMs: number;
+  playoutCompletedAtMonotonicMs: number;
+}
+
+export class StreamingOutputError extends Error {
+  public constructor(
+    public readonly aiDone: boolean,
+    public readonly firstFramePublished: boolean,
+    public readonly fallbackSpeechText: string,
+  ) { super('VOICE_STREAMING_OUTPUT_FAILED'); }
 }
 
 /**
@@ -46,26 +61,47 @@ export class StreamingOutputOrchestrator {
 
   public async run(input: StreamingOutputInput): Promise<StreamingOutputSummary> {
     if (input.signal?.aborted) throw new Error('VOICE_CANCELLED');
+    const startedAtMonotonicMs = performance.now();
+    let firstAudioAtMonotonicMs: number | null = null;
+    let firstFrameAtMonotonicMs: number | null = null;
+    let aiDoneAtMonotonicMs = 0;
+    let ttsDoneAtMonotonicMs = 0;
+    let firstFramePublished = false;
+    let fallbackSpeechText = '';
     const publishSession = await this.publisher.start({
       meetingSessionId: input.meetingSessionId,
       roomName: input.roomName,
       turnId: input.turnId,
       signal: input.signal,
-      onFirstFrame: input.onFirstFrame,
+      onFirstFrame: () => { firstFramePublished = true; firstFrameAtMonotonicMs ??= performance.now(); input.onFirstFrame?.(); },
     });
     const ttsSession = this.tts.open(input.signal);
     let audioChunkCount = 0;
+    let streamingFailure: unknown = null;
     const consumeAudio = (async () => {
-      for await (const chunk of ttsSession.audio) {
-        audioChunkCount += 1;
-        await publishSession.write(chunk);
+      try {
+        for await (const chunk of ttsSession.audio) {
+          audioChunkCount += 1;
+          firstAudioAtMonotonicMs ??= performance.now();
+          await publishSession.write(chunk);
+        }
+      } catch (error) {
+        streamingFailure ??= error;
       }
     })();
     const sentenceBuffer = new SentenceBoundaryBuffer({
       turnId: input.turnId,
       config: this.sentenceConfig,
       signal: input.signal,
-      onSegment: (segment: SpeechSegment) => ttsSession.writeSegment(segment.segmentSequence, segment.text),
+      onSegment: async (segment: SpeechSegment) => {
+        if (streamingFailure) return;
+        try {
+          await ttsSession.writeSegment(segment.segmentSequence, segment.text);
+        } catch (error) {
+          streamingFailure ??= error;
+          await ttsSession.cancel().catch(() => undefined);
+        }
+      },
     });
     let done = false;
     let speechDeltaCount = 0;
@@ -74,24 +110,48 @@ export class StreamingOutputOrchestrator {
         if (event.turnId !== input.turnId || done) throw new Error('VOICE_AI_UNAVAILABLE');
         if (event.type === 'speech.delta') {
           speechDeltaCount += 1;
+          fallbackSpeechText += event.text;
           await sentenceBuffer.push({ turnId: event.turnId, sequence: event.sequence, text: event.text });
           continue;
         }
         if (event.type === 'display.delta' || event.type === 'source') {
-          input.onSideChannelEvent?.(event);
+          await input.onSideChannelEvent?.(event);
           continue;
         }
-        if (event.type === 'done') done = true;
+        if (event.type === 'done') { done = true; aiDoneAtMonotonicMs = performance.now(); }
       }
       if (!done) throw new Error('VOICE_AI_UNAVAILABLE');
       await sentenceBuffer.finish();
-      await ttsSession.finish();
+      if (!streamingFailure) {
+        try { await ttsSession.finish(); } catch (error) { streamingFailure ??= error; }
+      }
       await consumeAudio;
+      if (streamingFailure) {
+        await Promise.allSettled([
+          ttsSession.cancel(),
+          publishSession.cancel(),
+          this.publisher.closeMeeting?.(input.meetingSessionId) ?? Promise.resolve(),
+        ]);
+        throw new StreamingOutputError(done, firstFramePublished, fallbackSpeechText.trim());
+      }
+      ttsDoneAtMonotonicMs = performance.now();
       const audio = await publishSession.finish();
-      return { speechDeltaCount, audioChunkCount, audio };
+      if (!firstFramePublished) {
+        throw new StreamingOutputError(done, false, fallbackSpeechText.trim());
+      }
+      const playoutCompletedAtMonotonicMs = performance.now();
+      return { speechDeltaCount, audioChunkCount, audio, startedAtMonotonicMs, firstAudioAtMonotonicMs, firstFrameAtMonotonicMs, aiDoneAtMonotonicMs, ttsDoneAtMonotonicMs, playoutCompletedAtMonotonicMs };
     } catch (error) {
-      await Promise.allSettled([sentenceBuffer.cancel(), ttsSession.cancel(), publishSession.cancel(), consumeAudio]);
-      throw error;
+      await Promise.allSettled([
+        sentenceBuffer.cancel(),
+        ttsSession.cancel(),
+        publishSession.cancel(),
+        consumeAudio,
+        this.publisher.closeMeeting?.(input.meetingSessionId) ?? Promise.resolve(),
+      ]);
+      if (error instanceof StreamingOutputError) throw error;
+      if (input.signal?.aborted || (error instanceof Error && error.message === 'VOICE_CANCELLED')) throw error;
+      throw new StreamingOutputError(done, firstFramePublished, fallbackSpeechText.trim());
     }
   }
 }

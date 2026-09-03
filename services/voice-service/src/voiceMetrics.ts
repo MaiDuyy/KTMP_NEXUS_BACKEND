@@ -16,6 +16,9 @@ export type VoiceStreamOutcome =
   | 'backpressure'
   | 'sink_error';
 export type StreamingSttOutcome = 'completed' | 'no_speech' | 'timeout' | 'unavailable' | 'cancelled';
+export type StreamingOutputOutcome = 'completed' | 'fallback_batch_before_first_audio' | 'failed_before_first_audio' | 'failed_after_first_audio' | 'cancelled';
+export type StreamingOutputLatency = 'ai_start_to_first_audio' | 'ai_start_to_first_frame' | 'ai_done_to_playout' | 'total';
+export type StreamingOutputVolume = 'speech_delta_count' | 'audio_chunk_count' | 'frame_count' | 'padded_sample_count';
 
 export interface VoicePipelineMetrics {
   recordStage(stage: VoicePipelineStage, outcome: VoiceStageOutcome, durationSeconds: number): void;
@@ -25,6 +28,9 @@ export interface VoicePipelineMetrics {
 export interface VoiceStreamingMetrics {
   recordStream(outcome: VoiceStreamOutcome): void;
   recordStreamingStt(outcome: StreamingSttOutcome, durationSeconds: number): void;
+  recordStreamingOutput(outcome: StreamingOutputOutcome, durationSeconds: number): void;
+  recordStreamingOutputLatency(stage: StreamingOutputLatency, durationSeconds: number): void;
+  recordStreamingOutputVolume(kind: StreamingOutputVolume, value: number): void;
 }
 
 export class VoiceServiceMetrics implements VoicePipelineMetrics {
@@ -62,6 +68,27 @@ export class VoiceServiceMetrics implements VoicePipelineMetrics {
     buckets: [0.1, 0.25, 0.5, 1, 2, 3, 5, 8, 13, 21, 34, 55, 60, 70],
     registers: [this.registry],
   });
+  private readonly streamingOutput = new Histogram({
+    name: 'meeting_voice_streaming_output_duration_seconds',
+    help: 'Streaming output duration by bounded terminal outcome.',
+    labelNames: ['outcome'] as const,
+    buckets: [0.1, 0.25, 0.5, 1, 2, 3, 5, 8, 13, 21, 34, 55, 89, 150],
+    registers: [this.registry],
+  });
+  private readonly streamingOutputLatency = new Histogram({
+    name: 'meeting_voice_streaming_output_latency_seconds',
+    help: 'Streaming output latency between monotonic bounded stages.',
+    labelNames: ['stage'] as const,
+    buckets: [0.025, 0.05, 0.1, 0.25, 0.5, 1, 2, 3, 5, 8, 13, 21, 34, 55, 89],
+    registers: [this.registry],
+  });
+  private readonly streamingOutputVolume = new Histogram({
+    name: 'meeting_voice_streaming_output_volume',
+    help: 'Bounded streaming output counts by kind.',
+    labelNames: ['kind'] as const,
+    buckets: [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 4096],
+    registers: [this.registry],
+  });
 
   public recordStage(stage: VoicePipelineStage, outcome: VoiceStageOutcome, durationSeconds: number): void {
     this.stageDuration.observe({ stage, outcome }, Math.max(0, durationSeconds));
@@ -82,6 +109,18 @@ export class VoiceServiceMetrics implements VoicePipelineMetrics {
 
   public recordStreamingStt(outcome: StreamingSttOutcome, durationSeconds: number): void {
     this.streamingSttDuration.observe({ outcome }, Math.max(0, durationSeconds));
+  }
+
+  public recordStreamingOutput(outcome: StreamingOutputOutcome, durationSeconds: number): void {
+    this.streamingOutput.observe({ outcome }, Math.max(0, durationSeconds));
+  }
+
+  public recordStreamingOutputLatency(stage: StreamingOutputLatency, durationSeconds: number): void {
+    this.streamingOutputLatency.observe({ stage }, Math.max(0, durationSeconds));
+  }
+
+  public recordStreamingOutputVolume(kind: StreamingOutputVolume, value: number): void {
+    this.streamingOutputVolume.observe({ kind }, Math.max(0, value));
   }
 
   public render(): Promise<string> {

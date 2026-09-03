@@ -24,6 +24,7 @@ export interface PublishMeetingAudioInput {
   turnId: string;
   audio: BatchTtsResult;
   signal?: AbortSignal;
+  onFirstFrame?: () => void;
 }
 
 export interface PublishMeetingAudioResult {
@@ -320,6 +321,7 @@ export class MeetingAudioPublisher {
           samplesPerChannel: frameLength,
         });
         await raceWithAbort(frameOperation, this.config.livekitConnectTimeoutMs, "Audio frame timeout", signals);
+        if (offset === 0) input.onFirstFrame?.();
         offset += frameLength;
       }
 

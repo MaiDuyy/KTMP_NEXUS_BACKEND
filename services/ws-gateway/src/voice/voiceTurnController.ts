@@ -397,7 +397,7 @@ export class VoiceTurnController {
     if (
       (event.kind === 'state' && !PIPELINE_STATES.has(event.state)) ||
       (event.kind === 'terminal' && !PIPELINE_TERMINAL_STATES.has(event.state)) ||
-      !['state', 'transcript_partial', 'transcript', 'message', 'terminal'].includes(event.kind)
+      !['state', 'transcript_partial', 'transcript', 'message_partial', 'message', 'terminal'].includes(event.kind)
     ) {
       return false;
     }
@@ -475,6 +475,23 @@ export class VoiceTurnController {
         isFinal: true,
         revision: Number.MAX_SAFE_INTEGER,
         ...(event.confidence === null ? {} : { stability: event.confidence }),
+      });
+      return true;
+    }
+
+    if (event.kind === 'message_partial') {
+      const displayText = event.displayText.trim();
+      if (!displayText || displayText.length > 20_000 || !Number.isSafeInteger(event.revision) || event.revision < 0) {
+        return false;
+      }
+      this.dependencies.broadcaster.to(callRoom).emit('voice:message', {
+        meetingSessionId: event.meetingSessionId,
+        turnId: event.turnId,
+        role: 'assistant',
+        displayText,
+        isFinal: false,
+        revision: event.revision,
+        sources: Array.isArray(event.sources) ? event.sources.slice(0, 10) : [],
       });
       return true;
     }

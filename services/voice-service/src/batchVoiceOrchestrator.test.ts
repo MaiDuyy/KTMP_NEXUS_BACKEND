@@ -4,6 +4,7 @@ import type { VoicePipelineEvent } from '@ott/shared';
 import { BatchSttError } from './batchStt.js';
 import { BatchVoiceOrchestrator, type BatchVoiceOrchestratorDependencies } from './batchVoiceOrchestrator.js';
 import { InternalServiceError } from './internalClients.js';
+import { StreamingOutputError } from './streaming/streamingOutputOrchestrator.js';
 
 function upload() {
   return {
@@ -188,4 +189,48 @@ test('records bounded stage and pipeline metrics for a completed turn', async ()
     { stage: 'livekit', outcome: 'completed' },
   ]);
   assert.deepEqual(pipelines, [{ outcome: 'completed', code: 'none' }]);
+});
+
+test('falls back to batch exactly once when streaming output fails before first frame after AI done', async () => {
+  let batchTtsCalls = 0;
+  let batchPublishCalls = 0;
+  const outputOutcomes: string[] = [];
+  const { orchestrator, events, terminal } = fixture({
+    ai: {
+      answer: async () => { throw new Error('batch AI must not run'); },
+      stream: async function* () { yield { type: 'done', version: 1, turnId: 'turn-1', replayed: false }; },
+    },
+    streamingOutput: {
+      run: async (input) => {
+        await input.onSideChannelEvent?.({ type: 'display.delta', version: 1, turnId: 'turn-1', sequence: 0, text: 'Câu trả lời.' });
+        throw new StreamingOutputError(true, false, 'Câu trả lời.');
+      },
+    },
+    tts: { synthesize: async () => { batchTtsCalls += 1; return { audio: Buffer.from('wav'), contentType: 'audio/wav', encoding: 'LINEAR16', sampleRateHertz: 24_000, channelCount: 1 }; } },
+    publisher: { publish: async (input) => { batchPublishCalls += 1; input.onFirstFrame?.(); return { completed: true }; } },
+    metrics: {
+      recordStage: () => undefined,
+      recordPipeline: () => undefined,
+      recordStreamingOutput: (outcome: string) => { outputOutcomes.push(outcome); },
+    } as any,
+  });
+  orchestrator.enqueue(upload());
+  await terminal;
+  assert.equal(batchTtsCalls, 1);
+  assert.equal(batchPublishCalls, 1);
+  assert.deepEqual(outputOutcomes, ['fallback_batch_before_first_audio']);
+  assert.deepEqual(events.filter((event) => event.kind === 'message').length, 1);
+});
+
+test('never replays with batch fallback after a streaming frame was published', async () => {
+  let batchTtsCalls = 0;
+  const { orchestrator, events, terminal } = fixture({
+    ai: { answer: async () => { throw new Error('not used'); }, stream: async function* () { yield { type: 'done', version: 1, turnId: 'turn-1', replayed: false }; } },
+    streamingOutput: { run: async () => { throw new StreamingOutputError(true, true, 'Đã phát một phần.'); } },
+    tts: { synthesize: async () => { batchTtsCalls += 1; throw new Error('must not run'); } },
+  });
+  orchestrator.enqueue(upload());
+  await terminal;
+  assert.equal(batchTtsCalls, 0);
+  assert.equal((events.at(-1) as any).state, 'FAILED');
 });

@@ -250,6 +250,7 @@ export interface VoiceMessageEvent {
   role: 'assistant';
   displayText: string;
   isFinal: boolean;
+  revision?: number;
   sources: VoiceMessageSource[];
 }
 
@@ -347,6 +348,14 @@ export interface VoicePipelineMessageEvent extends VoicePipelineEventBase {
   sources: VoiceMessageSource[];
 }
 
+/** A transient assistant display update. It is never persisted as history. */
+export interface VoicePipelinePartialMessageEvent extends VoicePipelineEventBase {
+  kind: 'message_partial';
+  displayText: string;
+  revision: number;
+  sources: VoiceMessageSource[];
+}
+
 export interface VoicePipelineTerminalEvent extends VoicePipelineEventBase {
   kind: 'terminal';
   state: 'COMPLETED' | 'FAILED' | 'CANCELLED';
@@ -359,6 +368,7 @@ export type VoicePipelineEvent =
   | VoicePipelineStateEvent
   | VoicePipelinePartialTranscriptEvent
   | VoicePipelineTranscriptEvent
+  | VoicePipelinePartialMessageEvent
   | VoicePipelineMessageEvent
   | VoicePipelineTerminalEvent;
 

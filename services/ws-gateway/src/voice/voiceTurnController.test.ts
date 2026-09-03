@@ -376,6 +376,22 @@ test('VoiceTurnController fans out pipeline events and synchronizes transient hi
   }), true);
   assert.equal(await controller.handlePipelineEvent({
     ...base,
+    kind: 'message_partial',
+    displayText: 'Câu trả lời đang stream',
+    revision: 2,
+    sources: [{ documentId: 'doc-1', title: 'Tài liệu', chunkId: 'chunk-1' }],
+  }), true);
+  const partialEvent = broadcaster.events.at(-1);
+  assert.equal(partialEvent?.event, 'voice:message');
+  assert.equal((partialEvent?.payload as { isFinal: boolean }).isFinal, false);
+  assert.equal((await controller.sync({
+    socket: observerSocket,
+    userId: 'user-2',
+    userName: 'User Two',
+    payload: { meetingSessionId: 'call-1' },
+  }))?.messages.length, 1);
+  assert.equal(await controller.handlePipelineEvent({
+    ...base,
     kind: 'message',
     displayText: 'Câu trả lời của AI',
     sources: [],
