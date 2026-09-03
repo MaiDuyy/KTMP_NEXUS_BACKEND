@@ -27,6 +27,8 @@ export interface VoiceServiceConfig {
   googleTtsAudioEncoding: string;
   googleTtsTimeoutMs: number;
   voiceStreamingTtsEnabled: boolean;
+  voiceStreamingOutputEnabled: boolean;
+  voiceStreamingOutputMaxTotalPcmBytes: number;
   googleStreamingTtsLocation: string;
   googleStreamingTtsVoice: string;
   googleStreamingTtsSampleRateHertz: number;
@@ -259,6 +261,13 @@ export function loadVoiceServiceConfig(env: NodeJS.ProcessEnv = process.env): Vo
     googleTtsAudioEncoding: readNonEmptyString(env.GOOGLE_TTS_AUDIO_ENCODING, "LINEAR16", "GOOGLE_TTS_AUDIO_ENCODING"),
     googleTtsTimeoutMs: readPositiveInteger(env.GOOGLE_TTS_TIMEOUT_MS, 15_000, "GOOGLE_TTS_TIMEOUT_MS"),
     voiceStreamingTtsEnabled: readBoolean(env.VOICE_STREAMING_TTS_ENABLED, false, 'VOICE_STREAMING_TTS_ENABLED'),
+    voiceStreamingOutputEnabled: readBoolean(env.VOICE_STREAMING_OUTPUT_ENABLED, false, 'VOICE_STREAMING_OUTPUT_ENABLED'),
+    voiceStreamingOutputMaxTotalPcmBytes: readBoundedPositiveInteger(
+      env.VOICE_STREAMING_OUTPUT_MAX_TOTAL_PCM_BYTES,
+      8 * 1024 * 1024,
+      'VOICE_STREAMING_OUTPUT_MAX_TOTAL_PCM_BYTES',
+      64 * 1024 * 1024,
+    ),
     googleStreamingTtsLocation: readNonEmptyString(
       env.GOOGLE_STREAMING_TTS_LOCATION,
       'asia-southeast1',

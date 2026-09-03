@@ -24,6 +24,8 @@ test("uses safe defaults without provider credentials", () => {
   assert.equal(config.meetingAiStreamFirstEventTimeoutMs, 10_000);
   assert.equal(config.meetingAiStreamIdleEventTimeoutMs, 20_000);
   assert.equal(config.voiceStreamingTtsEnabled, false);
+  assert.equal(config.voiceStreamingOutputEnabled, false);
+  assert.equal(config.voiceStreamingOutputMaxTotalPcmBytes, 8 * 1024 * 1024);
   assert.equal(config.googleStreamingTtsLocation, 'asia-southeast1');
   assert.equal(config.googleStreamingTtsSampleRateHertz, 24_000);
   assert.equal(config.voiceStreamingTtsSentenceTargetChars, 160);
