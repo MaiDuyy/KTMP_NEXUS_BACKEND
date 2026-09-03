@@ -9,11 +9,15 @@ export type VoiceTurnStartOutcome =
   | 'locked'
   | 'internal_error';
 export type VoiceCleanupOutcome = 'completed' | 'failed' | 'retry_completed' | 'retry_failed';
+export type VoiceCancellationOutcome = 'completed' | 'failed' | 'stale' | 'recovered';
+export type VoiceCancellationReason = 'user_cancelled' | 'call_ended' | 'owner_disconnected' | 'membership_changed' | 'timeout' | 'provider_error' | 'system';
 
 export interface VoiceTurnMetrics {
   recordStart(outcome: VoiceTurnStartOutcome, durationSeconds: number): void;
   recordTerminal(state: 'COMPLETED' | 'FAILED' | 'CANCELLED'): void;
   recordTransportSelection?(selection: 'streaming' | 'batch_capability' | 'batch_server'): void;
+  recordCancellation?(reason: VoiceCancellationReason, outcome: VoiceCancellationOutcome): void;
+  recordRecovery?(outcome: 'stale_session_cleared' | 'stale_session_changed'): void;
 }
 
 export class VoiceControlMetrics implements VoiceTurnMetrics {
@@ -54,6 +58,18 @@ export class VoiceControlMetrics implements VoiceTurnMetrics {
     labelNames: ['selection'] as const,
     registers: [this.registry],
   });
+  private readonly cancellations = new Counter({
+    name: 'meeting_voice_turn_cancellation_total',
+    help: 'Number of voice turn cancellations by bounded reason and outcome.',
+    labelNames: ['reason', 'outcome'] as const,
+    registers: [this.registry],
+  });
+  private readonly recoveries = new Counter({
+    name: 'meeting_voice_recovery_total',
+    help: 'Number of bounded voice lifecycle reconciliation outcomes.',
+    labelNames: ['outcome'] as const,
+    registers: [this.registry],
+  });
 
   public recordStart(outcome: VoiceTurnStartOutcome, durationSeconds: number): void {
     this.starts.inc({ outcome });
@@ -66,6 +82,14 @@ export class VoiceControlMetrics implements VoiceTurnMetrics {
 
   public recordTransportSelection(selection: 'streaming' | 'batch_capability' | 'batch_server'): void {
     this.transportSelections.inc({ selection });
+  }
+
+  public recordCancellation(reason: VoiceCancellationReason, outcome: VoiceCancellationOutcome): void {
+    this.cancellations.inc({ reason, outcome });
+  }
+
+  public recordRecovery(outcome: 'stale_session_cleared' | 'stale_session_changed'): void {
+    this.recoveries.inc({ outcome });
   }
 
   public recordCleanup(outcome: VoiceCleanupOutcome): void {

@@ -9,6 +9,8 @@ test('voice control metrics expose only bounded outcome and state labels', async
   metrics.recordTerminal('COMPLETED');
   metrics.recordTransportSelection('batch_capability');
   metrics.recordCleanup('retry_failed');
+  metrics.recordCancellation('owner_disconnected', 'completed');
+  metrics.recordRecovery('stale_session_cleared');
   metrics.setPendingCleanup(2);
   const output = await metrics.render();
 
@@ -17,6 +19,8 @@ test('voice control metrics expose only bounded outcome and state labels', async
   assert.match(output, /meeting_voice_turn_terminal_total\{state="completed"\} 1/);
   assert.match(output, /meeting_voice_transport_selection_total\{selection="batch_capability"\} 1/);
   assert.match(output, /meeting_voice_cleanup_total\{outcome="retry_failed"\} 1/);
+  assert.match(output, /meeting_voice_turn_cancellation_total\{reason="owner_disconnected",outcome="completed"\} 1/);
+  assert.match(output, /meeting_voice_recovery_total\{outcome="stale_session_cleared"\} 1/);
   assert.match(output, /meeting_voice_cleanup_pending 2/);
   assert.doesNotMatch(output, /meetingSessionId|turnId|workspaceId|userId|transcript/);
 });

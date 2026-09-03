@@ -3,6 +3,7 @@ import type { MeetingAiClient } from './internalClients.js';
 import type { MeetingAudioPublisher } from './livekit/MeetingAudioPublisher.js';
 import type { StreamingMeetingAudioPublisher } from './livekit/StreamingMeetingAudioPublisher.js';
 import type { VoiceServiceLogger } from './logger.js';
+import type { VoiceCleanupResource } from './voiceMetrics.js';
 
 export class MeetingCleanupError extends Error {}
 
@@ -17,6 +18,7 @@ export class MeetingCleanupCoordinator {
     meetingAi: MeetingAiClient;
     logger: VoiceServiceLogger;
     timeoutMs: number;
+    metrics?: { recordLifecycleCleanup(resource: VoiceCleanupResource, outcome: 'completed' | 'failed'): void };
   }) {}
 
   public cleanup(meetingSessionId: string, cleanupId: string): Promise<void> {
@@ -32,25 +34,28 @@ export class MeetingCleanupCoordinator {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort('cleanup-timeout'), this.dependencies.timeoutMs);
     const failures: string[] = [];
+    const cleanup = async (resource: VoiceCleanupResource, operation: () => Promise<unknown>): Promise<void> => {
+      try {
+        await operation();
+        this.dependencies.metrics?.recordLifecycleCleanup(resource, 'completed');
+      } catch {
+        failures.push(resource);
+        this.dependencies.metrics?.recordLifecycleCleanup(resource, 'failed');
+      }
+    };
     try {
-      await this.dependencies.meetingAi.beginMeetingCleanup(meetingSessionId, controller.signal)
-        .catch(() => failures.push('ai-ending'));
+      await cleanup('ai_ending', () => this.dependencies.meetingAi.beginMeetingCleanup(meetingSessionId, controller.signal));
       if (this.dependencies.streaming) {
-        await this.dependencies.streaming.cancelMeeting(meetingSessionId)
-          .catch(() => failures.push('stream-cancel'));
+        await cleanup('stream_input', () => this.dependencies.streaming!.cancelMeeting(meetingSessionId));
       }
       if (this.dependencies.orchestrator) {
-        await this.dependencies.orchestrator.cancelMeeting(meetingSessionId)
-          .catch(() => failures.push('pipeline-cancel'));
+        await cleanup('pipeline', () => this.dependencies.orchestrator!.cancelMeeting(meetingSessionId));
       }
-      await this.dependencies.publisher.closeMeeting(meetingSessionId)
-        .catch(() => failures.push('livekit-close'));
+      await cleanup('batch_livekit', () => this.dependencies.publisher.closeMeeting(meetingSessionId));
       if (this.dependencies.streamingPublisher) {
-        await this.dependencies.streamingPublisher.closeMeeting(meetingSessionId)
-          .catch(() => failures.push('streaming-livekit-close'));
+        await cleanup('streaming_livekit', () => this.dependencies.streamingPublisher!.closeMeeting(meetingSessionId));
       }
-      await this.dependencies.meetingAi.completeMeetingCleanup(meetingSessionId, controller.signal)
-        .catch(() => failures.push('ai-cleanup'));
+      await cleanup('ai_cleanup', () => this.dependencies.meetingAi.completeMeetingCleanup(meetingSessionId, controller.signal));
       if (failures.length > 0) throw new MeetingCleanupError(failures.join(','));
       this.dependencies.logger.info({ meetingSessionId, cleanupId }, 'Voice meeting cleanup completed');
     } finally {

@@ -161,6 +161,14 @@ export class BatchVoiceOrchestrator {
     return true;
   }
 
+  public async cancelTurn(meetingSessionId: string, turnId: string): Promise<boolean> {
+    const active = this.active.get(turnId);
+    if (!active || active.meetingSessionId !== meetingSessionId) return false;
+    active.controller.abort('turn-cancelled');
+    await active.settled;
+    return true;
+  }
+
   public async cancelMeeting(meetingSessionId: string): Promise<void> {
     this.closingMeetings.add(meetingSessionId);
     const matching = [...this.active.values()].filter((active) => active.meetingSessionId === meetingSessionId);
@@ -172,6 +180,12 @@ export class BatchVoiceOrchestrator {
     for (const active of this.active.values()) {
       active.controller.abort('shutdown');
     }
+  }
+
+  public async cancelAllAndWait(): Promise<void> {
+    const active = [...this.active.values()];
+    for (const turn of active) turn.controller.abort('shutdown');
+    await Promise.allSettled(active.map((turn) => turn.settled));
   }
 
   private async run(input: BatchAudioUpload | FinalTranscriptVoiceInput, controller: AbortController): Promise<void> {

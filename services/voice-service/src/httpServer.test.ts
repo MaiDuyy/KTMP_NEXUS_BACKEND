@@ -136,6 +136,35 @@ test('protects and executes idempotent meeting cleanup through the internal boun
   });
 });
 
+test('protects and executes idempotent turn cancellation through the internal boundary', async () => {
+  const calls: Array<{ meetingSessionId: string; turnId: string; cancellationId: string }> = [];
+  const internalServiceKey = 'test-voice-internal-key-with-32-characters';
+  await withServer(() => true, async (baseUrl) => {
+    const url = `${baseUrl}/internal/voice/meetings/call-1/turns/turn-1/cancel`;
+    assert.equal((await fetch(url, { method: 'POST' })).status, 401);
+    assert.equal((await fetch(url, {
+      method: 'POST',
+      headers: { 'x-voice-internal-service-key': internalServiceKey },
+    })).status, 400);
+    const headers = {
+      'x-voice-internal-service-key': internalServiceKey,
+      'x-voice-cancellation-id': 'cancel-1',
+    };
+    assert.equal((await fetch(url, { method: 'POST', headers })).status, 200);
+    assert.equal((await fetch(url, { method: 'POST', headers })).status, 200);
+    assert.deepEqual(calls, [
+      { meetingSessionId: 'call-1', turnId: 'turn-1', cancellationId: 'cancel-1' },
+      { meetingSessionId: 'call-1', turnId: 'turn-1', cancellationId: 'cancel-1' },
+    ]);
+  }, {
+    logger,
+    internalServiceKey,
+    onTurnCancel: async (meetingSessionId, turnId, cancellationId) => {
+      calls.push({ meetingSessionId, turnId, cancellationId });
+    },
+  });
+});
+
 test("does not expose unimplemented routes", async () => {
   await withServer(() => true, async (baseUrl) => {
     const response = await fetch(`${baseUrl}/voice/turns/example/audio`, { method: "POST" });

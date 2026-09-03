@@ -140,6 +140,7 @@ export function createVoiceService(
       meetingAi: meetingAiClient,
       logger,
       timeoutMs: config.meetingCleanupTimeoutMs,
+      metrics: voiceMetrics,
     })
     : null;
 
@@ -154,6 +155,16 @@ export function createVoiceService(
     metrics: voiceMetrics,
     onMeetingCleanup: meetingCleanupCoordinator
       ? (meetingSessionId, cleanupId) => meetingCleanupCoordinator.cleanup(meetingSessionId, cleanupId)
+      : undefined,
+    onTurnCancel: orchestrator || streamingSinkFactory
+      ? async (meetingSessionId, turnId) => {
+        const results = await Promise.allSettled([
+          streamingSinkFactory?.cancelTurn(meetingSessionId, turnId) ?? Promise.resolve(false),
+          orchestrator?.cancelTurn(meetingSessionId, turnId) ?? Promise.resolve(false),
+        ]);
+        const failures = results.filter((result) => result.status === 'rejected');
+        if (failures.length > 0) throw new AggregateError(failures, 'VOICE_TURN_CANCEL_FAILED');
+      }
       : undefined,
     onBatchAudio: orchestrator
       ? async (upload) => {
@@ -180,8 +191,11 @@ export function createVoiceService(
     server,
     logger,
     timeoutMs: config.shutdownTimeoutMs,
-    onClose: () => {
-      orchestrator?.cancelAll();
+    onClose: async () => {
+      await Promise.allSettled([
+        streamingSinkFactory?.cancelAll() ?? Promise.resolve(),
+        orchestrator?.cancelAllAndWait() ?? Promise.resolve(),
+      ]);
       return closeVoiceServiceResources({
         closeLivekit: async () => {
           await Promise.all([meetingAudioPublisher.closeAll(), streamingAudioPublisher.closeAll()]);

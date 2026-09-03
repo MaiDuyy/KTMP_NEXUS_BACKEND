@@ -30,7 +30,7 @@ interface FinalSegment {
 }
 
 export class StreamingVoiceSinkFactory implements VoicePcmStreamSinkFactory {
-  private readonly activeByMeeting = new Map<string, Set<VoicePcmStreamSink>>();
+  private readonly activeByMeeting = new Map<string, Map<string, VoicePcmStreamSink>>();
 
   public constructor(private readonly dependencies: {
     stt: GoogleStreamingSttAdapter;
@@ -128,7 +128,7 @@ export class StreamingVoiceSinkFactory implements VoicePcmStreamSinkFactory {
     let sink!: VoicePcmStreamSink;
     const untrack = () => {
       const meetingSinks = this.activeByMeeting.get(token.meetingSessionId);
-      meetingSinks?.delete(sink);
+      if (meetingSinks?.get(token.turnId) === sink) meetingSinks.delete(token.turnId);
       if (meetingSinks?.size === 0) this.activeByMeeting.delete(token.meetingSessionId);
     };
     sink = {
@@ -199,15 +199,28 @@ export class StreamingVoiceSinkFactory implements VoicePcmStreamSinkFactory {
         untrack();
       },
     };
-    const meetingSinks = this.activeByMeeting.get(token.meetingSessionId) ?? new Set<VoicePcmStreamSink>();
-    meetingSinks.add(sink);
+    const meetingSinks = this.activeByMeeting.get(token.meetingSessionId) ?? new Map<string, VoicePcmStreamSink>();
+    meetingSinks.set(token.turnId, sink);
     this.activeByMeeting.set(token.meetingSessionId, meetingSinks);
     return sink;
   }
 
+  public async cancelTurn(meetingSessionId: string, turnId: string): Promise<boolean> {
+    const sink = this.activeByMeeting.get(meetingSessionId)?.get(turnId);
+    if (!sink) return false;
+    await sink.cancel('user_cancelled');
+    return true;
+  }
+
   public async cancelMeeting(meetingSessionId: string): Promise<void> {
-    const sinks = [...(this.activeByMeeting.get(meetingSessionId) ?? [])];
+    const sinks = [...(this.activeByMeeting.get(meetingSessionId)?.values() ?? [])];
     await Promise.allSettled(sinks.map((sink) => Promise.resolve(sink.cancel('call_ended'))));
     this.activeByMeeting.delete(meetingSessionId);
+  }
+
+  public async cancelAll(): Promise<void> {
+    const sinks = [...this.activeByMeeting.values()].flatMap((meeting) => [...meeting.values()]);
+    await Promise.allSettled(sinks.map((sink) => Promise.resolve(sink.cancel('system'))));
+    this.activeByMeeting.clear();
   }
 }
