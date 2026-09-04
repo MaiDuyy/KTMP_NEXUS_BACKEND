@@ -1,0 +1,87 @@
+{
+  "schemaVersion": 1,
+  "phase": "P4-C",
+  "status": "FROZEN_PENDING_ENVIRONMENT",
+  "createdAt": "2026-09-04",
+  "revisions": {
+    "backend": "52e133f",
+    "frontend": "05a98ee",
+    "aiKnowledge": "54bf5ee"
+  },
+  "dataPolicy": {
+    "seed": "p4-c-synthetic-v1",
+    "usesProductionData": false,
+    "audio": "synthetic-vietnamese-pcm-only",
+    "prohibitedArtifacts": ["jwt", "cookie", "api-key", "real-audio", "database-dump", "unredacted-transcript"]
+  },
+  "actors": {
+    "memberA": "test-user-a",
+    "memberB": "test-user-b",
+    "outsiderC": "test-user-c",
+    "requirements": [
+      "memberA and memberB belong to the same workspace and call",
+      "outsiderC belongs to neither the target call nor target workspace",
+      "each browser actor has an isolated storage context"
+    ]
+  },
+  "globalInvariants": [
+    "no-cross-tenant-leak",
+    "no-duplicate-terminal-event",
+    "no-audio-replay-after-first-frame",
+    "no-orphan-lock-session-or-publisher-after-cleanup-grace-period",
+    "bounded-queue-and-memory-growth",
+    "no-secret-or-content-in-test-artifacts"
+  ],
+  "thresholds": {
+    "status": "FROZEN_PROVISIONAL_REQUIRES_OWNER_APPROVAL_BEFORE_MAIN_LOAD",
+    "cleanupGracePeriodMs": 30000,
+    "errorRatePercent": 0,
+    "orphanResourceCount": 0,
+    "duplicateTerminalOrAudioCount": 0,
+    "crossTenantLeakCount": 0,
+    "p95TurnCompletionMs": 20000,
+    "maxRssGrowthPercent": 20,
+    "maxRedisKeyGrowthAfterCleanup": 0,
+    "notes": "These are verification thresholds, not production SLOs. Three baseline runs and owner approval are required before LOAD-STEADY, LOAD-BURST, or LOAD-SOAK."
+  },
+  "securityScenarios": [
+    {"id": "SEC-TOKEN-01", "actor": "outsiderC", "action": "invalid-signature-turn-control", "expected": "401-or-403-and-no-lock"},
+    {"id": "SEC-TOKEN-02", "actor": "outsiderC", "action": "invalid-issuer-audience-expiry-not-before", "expected": "401-or-403-and-no-lock"},
+    {"id": "SEC-TOKEN-03", "actor": "memberA", "action": "missing-required-claim", "expected": "401-or-403-and-no-lock"},
+    {"id": "SEC-TOKEN-04", "actor": "memberA", "action": "tamper-user-meeting-turn-workspace-room-binding", "expected": "401-or-403-and-no-lock"},
+    {"id": "SEC-TOKEN-05", "actor": "memberA", "action": "replay-same-instance", "expected": "rejected-and-no-second-pipeline"},
+    {"id": "SEC-TOKEN-06", "actor": "memberA", "action": "replay-cross-instance", "expected": "rejected-and-no-second-pipeline"},
+    {"id": "SEC-MEMBER-01", "actor": "outsiderC", "action": "start-upload-stream-cancel-sync", "expected": "forbidden-and-no-fanout"},
+    {"id": "SEC-MEMBER-02", "actor": "memberB", "action": "cancel-memberA-turn", "expected": "forbidden-and-turn-remains-owned"},
+    {"id": "SEC-TENANT-01", "actor": "outsiderC", "action": "workspace-room-spoof", "expected": "forbidden-and-no-content"},
+    {"id": "SEC-TENANT-02", "actor": "outsiderC", "action": "cross-workspace-rag", "expected": "forbidden-or-empty-without-source-metadata"},
+    {"id": "SEC-INPUT-01", "actor": "memberA", "action": "malformed-oversized-batch-frame-sequence", "expected": "bounded-4xx-or-close-and-cleanup"},
+    {"id": "SEC-INTERNAL-01", "actor": "outsiderC", "action": "missing-wrong-service-credential", "expected": "401-or-403"},
+    {"id": "SEC-PRIVACY-01", "actor": "operator", "action": "scan-logs-metrics-browser-artifacts", "expected": "no-secret-or-content-payload"}
+  ],
+  "loadProfiles": [
+    {"id": "LOAD-SMOKE", "meetings": 2, "usersPerMeeting": 2, "turnsPerMeeting": 2, "rampSeconds": 0, "holdSeconds": 60, "provider": "deterministic-stub", "expected": "all-global-invariants"},
+    {"id": "LOAD-STEADY", "meetings": 10, "usersPerMeeting": 2, "turnsPerMeeting": 3, "rampSeconds": 60, "holdSeconds": 600, "provider": "deterministic-stub", "expected": "all-global-invariants-and-provisional-thresholds"},
+    {"id": "LOAD-BURST", "meetings": 20, "usersPerMeeting": 2, "turnsPerMeeting": 2, "rampSeconds": 60, "holdSeconds": 180, "provider": "deterministic-stub", "expected": "all-global-invariants-and-provisional-thresholds"},
+    {"id": "LOAD-SOAK", "meetings": 5, "usersPerMeeting": 2, "turnsPerMeeting": 12, "rampSeconds": 60, "holdSeconds": 1800, "provider": "deterministic-stub", "expected": "all-global-invariants-and-provisional-thresholds"},
+    {"id": "LOAD-DEGRADED", "meetings": 2, "usersPerMeeting": 2, "turnsPerMeeting": 3, "rampSeconds": 0, "holdSeconds": 120, "provider": "forced-circuit-open", "expected": "healthy-meeting-completes-without-head-of-line-blocking"}
+  ],
+  "browserScenarios": [
+    {"id": "WEB-HAPPY-01", "viewports": ["1440x900", "390x844"], "expected": "A-owner-B-locked-shared-state-text-and-nonzero-ai-audio"},
+    {"id": "WEB-CANCEL-01", "viewports": ["1440x900"], "expected": "single-unlock-no-late-audio"},
+    {"id": "WEB-LEAVE-01", "viewports": ["1440x900"], "expected": "cleanup-and-rejoin-after-terminal"},
+    {"id": "WEB-END-01", "viewports": ["1440x900"], "expected": "transient-history-cleared-and-cleanup"},
+    {"id": "WEB-RECONNECT-01", "viewports": ["1440x900"], "network": "socket-reconnect", "expected": "no-stale-event-or-replay"},
+    {"id": "WEB-RECONNECT-02", "viewports": ["1440x900"], "network": "voice-websocket-reconnect", "expected": "no-stale-event-or-replay"},
+    {"id": "WEB-RECONNECT-03", "viewports": ["1440x900"], "network": "livekit-reconnect", "expected": "terminal-or-defined-new-turn-policy"},
+    {"id": "WEB-FALLBACK-01", "viewports": ["1440x900"], "expected": "batch-policy-for-no-streaming-or-microphone-permission"},
+    {"id": "WEB-VIEWPORT-01", "viewports": ["1440x900", "390x844"], "expected": "no-overlap-or-text-overflow"},
+    {"id": "WEB-LIFECYCLE-01", "viewports": ["1440x900"], "expected": "no-duplicate-listener-or-event-after-mount-unmount-rejoin"}
+  ],
+  "runDiscipline": {
+    "runIdFormat": "p4c-YYYYMMDD-HHmmss-<scenario>",
+    "mainLoadRequires": ["three-baseline-runs", "owner-threshold-approval", "full-topology-healthy", "three-test-identities"],
+    "artifactDirectory": "docs/ai-voice-meeting/evidence/phase-4/p4-c/",
+    "artifactRedactionRequired": true
+  }
+}
