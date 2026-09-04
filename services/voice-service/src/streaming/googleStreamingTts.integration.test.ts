@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { GoogleStreamingTtsAdapter, type StreamingPcmChunk } from './googleStreamingTts.js';
 
-const runProviderIntegration = process.env.VOICE_PROVIDER_INTEGRATION === 'true';
+const runProviderIntegration = ['true', '1'].includes(process.env.VOICE_PROVIDER_INTEGRATION ?? '');
 
 test('streams Vietnamese PCM from Google Cloud TTS', { skip: runProviderIntegration ? undefined : 'VOICE_PROVIDER_INTEGRATION is not enabled' }, async () => {
   const projectId = process.env.GOOGLE_CLOUD_PROJECT;

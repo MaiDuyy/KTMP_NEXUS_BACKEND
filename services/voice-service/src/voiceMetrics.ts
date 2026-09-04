@@ -1,5 +1,11 @@
 import { Counter, Histogram, Registry } from '@prometheus-io/client';
 import type { VoiceErrorCode } from '@ott/shared';
+import type {
+  CircuitState,
+  ResilienceCircuitKey,
+  ResilienceObserver,
+  ResilienceProvider,
+} from './resilience.js';
 
 export type VoicePipelineStage = 'context' | 'stt' | 'ai' | 'tts' | 'livekit';
 export type VoicePipelineOutcome = 'completed' | 'failed' | 'timeout' | 'cancelled' | 'ownership_expired';
@@ -35,41 +41,47 @@ export interface VoiceStreamingMetrics {
   recordLifecycleCleanup(resource: VoiceCleanupResource, outcome: 'completed' | 'failed'): void;
 }
 
-export class VoiceServiceMetrics implements VoicePipelineMetrics {
-  public readonly registry = new Registry();
-  private readonly pipelines = new Counter({
+export class VoiceServiceMetrics implements VoicePipelineMetrics, VoiceStreamingMetrics, ResilienceObserver {
+  private readonly registry = new Registry();
+
+  private readonly stageDuration = new Histogram({
+    name: 'meeting_voice_pipeline_stage_duration_seconds',
+    help: 'Duration of voice pipeline stages in seconds.',
+    labelNames: ['stage', 'outcome'] as const,
+    buckets: [0.05, 0.1, 0.25, 0.5, 1, 2, 5, 10, 20, 30, 60],
+    registers: [this.registry],
+  });
+
+  private readonly pipelineTotal = new Counter({
     name: 'meeting_voice_pipeline_total',
-    help: 'Number of batch voice pipelines by bounded outcome and error code.',
+    help: 'Total voice pipeline runs partitioned by outcome and error code.',
     labelNames: ['outcome', 'code'] as const,
     registers: [this.registry],
   });
+
   private readonly pipelineDuration = new Histogram({
     name: 'meeting_voice_pipeline_duration_seconds',
-    help: 'End-to-end duration of a batch voice pipeline.',
+    help: 'End-to-end voice pipeline duration in seconds partitioned by outcome.',
     labelNames: ['outcome'] as const,
-    buckets: [0.1, 0.25, 0.5, 1, 2, 3, 5, 8, 13, 21, 34, 55, 89, 150],
+    buckets: [0.25, 0.5, 1, 2, 5, 10, 20, 30, 60, 90, 120, 150],
     registers: [this.registry],
   });
-  private readonly stageDuration = new Histogram({
-    name: 'meeting_voice_pipeline_stage_duration_seconds',
-    help: 'Duration of a bounded batch voice pipeline stage.',
-    labelNames: ['stage', 'outcome'] as const,
-    buckets: [0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2, 3, 5, 8, 13, 21, 34, 55, 89],
-    registers: [this.registry],
-  });
-  private readonly streams = new Counter({
+
+  private readonly streamOutcomes = new Counter({
     name: 'meeting_voice_stream_total',
-    help: 'Number of streaming connections and terminal transport outcomes.',
+    help: 'Number of voice stream sessions partitioned by bounded lifecycle outcome.',
     labelNames: ['outcome'] as const,
     registers: [this.registry],
   });
-  private readonly streamingSttDuration = new Histogram({
+
+  private readonly streamingStt = new Histogram({
     name: 'meeting_voice_streaming_stt_duration_seconds',
-    help: 'Duration of streaming STT sessions by bounded outcome.',
+    help: 'Streaming STT active stream duration by bounded outcome.',
     labelNames: ['outcome'] as const,
-    buckets: [0.1, 0.25, 0.5, 1, 2, 3, 5, 8, 13, 21, 34, 55, 60, 70],
+    buckets: [0.1, 0.25, 0.5, 1, 2, 3, 5, 8, 13, 21, 34, 55, 89],
     registers: [this.registry],
   });
+
   private readonly streamingOutput = new Histogram({
     name: 'meeting_voice_streaming_output_duration_seconds',
     help: 'Streaming output duration by bounded terminal outcome.',
@@ -77,6 +89,7 @@ export class VoiceServiceMetrics implements VoicePipelineMetrics {
     buckets: [0.1, 0.25, 0.5, 1, 2, 3, 5, 8, 13, 21, 34, 55, 89, 150],
     registers: [this.registry],
   });
+
   private readonly streamingOutputLatency = new Histogram({
     name: 'meeting_voice_streaming_output_latency_seconds',
     help: 'Streaming output latency between monotonic bounded stages.',
@@ -84,6 +97,7 @@ export class VoiceServiceMetrics implements VoicePipelineMetrics {
     buckets: [0.025, 0.05, 0.1, 0.25, 0.5, 1, 2, 3, 5, 8, 13, 21, 34, 55, 89],
     registers: [this.registry],
   });
+
   private readonly streamingOutputVolume = new Histogram({
     name: 'meeting_voice_streaming_output_volume',
     help: 'Bounded streaming output counts by kind.',
@@ -91,10 +105,39 @@ export class VoiceServiceMetrics implements VoicePipelineMetrics {
     buckets: [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 4096],
     registers: [this.registry],
   });
+
   private readonly lifecycleCleanup = new Counter({
     name: 'meeting_voice_lifecycle_cleanup_total',
     help: 'Number of lifecycle cleanup steps by bounded resource and outcome.',
     labelNames: ['resource', 'outcome'] as const,
+    registers: [this.registry],
+  });
+
+  private readonly circuitBreakerTransitions = new Counter({
+    name: 'meeting_voice_circuit_breaker_transitions_total',
+    help: 'Number of circuit breaker state transitions.',
+    labelNames: ['name', 'state'] as const,
+    registers: [this.registry],
+  });
+
+  private readonly circuitBreakerRejections = new Counter({
+    name: 'meeting_voice_circuit_breaker_rejections_total',
+    help: 'Number of operations rejected due to open circuit.',
+    labelNames: ['name'] as const,
+    registers: [this.registry],
+  });
+
+  private readonly retryAttempts = new Counter({
+    name: 'meeting_voice_retry_attempts_total',
+    help: 'Number of retry attempts made for transient errors.',
+    labelNames: ['operation'] as const,
+    registers: [this.registry],
+  });
+
+  private readonly quotaRejections = new Counter({
+    name: 'meeting_voice_quota_rejections_total',
+    help: 'Number of quota exceeded errors by provider.',
+    labelNames: ['provider'] as const,
     registers: [this.registry],
   });
 
@@ -107,16 +150,16 @@ export class VoiceServiceMetrics implements VoicePipelineMetrics {
     code: VoiceErrorCode | 'none',
     durationSeconds: number,
   ): void {
-    this.pipelines.inc({ outcome, code });
+    this.pipelineTotal.inc({ outcome, code });
     this.pipelineDuration.observe({ outcome }, Math.max(0, durationSeconds));
   }
 
   public recordStream(outcome: VoiceStreamOutcome): void {
-    this.streams.inc({ outcome });
+    this.streamOutcomes.inc({ outcome });
   }
 
   public recordStreamingStt(outcome: StreamingSttOutcome, durationSeconds: number): void {
-    this.streamingSttDuration.observe({ outcome }, Math.max(0, durationSeconds));
+    this.streamingStt.observe({ outcome }, Math.max(0, durationSeconds));
   }
 
   public recordStreamingOutput(outcome: StreamingOutputOutcome, durationSeconds: number): void {
@@ -133,6 +176,22 @@ export class VoiceServiceMetrics implements VoicePipelineMetrics {
 
   public recordLifecycleCleanup(resource: VoiceCleanupResource, outcome: 'completed' | 'failed'): void {
     this.lifecycleCleanup.inc({ resource, outcome });
+  }
+
+  public recordCircuitTransition(name: ResilienceCircuitKey, state: CircuitState): void {
+    this.circuitBreakerTransitions.inc({ name, state });
+  }
+
+  public recordCircuitRejection(name: ResilienceCircuitKey): void {
+    this.circuitBreakerRejections.inc({ name });
+  }
+
+  public recordRetryAttempt(operation: ResilienceCircuitKey): void {
+    this.retryAttempts.inc({ operation });
+  }
+
+  public recordQuotaRejection(provider: ResilienceProvider): void {
+    this.quotaRejections.inc({ provider });
   }
 
   public render(): Promise<string> {

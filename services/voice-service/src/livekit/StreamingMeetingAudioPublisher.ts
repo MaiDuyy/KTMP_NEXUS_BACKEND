@@ -11,6 +11,7 @@ import {
 } from '../streaming/pcm48k.js';
 import { TrackSource, type ILivekitAdapter, type ILivekitAudioSource, type ILivekitLocalAudioTrack, type ILivekitRoom } from './LivekitAdapter.js';
 import { LivekitTokenService } from './LivekitTokenService.js';
+import { CircuitBreaker, CircuitBreakerError, type CircuitPermit } from '../resilience.js';
 
 export class StreamingPublishError extends Error {
   public constructor(public readonly code: VoiceErrorCode, message?: string) {
@@ -102,13 +103,28 @@ export class StreamingMeetingAudioPublisher {
   private readonly participants = new Map<string, ParticipantSession>();
   private readonly activeTurns = new Map<string, ActiveTurn>();
   private readonly startingTurns = new Map<string, { turnId: string; promise: Promise<StreamingMeetingAudioSession> }>();
+  private readonly connectCircuitBreaker: CircuitBreaker;
+  private readonly publishCircuitBreaker: CircuitBreaker;
   private disposed = false;
 
   public constructor(
     private readonly config: VoiceServiceConfig,
     private readonly tokenService: LivekitTokenService,
     private readonly adapter: ILivekitAdapter,
-  ) {}
+  ) {
+    this.connectCircuitBreaker = new CircuitBreaker('livekit/connect', {
+      failureThreshold: this.config.circuitBreakerFailureThreshold,
+      openDurationMs: this.config.circuitBreakerOpenDurationMs,
+      halfOpenProbeLimit: this.config.circuitBreakerHalfOpenProbeLimit,
+      failureWindowMs: this.config.circuitBreakerFailureWindowMs,
+    });
+    this.publishCircuitBreaker = new CircuitBreaker('livekit/publish', {
+      failureThreshold: this.config.circuitBreakerFailureThreshold,
+      openDurationMs: this.config.circuitBreakerOpenDurationMs,
+      halfOpenProbeLimit: this.config.circuitBreakerHalfOpenProbeLimit,
+      failureWindowMs: this.config.circuitBreakerFailureWindowMs,
+    });
+  }
 
   public start(input: StreamingPublishInput): Promise<StreamingMeetingAudioSession> {
     const active = this.activeTurns.get(input.meetingSessionId);
@@ -152,7 +168,7 @@ export class StreamingMeetingAudioPublisher {
     };
     turn.assembler = new PcmFrameAssembler(async (frame) => {
       if (turn.terminal) throw new StreamingPublishError('VOICE_CANCELLED');
-      await raceWithAbort(
+      await this.withPublishPermit(async () => raceWithAbort(
         participant.source.captureFrame({
           data: frame.data,
           sampleRate: LIVEKIT_SAMPLE_RATE_HERTZ,
@@ -161,7 +177,7 @@ export class StreamingMeetingAudioPublisher {
         }),
         this.config.livekitConnectTimeoutMs,
         [input.signal, controller.signal],
-      );
+      ));
       if (turn.firstFrameAtMs === null) {
         turn.firstFrameAtMs = Date.now();
         input.onFirstFrame?.();
@@ -214,9 +230,11 @@ export class StreamingMeetingAudioPublisher {
   private async finishTurn(turn: ActiveTurn): Promise<StreamingPublishSummary> {
     this.assertCurrent(turn);
     try {
-      await turn.assembler.write(turn.resampler.finish());
-      await turn.assembler.finish();
-      await raceWithAbort(turn.participant.source.waitForPlayout(), this.config.livekitPlayoutTimeoutMs, [turn.input.signal, turn.controller.signal]);
+      await this.withPublishPermit(async () => {
+        await turn.assembler.write(turn.resampler.finish());
+        await turn.assembler.finish();
+        await raceWithAbort(turn.participant.source.waitForPlayout(), this.config.livekitPlayoutTimeoutMs, [turn.input.signal, turn.controller.signal]);
+      });
       const summary: StreamingPublishSummary = {
         meetingSessionId: turn.input.meetingSessionId,
         roomName: turn.input.roomName,
@@ -269,20 +287,63 @@ export class StreamingMeetingAudioPublisher {
   }
 
   private async connectParticipant(input: StreamingPublishInput, participant: ParticipantSession): Promise<void> {
+    const connectPermit = this.acquirePermit(this.connectCircuitBreaker, 'Connect');
+    let token: string;
     try {
-      const token = await this.tokenService.generateToken({ roomName: input.roomName, meetingSessionId: input.meetingSessionId });
-      await raceWithAbort(participant.room.connect(this.config.livekitUrl!, token), this.config.livekitConnectTimeoutMs, [input.signal]);
-      await raceWithAbort(
-        participant.room.publishTrack(participant.track, { source: TrackSource.SOURCE_MICROPHONE }),
-        this.config.livekitConnectTimeoutMs,
-        [input.signal],
-      );
-      participant.connected = true;
-      participant.published = true;
+      token = await this.tokenService.generateToken({ roomName: input.roomName, meetingSessionId: input.meetingSessionId });
     } catch (error) {
-      if (error instanceof StreamingPublishError) throw error;
+      // Credential/configuration errors must not trip the LiveKit transport circuit.
+      connectPermit.release();
       throw new StreamingPublishError('VOICE_LIVEKIT_PUBLISH_FAILED', asError(error).message);
     }
+
+    try {
+      await raceWithAbort(participant.room.connect(this.config.livekitUrl!, token), this.config.livekitConnectTimeoutMs, [input.signal]);
+    } catch (error) {
+      this.settlePermit(connectPermit, error);
+      throw toPublishError(error);
+    }
+    connectPermit.recordSuccess();
+
+    await this.withPublishPermit(async () => raceWithAbort(
+      participant.room.publishTrack(participant.track, { source: TrackSource.SOURCE_MICROPHONE }),
+      this.config.livekitConnectTimeoutMs,
+      [input.signal],
+    ));
+    participant.connected = true;
+    participant.published = true;
+  }
+
+  private acquirePermit(circuit: CircuitBreaker, operation: 'Connect' | 'Publish'): CircuitPermit {
+    try {
+      return circuit.acquire();
+    } catch (error) {
+      if (error instanceof CircuitBreakerError) {
+        throw new StreamingPublishError('VOICE_LIVEKIT_PUBLISH_FAILED', `${operation} circuit is OPEN`);
+      }
+      throw error;
+    }
+  }
+
+  private async withPublishPermit<T>(operation: () => Promise<T>): Promise<T> {
+    const permit = this.acquirePermit(this.publishCircuitBreaker, 'Publish');
+    try {
+      const result = await operation();
+      permit.recordSuccess();
+      return result;
+    } catch (error) {
+      this.settlePermit(permit, error);
+      throw error;
+    }
+  }
+
+  private settlePermit(permit: CircuitPermit, error: unknown): void {
+    const mapped = toPublishError(error);
+    if (mapped.code === 'VOICE_CANCELLED' || mapped.code !== 'VOICE_LIVEKIT_PUBLISH_FAILED') {
+      permit.release();
+      return;
+    }
+    permit.recordFailure();
   }
 
   private assertCurrent(turn: ActiveTurn): void {

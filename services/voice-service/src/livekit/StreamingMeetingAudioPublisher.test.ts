@@ -12,8 +12,12 @@ class FakeSource extends EventEmitter implements ILivekitAudioSource {
   public readonly frames: ILivekitAudioFrame[] = [];
   public clearQueueCalls = 0;
   public holdPlayout = false;
+  public captureError: Error | null = null;
   private resolvePlayout: (() => void) | null = null;
-  public async captureFrame(frame: ILivekitAudioFrame): Promise<void> { this.frames.push(frame); }
+  public async captureFrame(frame: ILivekitAudioFrame): Promise<void> {
+    if (this.captureError) throw this.captureError;
+    this.frames.push(frame);
+  }
   public async waitForPlayout(): Promise<void> {
     if (!this.holdPlayout) return;
     await new Promise<void>((resolve) => { this.resolvePlayout = resolve; });
@@ -25,9 +29,17 @@ class FakeSource extends EventEmitter implements ILivekitAudioSource {
 class FakeRoom implements ILivekitRoom {
   public connectCalls = 0;
   public publishCalls = 0;
-  public async connect(): Promise<void> { this.connectCalls += 1; }
+  public connectError: Error | null = null;
+  public publishError: Error | null = null;
+  public async connect(): Promise<void> {
+    this.connectCalls += 1;
+    if (this.connectError) throw this.connectError;
+  }
   public async disconnect(): Promise<void> {}
-  public async publishTrack(): Promise<void> { this.publishCalls += 1; }
+  public async publishTrack(): Promise<void> {
+    this.publishCalls += 1;
+    if (this.publishError) throw this.publishError;
+  }
   public async unpublishTrack(): Promise<void> {}
 }
 class FakeAdapter implements ILivekitAdapter {
@@ -42,6 +54,10 @@ function config(): VoiceServiceConfig {
   return {
     livekitUrl: 'wss://livekit.test', livekitApiKey: 'key', livekitApiSecret: 'secret',
     livekitConnectTimeoutMs: 500, livekitPlayoutTimeoutMs: 500,
+    circuitBreakerFailureThreshold: 1,
+    circuitBreakerOpenDurationMs: 1_000,
+    circuitBreakerHalfOpenProbeLimit: 1,
+    circuitBreakerFailureWindowMs: 60_000,
     googleStreamingTtsMaxQueuedBytes: 512 * 1024,
     voiceStreamingOutputMaxTotalPcmBytes: 8 * 1024 * 1024,
   } as unknown as VoiceServiceConfig;
@@ -96,4 +112,30 @@ test('rejects a second active turn in the same meeting without publishing anothe
   );
   await first.cancel();
   assert.equal(adapter.room.publishCalls, 1);
+});
+
+test('records connection and streaming publish failures against separate LiveKit circuits', async () => {
+  const connectAdapter = new FakeAdapter();
+  connectAdapter.room.connectError = new Error('connect unavailable');
+  const connectPublisher = new StreamingMeetingAudioPublisher(config(), new LivekitTokenService(config()), connectAdapter);
+  await assert.rejects(connectPublisher.start({ meetingSessionId: 'meeting-connect', roomName: 'room-1', turnId: 'turn-1' }));
+  assert.equal((connectPublisher as any).connectCircuitBreaker.getState(), 'OPEN');
+  assert.equal((connectPublisher as any).publishCircuitBreaker.getState(), 'CLOSED');
+
+  const publishAdapter = new FakeAdapter();
+  publishAdapter.room.publishError = new Error('publish unavailable');
+  const publishPublisher = new StreamingMeetingAudioPublisher(config(), new LivekitTokenService(config()), publishAdapter);
+  await assert.rejects(publishPublisher.start({ meetingSessionId: 'meeting-publish', roomName: 'room-1', turnId: 'turn-1' }));
+  assert.equal((publishPublisher as any).connectCircuitBreaker.getState(), 'CLOSED');
+  assert.equal((publishPublisher as any).publishCircuitBreaker.getState(), 'OPEN');
+});
+
+test('records native frame failures against the publish circuit', async () => {
+  const adapter = new FakeAdapter();
+  adapter.source.captureError = new Error('native capture unavailable');
+  const publisher = new StreamingMeetingAudioPublisher(config(), new LivekitTokenService(config()), adapter);
+  const session = await publisher.start({ meetingSessionId: 'meeting-frame', roomName: 'room-1', turnId: 'turn-1' });
+  await session.write(pcm(0, Array.from({ length: 480 }, () => 1)));
+  await assert.rejects(session.write(pcm(1, Array.from({ length: 480 }, () => 1))));
+  assert.equal((publisher as any).publishCircuitBreaker.getState(), 'OPEN');
 });

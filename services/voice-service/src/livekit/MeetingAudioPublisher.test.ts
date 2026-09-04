@@ -99,6 +99,7 @@ class MockRoom implements ILivekitRoom {
   public unpublishCalls = 0;
   public connectPromise: Promise<void> | null = null;
   public publishPromise: Promise<void> | null = null;
+  public connectError: Error | null = null;
   public disconnectError: Error | null = null;
   public publishError: Error | null = null;
   public unpublishError: Error | null = null;
@@ -107,6 +108,7 @@ class MockRoom implements ILivekitRoom {
 
   async connect(url: string, token: string): Promise<void> {
     this.connectCalled = true;
+    if (this.connectError) throw this.connectError;
     if (this.connectPromise) {
       return this.connectPromise;
     }
@@ -171,7 +173,11 @@ describe('MeetingAudioPublisher', () => {
       livekitApiSecret: 'secret',
       livekitConnectTimeoutMs: 1000,
       livekitPlayoutTimeoutMs: 1000,
-      livekitAiParticipantName: 'AI'
+      livekitAiParticipantName: 'AI',
+      circuitBreakerFailureThreshold: 1,
+      circuitBreakerOpenDurationMs: 1_000,
+      circuitBreakerHalfOpenProbeLimit: 1,
+      circuitBreakerFailureWindowMs: 60_000,
     } as VoiceServiceConfig;
     tokenService = new LivekitTokenService(config);
     adapter = new MockLivekitAdapter();
@@ -486,6 +492,26 @@ describe('MeetingAudioPublisher', () => {
     assert.strictEqual(adapter.audioSource?.track.closeCalls, 1);
     assert.strictEqual(adapter.audioSource?.closeCalls, 1);
     assert.ok(room.disconnectCalls > 0);
+  });
+
+  test('keeps LiveKit connect and publish circuit failures separate', async () => {
+    const connectRoom = adapter.createRoom();
+    connectRoom.connectError = new Error('connect unavailable');
+    adapter.createRoom = () => connectRoom;
+
+    await assert.rejects(publisher.publish(createInput('connect-failure')));
+    assert.strictEqual((publisher as any).connectCircuitBreaker.getState(), 'OPEN');
+    assert.strictEqual((publisher as any).publishCircuitBreaker.getState(), 'CLOSED');
+
+    const publishAdapter = new MockLivekitAdapter();
+    const publishPublisher = new MeetingAudioPublisher(config, tokenService, publishAdapter);
+    const publishRoom = publishAdapter.createRoom();
+    publishRoom.publishError = new Error('publish unavailable');
+    publishAdapter.createRoom = () => publishRoom;
+
+    await assert.rejects(publishPublisher.publish(createInput('publish-failure')));
+    assert.strictEqual((publishPublisher as any).connectCircuitBreaker.getState(), 'CLOSED');
+    assert.strictEqual((publishPublisher as any).publishCircuitBreaker.getState(), 'OPEN');
   });
 
   test('concurrent closeMeeting calls close each native resource once', async () => {

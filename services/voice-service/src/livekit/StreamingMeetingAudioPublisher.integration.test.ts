@@ -7,7 +7,7 @@ import { DefaultLivekitAdapter } from './LivekitAdapter.js';
 import { LivekitTokenService } from './LivekitTokenService.js';
 import { StreamingMeetingAudioPublisher } from './StreamingMeetingAudioPublisher.js';
 
-const runLivekitIntegration = process.env.VOICE_LIVEKIT_INTEGRATION === 'true';
+const runLivekitIntegration = ['true', '1'].includes(process.env.VOICE_LIVEKIT_INTEGRATION ?? '');
 
 function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | null = null;
@@ -33,6 +33,7 @@ test('streams one LiveKit AI track to two subscribers before playout completes',
   const publisher = new StreamingMeetingAudioPublisher(config, new LivekitTokenService(config), new DefaultLivekitAdapter());
   const subscribers = [new Room(), new Room()];
   const streams: AudioStream[] = [];
+  const readerTasks: Promise<void>[] = [];
   const received = [0, 0];
   const trackSubscribed = [0, 1].map((index) => new Promise<void>((resolve) => {
     subscribers[index].once(RoomEvent.TrackSubscribed, () => resolve());
@@ -42,12 +43,17 @@ test('streams one LiveKit AI track to two subscribers before playout completes',
       if (track.kind !== TrackKind.KIND_AUDIO) return;
       const stream = new AudioStream(track as RemoteAudioTrack);
       streams.push(stream);
-      void (async () => {
-        for await (const _frame of stream) {
-          received[index] += 1;
-          resolve();
+      const task = (async () => {
+        try {
+          for await (const _frame of stream) {
+            received[index] += 1;
+            resolve();
+          }
+        } catch {
+          // Cancellation is expected during test cleanup
         }
-      })().catch(() => undefined);
+      })();
+      readerTasks.push(task);
     });
   }));
   try {
@@ -56,7 +62,11 @@ test('streams one LiveKit AI track to two subscribers before playout completes',
       token.addGrant({ roomJoin: true, room: roomName, canSubscribe: true, canPublish: false });
       return token.toJwt();
     }));
-    await Promise.all(subscribers.map((room, index) => room.connect(config.livekitUrl!, tokens[index])));
+    await withTimeout(
+      Promise.all(subscribers.map((room, index) => room.connect(config.livekitUrl!, tokens[index]))),
+      15_000,
+      'Subscribers could not connect to LiveKit',
+    );
     const session = await publisher.start({ meetingSessionId, roomName, turnId: 'turn-1' });
     await withTimeout(Promise.all(trackSubscribed), 15_000, 'Subscribers did not subscribe to the AI track');
     await session.write(pcm(0, 12_000));
@@ -66,7 +76,18 @@ test('streams one LiveKit AI track to two subscribers before playout completes',
     assert.ok(summary.firstFrameAtMs !== null);
     assert.ok(received.every((count) => count > 0));
   } finally {
-    for (const stream of streams) await stream.cancel().catch(() => undefined);
+    // Close the publisher and rooms first: rtc-node then ends AudioStream readers.
     await Promise.allSettled([publisher.closeAll(), ...subscribers.map((room) => room.disconnect())]);
+    for (const stream of streams) {
+      try {
+        if (typeof (stream as any).cancel === 'function') {
+          await Promise.resolve((stream as any).cancel());
+        } else if (typeof (stream as any).close === 'function') {
+          (stream as any).close();
+        }
+      } catch {}
+    }
+    // A native reader must never leave the integration suite waiting indefinitely.
+    await withTimeout(Promise.allSettled(readerTasks), 5_000, 'Subscriber reader cleanup timed out').catch(() => undefined);
   }
 });

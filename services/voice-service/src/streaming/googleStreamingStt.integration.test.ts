@@ -4,7 +4,7 @@ import { TextToSpeechClient } from '@google-cloud/text-to-speech';
 import { loadVoiceServiceConfig } from '../config.js';
 import { GoogleStreamingSttAdapter, StreamingSttError, type StreamingSttResult } from './googleStreamingStt.js';
 
-const enabled = process.env.VOICE_PROVIDER_INTEGRATION === '1';
+const enabled = ['true', '1'].includes(process.env.VOICE_PROVIDER_INTEGRATION ?? '');
 
 function wavPcmData(wav: Buffer): { pcm: Buffer; sampleRate: number } {
   assert.equal(wav.toString('ascii', 0, 4), 'RIFF');

@@ -4,7 +4,7 @@ import { GoogleBatchSttAdapter } from './batchStt.js';
 import { GoogleBatchTtsAdapter } from './batchTts.js';
 import { loadVoiceServiceConfig } from './config.js';
 
-const enabled = process.env.VOICE_PROVIDER_INTEGRATION === '1';
+const enabled = ['true', '1'].includes(process.env.VOICE_PROVIDER_INTEGRATION ?? '');
 
 test('round-trips synthetic Vietnamese speech through Google TTS and STT', {
   skip: enabled ? false : 'VOICE_PROVIDER_INTEGRATION is not enabled',

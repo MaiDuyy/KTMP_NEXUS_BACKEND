@@ -55,6 +55,13 @@ export interface VoiceServiceConfig {
   livekitAiParticipantName: string;
   livekitConnectTimeoutMs: number;
   livekitPlayoutTimeoutMs: number;
+  circuitBreakerFailureThreshold: number;
+  circuitBreakerOpenDurationMs: number;
+  circuitBreakerHalfOpenProbeLimit: number;
+  circuitBreakerFailureWindowMs: number;
+  providerMaxRetryAttempts: number;
+  providerRetryBaseBackoffMs: number;
+  providerRetryMaxBackoffMs: number;
 }
 
 const DEFAULT_PORT = 3035;
@@ -97,6 +104,20 @@ function readBoundedPositiveInteger(
   const parsed = readPositiveInteger(value, fallback, variableName);
   if (parsed > maximum) {
     throw new Error(`${variableName} must be less than or equal to ${maximum}`);
+  }
+  return parsed;
+}
+
+function readRangedPositiveInteger(
+  value: string | undefined,
+  fallback: number,
+  variableName: string,
+  minimum: number,
+  maximum: number,
+): number {
+  const parsed = readPositiveInteger(value, fallback, variableName);
+  if (parsed < minimum || parsed > maximum) {
+    throw new Error(`${variableName} must be between ${minimum} and ${maximum}`);
   }
   return parsed;
 }
@@ -359,6 +380,55 @@ export function loadVoiceServiceConfig(env: NodeJS.ProcessEnv = process.env): Vo
     livekitAiParticipantName: readNonEmptyString(env.LIVEKIT_AI_PARTICIPANT_NAME, "Nexus AI", "LIVEKIT_AI_PARTICIPANT_NAME"),
     livekitConnectTimeoutMs: readPositiveInteger(env.LIVEKIT_CONNECT_TIMEOUT_MS, 15_000, "LIVEKIT_CONNECT_TIMEOUT_MS"),
     livekitPlayoutTimeoutMs: readPositiveInteger(env.LIVEKIT_PLAYOUT_TIMEOUT_MS, 70_000, "LIVEKIT_PLAYOUT_TIMEOUT_MS"),
+    circuitBreakerFailureThreshold: readRangedPositiveInteger(
+      env.VOICE_CIRCUIT_BREAKER_FAILURE_THRESHOLD,
+      3,
+      'VOICE_CIRCUIT_BREAKER_FAILURE_THRESHOLD',
+      1,
+      10,
+    ),
+    circuitBreakerOpenDurationMs: readRangedPositiveInteger(
+      env.VOICE_CIRCUIT_BREAKER_OPEN_DURATION_MS,
+      15_000,
+      'VOICE_CIRCUIT_BREAKER_OPEN_DURATION_MS',
+      1_000,
+      60_000,
+    ),
+    circuitBreakerHalfOpenProbeLimit: readRangedPositiveInteger(
+      env.VOICE_CIRCUIT_BREAKER_HALF_OPEN_PROBE_LIMIT,
+      1,
+      'VOICE_CIRCUIT_BREAKER_HALF_OPEN_PROBE_LIMIT',
+      1,
+      5,
+    ),
+    circuitBreakerFailureWindowMs: readRangedPositiveInteger(
+      env.VOICE_CIRCUIT_BREAKER_FAILURE_WINDOW_MS,
+      60_000,
+      'VOICE_CIRCUIT_BREAKER_FAILURE_WINDOW_MS',
+      1_000,
+      300_000,
+    ),
+    providerMaxRetryAttempts: readRangedPositiveInteger(
+      env.VOICE_PROVIDER_MAX_RETRY_ATTEMPTS,
+      2,
+      'VOICE_PROVIDER_MAX_RETRY_ATTEMPTS',
+      1,
+      2,
+    ),
+    providerRetryBaseBackoffMs: readRangedPositiveInteger(
+      env.VOICE_PROVIDER_RETRY_BASE_BACKOFF_MS,
+      200,
+      'VOICE_PROVIDER_RETRY_BASE_BACKOFF_MS',
+      50,
+      1_000,
+    ),
+    providerRetryMaxBackoffMs: readRangedPositiveInteger(
+      env.VOICE_PROVIDER_RETRY_MAX_BACKOFF_MS,
+      2_000,
+      'VOICE_PROVIDER_RETRY_MAX_BACKOFF_MS',
+      500,
+      5_000,
+    ),
   };
 
   if (
@@ -367,6 +437,12 @@ export function loadVoiceServiceConfig(env: NodeJS.ProcessEnv = process.env): Vo
   ) {
     throw new Error(
       'VOICE_STREAMING_TTS_SENTENCE_MINIMUM_CHARS, VOICE_STREAMING_TTS_SENTENCE_TARGET_CHARS, and VOICE_STREAMING_TTS_SENTENCE_MAXIMUM_CHARS must be ordered',
+    );
+  }
+
+  if (config.providerRetryBaseBackoffMs > config.providerRetryMaxBackoffMs) {
+    throw new Error(
+      'VOICE_PROVIDER_RETRY_BASE_BACKOFF_MS must be less than or equal to VOICE_PROVIDER_RETRY_MAX_BACKOFF_MS',
     );
   }
 

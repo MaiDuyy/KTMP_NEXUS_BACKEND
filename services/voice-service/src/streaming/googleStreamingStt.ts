@@ -33,9 +33,17 @@ export interface StreamingSttSession {
   cancel(): void;
 }
 
+import {
+  CircuitBreaker,
+  CircuitBreakerError,
+  CircuitPermit,
+  ProviderResilienceConfig,
+  getResilienceObserver,
+} from '../resilience.js';
+
 export class StreamingSttError extends Error {
   public constructor(
-    public readonly code: 'VOICE_STT_TIMEOUT' | 'VOICE_STT_UNAVAILABLE' | 'VOICE_CANCELLED',
+    public readonly code: 'VOICE_STT_TIMEOUT' | 'VOICE_STT_UNAVAILABLE' | 'VOICE_STT_QUOTA_EXCEEDED' | 'VOICE_CANCELLED',
     public readonly providerCode: string | number | null = null,
     public readonly providerMessage: string | null = null,
   ) {
@@ -51,34 +59,86 @@ function durationKey(duration: { seconds?: number | string | { toString(): strin
 
 function mapProviderError(error: unknown): StreamingSttError {
   if (error instanceof StreamingSttError) return error;
-  const code = (error as { code?: unknown } | null)?.code;
-  const message = error instanceof Error ? error.message.slice(0, 500) : null;
-  if (code === 4 || code === 'DEADLINE_EXCEEDED') return new StreamingSttError('VOICE_STT_TIMEOUT', code, message);
-  if (code === 1 || code === 'CANCELLED') return new StreamingSttError('VOICE_CANCELLED', code, message);
+  if (error instanceof CircuitBreakerError) {
+    return new StreamingSttError('VOICE_STT_UNAVAILABLE');
+  }
+  const code = (error as { code?: unknown } | null | undefined)?.code;
+  const message = (error as { message?: unknown } | null | undefined)?.message;
+  const normalizedMessage = typeof message === 'string' ? message : null;
+  if (code === 4 || code === 'DEADLINE_EXCEEDED') {
+    return new StreamingSttError('VOICE_STT_TIMEOUT', typeof code === 'string' || typeof code === 'number' ? code : null, normalizedMessage);
+  }
+  if (code === 8 || code === 'RESOURCE_EXHAUSTED') {
+    return new StreamingSttError('VOICE_STT_QUOTA_EXCEEDED', typeof code === 'string' || typeof code === 'number' ? code : null, normalizedMessage);
+  }
+  if (code === 1 || code === 'CANCELLED' || normalizedMessage?.includes('cancelled')) {
+    return new StreamingSttError('VOICE_CANCELLED', typeof code === 'string' || typeof code === 'number' ? code : null, normalizedMessage);
+  }
   return new StreamingSttError(
     'VOICE_STT_UNAVAILABLE',
     typeof code === 'string' || typeof code === 'number' ? code : null,
-    message,
+    normalizedMessage,
   );
 }
 
 export class GoogleStreamingSttAdapter {
+  public readonly circuitBreaker: CircuitBreaker;
+  private readonly client: StreamingSpeechClient;
+  private readonly resilienceConfig?: ProviderResilienceConfig;
+
   public constructor(
     private readonly config: StreamingSttConfig,
-    private readonly client: StreamingSpeechClient = new v2.SpeechClient({
-      projectId: config.projectId,
-      apiEndpoint: config.location && config.location !== 'global'
-        ? `${config.location}-speech.googleapis.com`
-        : undefined,
-    }) as unknown as StreamingSpeechClient,
-  ) {}
+    clientOrResilience?: StreamingSpeechClient | ProviderResilienceConfig,
+    resilienceConfig?: ProviderResilienceConfig,
+  ) {
+    if (clientOrResilience && '_streamingRecognize' in clientOrResilience) {
+      this.client = clientOrResilience;
+      this.resilienceConfig = resilienceConfig;
+    } else {
+      this.resilienceConfig = clientOrResilience;
+      this.client = new v2.SpeechClient({
+        projectId: config.projectId,
+        apiEndpoint: config.location && config.location !== 'global'
+          ? `${config.location}-speech.googleapis.com`
+          : undefined,
+      }) as unknown as StreamingSpeechClient;
+    }
+    this.circuitBreaker = new CircuitBreaker('google_stt/streaming', {
+      failureThreshold: this.resilienceConfig?.circuitBreakerFailureThreshold ?? 3,
+      openDurationMs: this.resilienceConfig?.circuitBreakerOpenDurationMs ?? 15_000,
+      halfOpenProbeLimit: this.resilienceConfig?.circuitBreakerHalfOpenProbeLimit ?? 1,
+      failureWindowMs: this.resilienceConfig?.circuitBreakerFailureWindowMs ?? 60_000,
+    });
+  }
 
   public open(
     callbacks: StreamingSttCallbacks,
     signal?: AbortSignal,
     turnPhrases: readonly string[] = [],
   ): StreamingSttSession {
-    const stream = this.client._streamingRecognize({ timeout: this.config.timeoutMs });
+    let permit: CircuitPermit;
+    try {
+      permit = this.circuitBreaker.acquire();
+    } catch (err) {
+      throw mapProviderError(err);
+    }
+
+    let stream: CancellableStream;
+    try {
+      stream = this.client._streamingRecognize({ timeout: this.config.timeoutMs });
+    } catch (err) {
+      const mapped = mapProviderError(err);
+      if (mapped.code === 'VOICE_STT_UNAVAILABLE' || mapped.code === 'VOICE_STT_TIMEOUT') {
+        permit.recordFailure();
+      } else {
+        permit.release();
+      }
+      if (mapped.code === 'VOICE_STT_QUOTA_EXCEEDED') {
+        getResilienceObserver()?.recordQuotaRejection('google_stt');
+      }
+      throw mapped;
+    }
+
     let settled = false;
     let settledError: StreamingSttError | null = null;
     let finishRequested = false;
@@ -93,12 +153,21 @@ export class GoogleStreamingSttAdapter {
     const settleSuccess = () => {
       if (settled) return;
       settled = true;
+      permit.recordSuccess();
       resolveCompleted();
     };
     const settleError = (error: unknown) => {
       if (settled) return;
       settled = true;
       settledError = mapProviderError(error);
+      if (settledError.code === 'VOICE_STT_UNAVAILABLE' || settledError.code === 'VOICE_STT_TIMEOUT') {
+        permit.recordFailure();
+      } else {
+        permit.release();
+      }
+      if (settledError.code === 'VOICE_STT_QUOTA_EXCEEDED') {
+        getResilienceObserver()?.recordQuotaRejection('google_stt');
+      }
       rejectCompleted(settledError);
     };
     const onAbort = () => {
@@ -121,36 +190,53 @@ export class GoogleStreamingSttAdapter {
       }
     });
     stream.once('error', settleError);
-    stream.once('end', settleSuccess);
+    stream.once('end', () => {
+      if (!finishRequested) {
+        settleError(new StreamingSttError('VOICE_STT_UNAVAILABLE'));
+        return;
+      }
+      settleSuccess();
+    });
     stream.once('close', () => {
-      if (finishRequested) settleSuccess();
+      if (!settled) {
+        if (finishRequested) {
+          settleSuccess();
+        } else {
+          settleError(new StreamingSttError('VOICE_STT_UNAVAILABLE'));
+        }
+      }
     });
     signal?.addEventListener('abort', onAbort, { once: true });
 
     const phrases = normalizeSpeechPhrases([...(this.config.phrases ?? []), ...turnPhrases]);
-    stream.write({
-      recognizer: `projects/${this.config.projectId}/locations/${this.config.location}/recognizers/_`,
-      streamingConfig: {
-        config: {
-          explicitDecodingConfig: {
-            encoding: 'LINEAR16',
-            sampleRateHertz: 16_000,
-            audioChannelCount: 1,
-          },
-          languageCodes: [this.config.languageCode],
-          model: this.config.model,
-          features: { enableAutomaticPunctuation: true },
-          ...(phrases.length > 0 ? {
-            adaptation: {
-              phraseSets: [{
-                inlinePhraseSet: { phrases: phrases.map((value) => ({ value })) },
-              }],
+    try {
+      stream.write({
+        recognizer: `projects/${this.config.projectId}/locations/${this.config.location}/recognizers/_`,
+        streamingConfig: {
+          config: {
+            explicitDecodingConfig: {
+              encoding: 'LINEAR16',
+              sampleRateHertz: 16_000,
+              audioChannelCount: 1,
             },
-          } : {}),
+            languageCodes: [this.config.languageCode],
+            model: this.config.model,
+            features: { enableAutomaticPunctuation: true },
+            ...(phrases.length > 0 ? {
+              adaptation: {
+                phraseSets: [{
+                  inlinePhraseSet: { phrases: phrases.map((value) => ({ value })) },
+                }],
+              },
+            } : {}),
+          },
+          streamingFeatures: { interimResults: true },
         },
-        streamingFeatures: { interimResults: true },
-      },
-    });
+      });
+    } catch (err) {
+      settleError(err);
+      throw settledError ?? mapProviderError(err);
+    }
 
     return {
       write: async (pcm) => {
@@ -159,10 +245,21 @@ export class GoogleStreamingSttAdapter {
         if (pcm.length === 0 || pcm.length > 15_000 || pcm.length % 2 !== 0) {
           throw new StreamingSttError('VOICE_STT_UNAVAILABLE');
         }
-        if (!stream.write({ audio: pcm })) {
+        let written: boolean;
+        try {
+          written = stream.write({ audio: pcm });
+        } catch (err) {
+          settleError(err);
+          throw settledError ?? mapProviderError(err);
+        }
+        if (!written) {
           await new Promise<void>((resolve, reject) => {
             const onDrain = () => { cleanup(); resolve(); };
-            const onError = (error: unknown) => { cleanup(); reject(mapProviderError(error)); };
+            const onError = (error: unknown) => {
+              cleanup();
+              settleError(error);
+              reject(settledError ?? mapProviderError(error));
+            };
             const cleanup = () => {
               stream.off('drain', onDrain);
               stream.off('error', onError);
@@ -175,7 +272,12 @@ export class GoogleStreamingSttAdapter {
       finish: async () => {
         if (!finishRequested) {
           finishRequested = true;
-          stream.end();
+          try {
+            stream.end();
+          } catch (err) {
+            settleError(err);
+            throw settledError ?? mapProviderError(err);
+          }
         }
         try {
           await completed;

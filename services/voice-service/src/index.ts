@@ -22,6 +22,7 @@ import { CachedSpeechAdaptationProvider, ConfiguredSpeechPhraseSource } from './
 import { GoogleStreamingTtsAdapter } from './streaming/googleStreamingTts.js';
 import { StreamingOutputOrchestrator } from './streaming/streamingOutputOrchestrator.js';
 import { StreamingMeetingAudioPublisher } from './livekit/StreamingMeetingAudioPublisher.js';
+import { setResilienceObserver, type ProviderResilienceConfig } from './resilience.js';
 
 export interface VoiceServiceInstance {
   config: VoiceServiceConfig;
@@ -34,6 +35,8 @@ export function createVoiceService(
   logger: VoiceServiceLogger = createVoiceServiceLogger(config),
 ): VoiceServiceInstance {
   const voiceMetrics = config.voiceMetricsEnabled ? new VoiceServiceMetrics() : undefined;
+  const unsubscribeResilience = voiceMetrics ? setResilienceObserver(voiceMetrics) : undefined;
+
   const redis = config.meetingVoiceEnabled && config.voiceTurnTokenSecret ? new Redis(config.redisUrl) : null;
   const turnTokenVerifier = config.voiceTurnTokenSecret && redis
     ? new VoiceTurnTokenVerifier({ secret: config.voiceTurnTokenSecret, replayGuard: new RedisTurnTokenReplayGuard(redis) })
@@ -55,6 +58,15 @@ export function createVoiceService(
     config.livekitApiKey &&
     config.livekitApiSecret,
   );
+  const resilienceConfig: ProviderResilienceConfig = {
+    circuitBreakerFailureThreshold: config.circuitBreakerFailureThreshold,
+    circuitBreakerOpenDurationMs: config.circuitBreakerOpenDurationMs,
+    circuitBreakerHalfOpenProbeLimit: config.circuitBreakerHalfOpenProbeLimit,
+    circuitBreakerFailureWindowMs: config.circuitBreakerFailureWindowMs,
+    providerMaxRetryAttempts: config.providerMaxRetryAttempts,
+    providerRetryBaseBackoffMs: config.providerRetryBaseBackoffMs,
+    providerRetryMaxBackoffMs: config.providerRetryMaxBackoffMs,
+  };
   const meetingAiClient = config.meetingAiInternalUrl && config.meetingAiInternalServiceKey
     ? new MeetingAiClient(
       config.meetingAiInternalUrl,
@@ -62,6 +74,7 @@ export function createVoiceService(
       config.meetingAiTimeoutMs,
       config.meetingAiStreamFirstEventTimeoutMs,
       config.meetingAiStreamIdleEventTimeoutMs,
+      resilienceConfig,
     )
     : null;
   const voiceControlClient = config.voiceControlInternalUrl && config.voiceInternalServiceKey
@@ -78,7 +91,7 @@ export function createVoiceService(
         idleAudioTimeoutMs: config.googleStreamingTtsIdleAudioTimeoutMs,
         totalTimeoutMs: config.googleStreamingTtsTotalTimeoutMs,
         maximumQueuedBytes: config.googleStreamingTtsMaxQueuedBytes,
-      }),
+      }, resilienceConfig),
       streamingAudioPublisher,
       {
         minimumChars: config.voiceStreamingTtsSentenceMinimumChars,
@@ -97,7 +110,7 @@ export function createVoiceService(
         model: config.googleSttModel,
         languageCode: config.googleSttLanguage,
         timeoutMs: config.sttTimeoutMs,
-      }),
+      }, resilienceConfig),
       ai: meetingAiClient!,
       tts: new GoogleBatchTtsAdapter({
         projectId: config.googleCloudProject!,
@@ -105,7 +118,7 @@ export function createVoiceService(
         voiceName: config.googleTtsVoice,
         audioEncoding: config.googleTtsAudioEncoding,
         timeoutMs: config.googleTtsTimeoutMs,
-      }),
+      }, resilienceConfig),
       publisher: meetingAudioPublisher,
       control: voiceControlClient!,
       logger,
@@ -122,7 +135,7 @@ export function createVoiceService(
         model: config.googleStreamingSttModel,
         languageCode: config.googleSttLanguage,
         timeoutMs: config.streamingSttTimeoutMs,
-      }),
+      }, resilienceConfig),
       control: voiceControlClient,
       pipeline: orchestrator,
       adaptation: new CachedSpeechAdaptationProvider(
@@ -192,6 +205,7 @@ export function createVoiceService(
     logger,
     timeoutMs: config.shutdownTimeoutMs,
     onClose: async () => {
+      unsubscribeResilience?.();
       await Promise.allSettled([
         streamingSinkFactory?.cancelAll() ?? Promise.resolve(),
         orchestrator?.cancelAllAndWait() ?? Promise.resolve(),

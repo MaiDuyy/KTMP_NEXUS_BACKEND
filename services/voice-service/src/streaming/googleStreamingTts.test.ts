@@ -146,3 +146,66 @@ test('maps caller cancellation and provider deadlines to stable errors', async (
     (error: unknown) => error instanceof StreamingTtsError && error.code === 'VOICE_TTS_TIMEOUT',
   );
 });
+
+test('HIGH-R1-01: 4 consecutive synchronous quota errors keep code VOICE_TTS_QUOTA_EXCEEDED and circuit CLOSED', () => {
+  let attempts = 0;
+  const adapter = new GoogleStreamingTtsAdapter({
+    projectId: 'project-1',
+    location: 'asia-southeast1',
+    voiceName: 'vi-VN-Chirp3-HD-Charon',
+    sampleRateHertz: 24_000,
+    firstAudioTimeoutMs: 20,
+    idleAudioTimeoutMs: 20,
+    totalTimeoutMs: 100,
+    maximumQueuedBytes: 256,
+  }, {
+    streamingSynthesize: () => {
+      attempts++;
+      const err = new Error('Quota exceeded');
+      (err as any).code = 8;
+      throw err;
+    },
+  });
+
+  for (let i = 0; i < 4; i++) {
+    assert.throws(
+      () => adapter.open(),
+      (err: any) => err instanceof StreamingTtsError && err.code === 'VOICE_TTS_QUOTA_EXCEEDED',
+      `Attempt ${i + 1} must throw VOICE_TTS_QUOTA_EXCEEDED`,
+    );
+  }
+  assert.equal(attempts, 4);
+  assert.equal(adapter.circuitBreaker.getState(), 'CLOSED', 'Circuit must remain CLOSED after quota errors');
+});
+
+test('HIGH-R1-02: synchronous stream.write error in open() maps to stable error and completes permit', () => {
+  const stream = new FakeStream();
+  stream.write = () => {
+    const err = new Error('Resource exhausted');
+    (err as any).code = 8;
+    throw err;
+  };
+
+  const adapter = createAdapter(stream);
+  assert.throws(
+    () => adapter.open(),
+    (err: any) => err instanceof StreamingTtsError && err.code === 'VOICE_TTS_QUOTA_EXCEEDED',
+  );
+  assert.equal(adapter.circuitBreaker.getState(), 'CLOSED');
+});
+
+test('HIGH-R1-04: TTS completing without any audio chunk fails with VOICE_TTS_UNAVAILABLE and does not record success', async () => {
+  const stream = new FakeStream();
+  const adapter = createAdapter(stream);
+  const session = adapter.open();
+
+  await session.writeSegment(0, 'Xin chao');
+
+  // Trigger provider end without emitting any audio chunk
+  stream.emit('end');
+
+  await assert.rejects(
+    session.finish(),
+    (err: any) => err instanceof StreamingTtsError && err.code === 'VOICE_TTS_UNAVAILABLE',
+  );
+});
