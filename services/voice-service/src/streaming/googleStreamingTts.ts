@@ -1,5 +1,12 @@
 import { TextToSpeechClient } from '@google-cloud/text-to-speech';
 import type { CancellableStream } from 'google-gax';
+import {
+  CircuitBreaker,
+  CircuitBreakerError,
+  CircuitPermit,
+  ProviderResilienceConfig,
+  getResilienceObserver,
+} from '../resilience.js';
 
 export interface StreamingTtsConfig {
   projectId: string;
@@ -42,7 +49,7 @@ export interface StreamingTextToSpeechClient {
 
 export class StreamingTtsError extends Error {
   public constructor(
-    public readonly code: 'VOICE_TTS_TIMEOUT' | 'VOICE_TTS_UNAVAILABLE' | 'VOICE_CANCELLED' | 'VOICE_NO_SPEECH' | 'VOICE_SPEECH_TOO_LONG',
+    public readonly code: 'VOICE_TTS_TIMEOUT' | 'VOICE_TTS_UNAVAILABLE' | 'VOICE_TTS_QUOTA_EXCEEDED' | 'VOICE_CANCELLED' | 'VOICE_NO_SPEECH' | 'VOICE_SPEECH_TOO_LONG',
     public readonly providerCode: string | number | null = null,
     public readonly providerMessage: string | null = null,
   ) {
@@ -103,11 +110,14 @@ class AsyncAudioQueue implements AsyncIterable<StreamingPcmChunk> {
 
 function mapProviderError(error: unknown): StreamingTtsError {
   if (error instanceof StreamingTtsError) return error;
+  if (error instanceof CircuitBreakerError) return new StreamingTtsError('VOICE_TTS_UNAVAILABLE');
   const code = (error as { code?: unknown } | null)?.code;
   const message = error instanceof Error ? error.message.slice(0, 500) : null;
-  if (code === 4 || code === 'DEADLINE_EXCEEDED') return new StreamingTtsError('VOICE_TTS_TIMEOUT', code, message);
-  if (code === 1 || code === 'CANCELLED') return new StreamingTtsError('VOICE_CANCELLED', code, message);
-  return new StreamingTtsError('VOICE_TTS_UNAVAILABLE', typeof code === 'string' || typeof code === 'number' ? code : null, message);
+  const providerCode = typeof code === 'string' || typeof code === 'number' ? code : null;
+  if (code === 8 || code === 'RESOURCE_EXHAUSTED') return new StreamingTtsError('VOICE_TTS_QUOTA_EXCEEDED', providerCode, message);
+  if (code === 4 || code === 'DEADLINE_EXCEEDED') return new StreamingTtsError('VOICE_TTS_TIMEOUT', providerCode, message);
+  if (code === 1 || code === 'CANCELLED' || (error instanceof Error && error.message === 'AbortError')) return new StreamingTtsError('VOICE_CANCELLED', providerCode, message);
+  return new StreamingTtsError('VOICE_TTS_UNAVAILABLE', providerCode, message);
 }
 
 function toAudioBuffer(value: unknown): Buffer | null {
@@ -118,24 +128,66 @@ function toAudioBuffer(value: unknown): Buffer | null {
 }
 
 export class GoogleStreamingTtsAdapter {
+  public readonly circuitBreaker: CircuitBreaker;
+  private readonly client: StreamingTextToSpeechClient;
+  private readonly resilienceConfig?: ProviderResilienceConfig;
+
   public constructor(
     private readonly config: StreamingTtsConfig,
-    private readonly client: StreamingTextToSpeechClient = new TextToSpeechClient({
-      projectId: config.projectId,
-      apiEndpoint: config.location && config.location !== 'global'
-        ? `${config.location}-texttospeech.googleapis.com`
-        : undefined,
-    }) as unknown as StreamingTextToSpeechClient,
-  ) {}
+    clientOrResilience?: StreamingTextToSpeechClient | ProviderResilienceConfig,
+    resilienceConfig?: ProviderResilienceConfig,
+  ) {
+    if (clientOrResilience && 'streamingSynthesize' in clientOrResilience) {
+      this.client = clientOrResilience;
+      this.resilienceConfig = resilienceConfig;
+    } else {
+      this.resilienceConfig = clientOrResilience;
+      this.client = new TextToSpeechClient({
+        projectId: config.projectId,
+        apiEndpoint: config.location && config.location !== 'global'
+          ? `${config.location}-texttospeech.googleapis.com`
+          : undefined,
+      }) as unknown as StreamingTextToSpeechClient;
+    }
+    this.circuitBreaker = new CircuitBreaker('google_tts/streaming', {
+      failureThreshold: this.resilienceConfig?.circuitBreakerFailureThreshold ?? 3,
+      openDurationMs: this.resilienceConfig?.circuitBreakerOpenDurationMs ?? 15_000,
+      halfOpenProbeLimit: this.resilienceConfig?.circuitBreakerHalfOpenProbeLimit ?? 1,
+      failureWindowMs: this.resilienceConfig?.circuitBreakerFailureWindowMs ?? 60_000,
+    });
+  }
 
   public open(signal?: AbortSignal): StreamingTtsSession {
-    const stream = this.client.streamingSynthesize();
+    let permit: CircuitPermit;
+    try {
+      permit = this.circuitBreaker.acquire();
+    } catch (err) {
+      throw mapProviderError(err);
+    }
+
+    let stream: CancellableStream;
+    try {
+      stream = this.client.streamingSynthesize();
+    } catch (err) {
+      const mapped = mapProviderError(err);
+      if (mapped.code === 'VOICE_TTS_TIMEOUT' || mapped.code === 'VOICE_TTS_UNAVAILABLE') {
+        permit.recordFailure();
+      } else {
+        permit.release();
+      }
+      if (mapped.code === 'VOICE_TTS_QUOTA_EXCEEDED') {
+        getResilienceObserver()?.recordQuotaRejection('google_tts');
+      }
+      throw mapped;
+    }
+
     const queue = new AsyncAudioQueue(this.config.maximumQueuedBytes);
     const languageCode = this.config.voiceName.split('-').slice(0, 2).join('-');
     let terminal = false;
     let nextSegmentSequence = 0;
     let nextAudioSequence = 0;
     let finishRequested = false;
+    let hasReceivedAudio = false;
     const ledger = new Map<number, StreamingTtsSegmentState>();
     let audioTimeout: ReturnType<typeof setTimeout> | null = null;
     let totalTimeout: ReturnType<typeof setTimeout> | null = null;
@@ -162,6 +214,14 @@ export class GoogleStreamingTtsAdapter {
       for (const [sequence, current] of ledger) {
         if (current === 'SENT_TO_TTS' || current === 'AUDIO_STARTED') ledger.set(sequence, state);
       }
+      if (mapped.code === 'VOICE_TTS_TIMEOUT' || mapped.code === 'VOICE_TTS_UNAVAILABLE') {
+        permit.recordFailure();
+      } else {
+        permit.release();
+      }
+      if (mapped.code === 'VOICE_TTS_QUOTA_EXCEEDED') {
+        getResilienceObserver()?.recordQuotaRejection('google_tts');
+      }
       queue.close(mapped);
       stream.cancel();
       signal?.removeEventListener('abort', onAbort);
@@ -174,8 +234,13 @@ export class GoogleStreamingTtsAdapter {
     const onAbort = () => fail(new StreamingTtsError('VOICE_CANCELLED'));
     const complete = () => {
       if (terminal) return;
+      if (!hasReceivedAudio) {
+        fail(new StreamingTtsError('VOICE_TTS_UNAVAILABLE'));
+        return;
+      }
       terminal = true;
       clearTimeouts();
+      permit.recordSuccess();
       for (const [sequence, state] of ledger) {
         if (state === 'SENT_TO_TTS' || state === 'AUDIO_STARTED') ledger.set(sequence, 'AUDIO_COMPLETED');
       }
@@ -188,6 +253,7 @@ export class GoogleStreamingTtsAdapter {
       if (terminal) return;
       const audio = toAudioBuffer(response.audioContent);
       if (!audio || audio.length === 0) return;
+      hasReceivedAudio = true;
       armAudioTimeout(this.config.idleAudioTimeoutMs);
       const nextAudioStarted = [...ledger.entries()].find(([, state]) => state === 'SENT_TO_TTS');
       if (nextAudioStarted) ledger.set(nextAudioStarted[0], 'AUDIO_STARTED');
@@ -215,15 +281,20 @@ export class GoogleStreamingTtsAdapter {
     armAudioTimeout(this.config.firstAudioTimeoutMs);
     totalTimeout = setTimeout(() => fail(new StreamingTtsError('VOICE_TTS_TIMEOUT')), this.config.totalTimeoutMs);
 
-    stream.write({
-      streamingConfig: {
-        voice: { languageCode, name: this.config.voiceName },
-        streamingAudioConfig: {
-          audioEncoding: 'PCM',
-          sampleRateHertz: this.config.sampleRateHertz,
+    try {
+      stream.write({
+        streamingConfig: {
+          voice: { languageCode, name: this.config.voiceName },
+          streamingAudioConfig: {
+            audioEncoding: 'PCM',
+            sampleRateHertz: this.config.sampleRateHertz,
+          },
         },
-      },
-    });
+      });
+    } catch (err) {
+      fail(err);
+      throw mapProviderError(err);
+    }
 
     return {
       audio: queue,
@@ -236,10 +307,21 @@ export class GoogleStreamingTtsAdapter {
           throw new StreamingTtsError('VOICE_TTS_UNAVAILABLE');
         }
         ledger.set(segmentSequence, 'SENT_TO_TTS');
-        if (!stream.write({ input: { text: clean } })) {
+        let written: boolean;
+        try {
+          written = stream.write({ input: { text: clean } });
+        } catch (err) {
+          fail(err);
+          throw mapProviderError(err);
+        }
+        if (!written) {
           await new Promise<void>((resolve, reject) => {
             const onDrain = () => { cleanup(); resolve(); };
-            const onError = (error: unknown) => { cleanup(); reject(mapProviderError(error)); };
+            const onError = (error: unknown) => {
+              cleanup();
+              fail(error);
+              reject(mapProviderError(error));
+            };
             const cleanup = () => { stream.off('drain', onDrain); stream.off('error', onError); };
             stream.once('drain', onDrain);
             stream.once('error', onError);
@@ -253,7 +335,12 @@ export class GoogleStreamingTtsAdapter {
         }
         if (!finishRequested && !terminal) {
           finishRequested = true;
-          stream.end();
+          try {
+            stream.end();
+          } catch (err) {
+            fail(err);
+            throw mapProviderError(err);
+          }
         }
         await completed;
       },

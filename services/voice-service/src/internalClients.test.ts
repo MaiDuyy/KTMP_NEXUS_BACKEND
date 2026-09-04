@@ -86,3 +86,122 @@ test('MeetingAiClient deduplicates repeated source metadata while preserving sou
     assert.deepEqual(events.map((event) => event.type), ['source', 'done']);
   });
 });
+
+test('MeetingAiClient rejects 2xx response with invalid Content-Type as VOICE_AI_UNAVAILABLE', async () => {
+  const client = new MeetingAiClient('http://meeting-ai.test/internal/meeting-ai', 'secret', 2_000, 500, 500);
+
+  const original = globalThis.fetch;
+  globalThis.fetch = async () => {
+    return new Response(JSON.stringify({ error: 'not sse' }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    });
+  };
+
+  try {
+    const iterator = client.stream(request);
+    await assert.rejects(
+      iterator.next(),
+      (err: any) => err instanceof InternalServiceError && err.code === 'VOICE_AI_UNAVAILABLE',
+    );
+  } finally {
+    globalThis.fetch = original;
+  }
+});
+
+test('MeetingAiClient resilience: no redispatch on network drop or failure before delta', async () => {
+  const client = new MeetingAiClient('http://meeting-ai.test/internal/meeting-ai', 'secret', 2_000, 500, 500);
+
+  let attempts = 0;
+  const original = globalThis.fetch;
+  globalThis.fetch = async () => {
+    attempts++;
+    throw new Error('Network failure before response');
+  };
+
+  try {
+    const iterator = client.stream(request);
+    await assert.rejects(
+      iterator.next(),
+      (err: any) => err instanceof InternalServiceError && err.code === 'VOICE_AI_UNAVAILABLE',
+    );
+    assert.equal(attempts, 1, 'Must not redispatch after initial failure');
+  } finally {
+    globalThis.fetch = original;
+  }
+});
+
+test('MeetingAiClient resilience: no redispatch after first delta', async () => {
+  const client = new MeetingAiClient('http://meeting-ai.test/internal/meeting-ai', 'secret', 2_000, 500, 500);
+
+  let attempts = 0;
+  const original = globalThis.fetch;
+  globalThis.fetch = async () => {
+    attempts++;
+    return new Response(new ReadableStream({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode(
+          'event: speech.delta\ndata: {"type":"speech.delta","version":1,"turnId":"turn-1","sequence":0,"text":"Hello"}\n\n'
+        ));
+        setTimeout(() => controller.error(new Error('Network drop mid-stream')), 10);
+      }
+    }), { headers: { 'content-type': 'text/event-stream' } });
+  };
+
+  try {
+    const iterator = client.stream(request);
+    const first = await iterator.next();
+    assert.equal(first.value?.type, 'speech.delta');
+
+    await assert.rejects(
+      iterator.next(),
+      (err: any) => err instanceof InternalServiceError && err.code === 'VOICE_AI_UNAVAILABLE',
+    );
+    assert.equal(attempts, 1, 'Must not redispatch after delta received');
+  } finally {
+    globalThis.fetch = original;
+  }
+});
+
+test('MeetingAiClient does not get stuck in HALF_OPEN when consumer breaks early / returns (HIGH-R1-03)', async () => {
+  const client = new MeetingAiClient('http://meeting-ai.test/internal/meeting-ai', 'secret', 2_000, 500, 500);
+
+  // Trip streaming circuit to OPEN
+  client.streamingCircuitBreaker.recordFailure();
+  client.streamingCircuitBreaker.recordFailure();
+  client.streamingCircuitBreaker.recordFailure();
+  assert.equal(client.streamingCircuitBreaker.getState(), 'OPEN');
+
+  // Advance time past openDurationMs
+  (client.streamingCircuitBreaker as any).lastFailureTime = Date.now() - 20_000;
+
+  const original = globalThis.fetch;
+  globalThis.fetch = async () => {
+    return new Response(new ReadableStream({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode(
+          'event: speech.delta\ndata: {"type":"speech.delta","version":1,"turnId":"turn-1","sequence":0,"text":"First"}\n\n'
+        ));
+      }
+    }), { headers: { 'content-type': 'text/event-stream' } });
+  };
+
+  try {
+    // Consumer only reads 1 delta then breaks (generator.return())
+    for await (const event of client.stream(request)) {
+      if (event.type === 'speech.delta') {
+        break;
+      }
+    }
+
+    assert.equal(client.streamingCircuitBreaker.getState(), 'HALF_OPEN');
+
+    // Next probe must NOT be rejected because permit was released in finally!
+    const permit = client.streamingCircuitBreaker.acquire();
+    assert.ok(permit, 'Next probe should be acquired without rejection');
+    permit.recordSuccess();
+    assert.equal(client.streamingCircuitBreaker.getState(), 'CLOSED');
+  } finally {
+    globalThis.fetch = original;
+  }
+});

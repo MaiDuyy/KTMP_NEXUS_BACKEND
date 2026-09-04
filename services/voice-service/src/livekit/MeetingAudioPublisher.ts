@@ -121,17 +121,34 @@ async function settlesWithin(operation: Promise<unknown>, timeoutMs: number): Pr
   }
 }
 
+import { CircuitBreaker, CircuitBreakerError, CircuitPermit } from '../resilience.js';
+
 export class MeetingAudioPublisher {
   private disposed = false;
   private disposePromise: Promise<void> | null = null;
   private readonly sessions = new Map<string, ParticipantSession>();
   private readonly closingSessions = new Map<string, Promise<void>>();
+  private readonly connectCircuitBreaker: CircuitBreaker;
+  private readonly publishCircuitBreaker: CircuitBreaker;
 
   constructor(
     private readonly config: VoiceServiceConfig,
     private readonly tokenService: LivekitTokenService,
     private readonly adapter: ILivekitAdapter,
-  ) {}
+  ) {
+    this.connectCircuitBreaker = new CircuitBreaker('livekit/connect', {
+      failureThreshold: this.config.circuitBreakerFailureThreshold,
+      openDurationMs: this.config.circuitBreakerOpenDurationMs,
+      halfOpenProbeLimit: this.config.circuitBreakerHalfOpenProbeLimit,
+      failureWindowMs: this.config.circuitBreakerFailureWindowMs,
+    });
+    this.publishCircuitBreaker = new CircuitBreaker('livekit/publish', {
+      failureThreshold: this.config.circuitBreakerFailureThreshold,
+      openDurationMs: this.config.circuitBreakerOpenDurationMs,
+      halfOpenProbeLimit: this.config.circuitBreakerHalfOpenProbeLimit,
+      failureWindowMs: this.config.circuitBreakerFailureWindowMs,
+    });
+  }
 
   async publish(input: PublishMeetingAudioInput): Promise<PublishMeetingAudioResult> {
     if (this.disposed) {
@@ -211,7 +228,30 @@ export class MeetingAudioPublisher {
         session.connectPromise = this.connectAndPublishTrack(input, session);
       }
       await session.connectPromise;
-      const result = await this.publishFrames(input, session, parsed.samples, parsed.sampleRate, parsed.channels);
+
+      let publishPermit: CircuitPermit;
+      try {
+        publishPermit = this.publishCircuitBreaker.acquire();
+      } catch (err) {
+        if (err instanceof CircuitBreakerError) {
+          throw new VoiceError("VOICE_LIVEKIT_PUBLISH_FAILED", "Publish circuit is OPEN");
+        }
+        throw err;
+      }
+
+      let result: PublishMeetingAudioResult;
+      try {
+        result = await this.publishFrames(input, session, parsed.samples, parsed.sampleRate, parsed.channels);
+        publishPermit.recordSuccess();
+      } catch (error) {
+        const isTurnCancellation = error instanceof VoiceError && error.code === "VOICE_CANCELLED";
+        if (isTurnCancellation) {
+          publishPermit.release();
+        } else {
+          publishPermit.recordFailure();
+        }
+        throw error;
+      }
 
       session.completedTurnIds.add(input.turnId);
       if (session.completedTurnIds.size > 50) {
@@ -234,6 +274,16 @@ export class MeetingAudioPublisher {
   }
 
   private async connectAndPublishTrack(input: PublishMeetingAudioInput, session: ParticipantSession): Promise<void> {
+    let connectPermit: CircuitPermit;
+    try {
+      connectPermit = this.connectCircuitBreaker.acquire();
+    } catch (err) {
+      if (err instanceof CircuitBreakerError) {
+        throw new VoiceError("VOICE_LIVEKIT_PUBLISH_FAILED", "Connect circuit is OPEN");
+      }
+      throw err;
+    }
+
     let token: string;
     try {
       token = await this.tokenService.generateToken({
@@ -241,6 +291,8 @@ export class MeetingAudioPublisher {
         meetingSessionId: input.meetingSessionId,
       });
     } catch (error) {
+      // Token/configuration failures are not LiveKit transport failures.
+      connectPermit.release();
       throw new VoiceError("VOICE_LIVEKIT_PUBLISH_FAILED", `Token generation failed: ${asError(error).message}`);
     }
 
@@ -258,8 +310,26 @@ export class MeetingAudioPublisher {
       await raceWithAbort(connectOperation, this.config.livekitConnectTimeoutMs, "Connect timeout", signals);
     } catch (error) {
       connectAbandoned = true;
+      const isCancellation = error instanceof VoiceError && error.code === 'VOICE_CANCELLED';
+      if (isCancellation) {
+        connectPermit.release();
+      } else {
+        connectPermit.recordFailure();
+      }
       if (error instanceof VoiceError) throw error;
       throw new VoiceError("VOICE_LIVEKIT_PUBLISH_FAILED", `Connect failed: ${asError(error).message}`);
+    }
+
+    connectPermit.recordSuccess();
+
+    let publishPermit: CircuitPermit;
+    try {
+      publishPermit = this.publishCircuitBreaker.acquire();
+    } catch (err) {
+      if (err instanceof CircuitBreakerError) {
+        throw new VoiceError("VOICE_LIVEKIT_PUBLISH_FAILED", "Publish circuit is OPEN");
+      }
+      throw err;
     }
 
     const publishOperation = session.room.publishTrack(session.track, { source: TrackSource.SOURCE_MICROPHONE });
@@ -278,10 +348,17 @@ export class MeetingAudioPublisher {
       await raceWithAbort(publishOperation, this.config.livekitConnectTimeoutMs, "Publish track timeout", signals);
     } catch (error) {
       publishAbandoned = true;
+      const isCancellation = error instanceof VoiceError && error.code === 'VOICE_CANCELLED';
+      if (isCancellation) {
+        publishPermit.release();
+      } else {
+        publishPermit.recordFailure();
+      }
       if (error instanceof VoiceError) throw error;
       throw new VoiceError("VOICE_LIVEKIT_PUBLISH_FAILED", `Publish track failed: ${asError(error).message}`);
     }
 
+    publishPermit.recordSuccess();
     session.connected = true;
     session.trackPublished = true;
   }

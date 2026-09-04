@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { loadVoiceServiceConfig } from "./config.js";
+import { MeetingAiClient } from "./internalClients.js";
 
 test("uses safe defaults without provider credentials", () => {
   const config = loadVoiceServiceConfig({ NODE_ENV: "test" });
@@ -36,6 +37,39 @@ test("uses safe defaults without provider credentials", () => {
   assert.equal(config.livekitAiParticipantName, "Nexus AI");
   assert.equal(config.livekitConnectTimeoutMs, 15000);
   assert.equal(config.livekitPlayoutTimeoutMs, 70000);
+  assert.equal(config.circuitBreakerFailureThreshold, 3);
+  assert.equal(config.circuitBreakerOpenDurationMs, 15_000);
+  assert.equal(config.circuitBreakerHalfOpenProbeLimit, 1);
+  assert.equal(config.circuitBreakerFailureWindowMs, 60_000);
+  assert.equal(config.providerMaxRetryAttempts, 2);
+  assert.equal(config.providerRetryBaseBackoffMs, 200);
+  assert.equal(config.providerRetryMaxBackoffMs, 2_000);
+});
+
+test('validates resilience config ranges and rejects invalid values', () => {
+  assert.throws(
+    () => loadVoiceServiceConfig({ VOICE_CIRCUIT_BREAKER_FAILURE_THRESHOLD: '11' }),
+    /VOICE_CIRCUIT_BREAKER_FAILURE_THRESHOLD must be between 1 and 10/,
+  );
+  assert.throws(
+    () => loadVoiceServiceConfig({ VOICE_CIRCUIT_BREAKER_OPEN_DURATION_MS: '500' }),
+    /VOICE_CIRCUIT_BREAKER_OPEN_DURATION_MS must be between 1000 and 60000/,
+  );
+  assert.throws(
+    () => loadVoiceServiceConfig({ VOICE_CIRCUIT_BREAKER_FAILURE_WINDOW_MS: '500' }),
+    /VOICE_CIRCUIT_BREAKER_FAILURE_WINDOW_MS must be between 1000 and 300000/,
+  );
+  assert.throws(
+    () => loadVoiceServiceConfig({ VOICE_PROVIDER_MAX_RETRY_ATTEMPTS: '3' }),
+    /VOICE_PROVIDER_MAX_RETRY_ATTEMPTS must be between 1 and 2/,
+  );
+  assert.throws(
+    () => loadVoiceServiceConfig({
+      VOICE_PROVIDER_RETRY_BASE_BACKOFF_MS: '900',
+      VOICE_PROVIDER_RETRY_MAX_BACKOFF_MS: '600',
+    }),
+    /VOICE_PROVIDER_RETRY_BASE_BACKOFF_MS must be less than or equal to VOICE_PROVIDER_RETRY_MAX_BACKOFF_MS/,
+  );
 });
 
 test('feature and metrics flags default off in production and reject invalid values', () => {
@@ -147,4 +181,44 @@ test("LiveKit credentials rules", () => {
   assert.equal(config.livekitUrl, "wss://test");
   assert.equal(config.livekitApiKey, "key");
   assert.equal(config.livekitApiSecret, "sec");
+});
+
+test('HIGH-R1-05: resilience config overrides are correctly parsed and wired to adapters', () => {
+  const config = loadVoiceServiceConfig({
+    VOICE_CIRCUIT_BREAKER_FAILURE_THRESHOLD: '5',
+    VOICE_CIRCUIT_BREAKER_OPEN_DURATION_MS: '20000',
+    VOICE_CIRCUIT_BREAKER_HALF_OPEN_PROBE_LIMIT: '2',
+    VOICE_CIRCUIT_BREAKER_FAILURE_WINDOW_MS: '120000',
+    VOICE_PROVIDER_MAX_RETRY_ATTEMPTS: '1',
+    VOICE_PROVIDER_RETRY_BASE_BACKOFF_MS: '100',
+    VOICE_PROVIDER_RETRY_MAX_BACKOFF_MS: '1000',
+  });
+
+  assert.equal(config.circuitBreakerFailureThreshold, 5);
+  assert.equal(config.circuitBreakerOpenDurationMs, 20_000);
+  assert.equal(config.circuitBreakerHalfOpenProbeLimit, 2);
+  assert.equal(config.circuitBreakerFailureWindowMs, 120_000);
+  assert.equal(config.providerMaxRetryAttempts, 1);
+  assert.equal(config.providerRetryBaseBackoffMs, 100);
+  assert.equal(config.providerRetryMaxBackoffMs, 1_000);
+
+  const resilienceConfig = {
+    circuitBreakerFailureThreshold: config.circuitBreakerFailureThreshold,
+    circuitBreakerOpenDurationMs: config.circuitBreakerOpenDurationMs,
+    circuitBreakerHalfOpenProbeLimit: config.circuitBreakerHalfOpenProbeLimit,
+    circuitBreakerFailureWindowMs: config.circuitBreakerFailureWindowMs,
+    providerMaxRetryAttempts: config.providerMaxRetryAttempts,
+    providerRetryBaseBackoffMs: config.providerRetryBaseBackoffMs,
+    providerRetryMaxBackoffMs: config.providerRetryMaxBackoffMs,
+  };
+
+  // Instantiate adapters with custom resilienceConfig and verify circuit breaker config
+  const aiClient = new MeetingAiClient('http://test', 'sec', 1000, 1000, 1000, resilienceConfig);
+  // Threshold is 5: 4 failures must NOT open the circuit
+  for (let i = 0; i < 4; i++) {
+    aiClient.bufferedCircuitBreaker.recordFailure();
+    assert.equal(aiClient.bufferedCircuitBreaker.getState(), 'CLOSED');
+  }
+  aiClient.bufferedCircuitBreaker.recordFailure(); // 5th failure trips to OPEN
+  assert.equal(aiClient.bufferedCircuitBreaker.getState(), 'OPEN');
 });

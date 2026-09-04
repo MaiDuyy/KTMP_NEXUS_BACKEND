@@ -108,17 +108,27 @@ function failure(error: unknown): { code: VoiceErrorCode; message: string; retry
     VOICE_NO_SPEECH: 'Không nhận diện được giọng nói trong đoạn ghi âm.',
     VOICE_STT_TIMEOUT: 'Nhận diện giọng nói quá thời gian chờ.',
     VOICE_STT_UNAVAILABLE: 'Dịch vụ nhận diện giọng nói tạm thời không khả dụng.',
+    VOICE_STT_QUOTA_EXCEEDED: 'Dịch vụ nhận diện giọng nói đã vượt quá hạn mức sử dụng.',
     VOICE_AI_TIMEOUT: 'AI trả lời quá thời gian chờ.',
     VOICE_AI_UNAVAILABLE: 'Dịch vụ AI tạm thời không khả dụng.',
+    VOICE_AI_QUOTA_EXCEEDED: 'Dịch vụ AI đã vượt quá hạn mức sử dụng.',
     VOICE_TTS_TIMEOUT: 'Tạo giọng đọc quá thời gian chờ.',
     VOICE_TTS_UNAVAILABLE: 'Dịch vụ giọng đọc tạm thời không khả dụng.',
+    VOICE_TTS_QUOTA_EXCEEDED: 'Dịch vụ giọng đọc đã vượt quá hạn mức sử dụng.',
     VOICE_LIVEKIT_PUBLISH_FAILED: 'Không thể phát câu trả lời AI vào cuộc họp.',
+    VOICE_LIVEKIT_QUOTA_EXCEEDED: 'Dịch vụ phát âm thanh cuộc họp đã vượt quá hạn mức sử dụng.',
     VOICE_INTERNAL_ERROR: 'Không thể hoàn tất lượt AI Voice.',
   };
   return {
     code,
     message: messages[code] ?? 'Không thể hoàn tất lượt AI Voice.',
-    retryable: code !== 'VOICE_NO_SPEECH' && code !== 'VOICE_SPEECH_TOO_LONG',
+    retryable:
+      code !== 'VOICE_NO_SPEECH' &&
+      code !== 'VOICE_SPEECH_TOO_LONG' &&
+      code !== 'VOICE_STT_QUOTA_EXCEEDED' &&
+      code !== 'VOICE_AI_QUOTA_EXCEEDED' &&
+      code !== 'VOICE_TTS_QUOTA_EXCEEDED' &&
+      code !== 'VOICE_LIVEKIT_QUOTA_EXCEEDED',
   };
 }
 

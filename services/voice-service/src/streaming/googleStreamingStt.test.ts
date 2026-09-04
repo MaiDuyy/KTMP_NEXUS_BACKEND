@@ -95,3 +95,63 @@ test('rejects audio larger than the V2 streaming request limit', async () => {
   );
   session.cancel();
 });
+
+test('HIGH-R1-01: 4 consecutive synchronous quota errors keep code VOICE_STT_QUOTA_EXCEEDED and circuit CLOSED', () => {
+  let attempts = 0;
+  const adapter = new GoogleStreamingSttAdapter({
+    projectId: 'project-1',
+    location: 'asia-southeast1',
+    model: 'chirp_3',
+    languageCode: 'vi-VN',
+    timeoutMs: 70_000,
+  }, {
+    _streamingRecognize: () => {
+      attempts++;
+      const err = new Error('Quota exceeded');
+      (err as any).code = 8;
+      throw err;
+    },
+  });
+
+  for (let i = 0; i < 4; i++) {
+    assert.throws(
+      () => adapter.open({ onResult: () => undefined }),
+      (err: any) => err instanceof StreamingSttError && err.code === 'VOICE_STT_QUOTA_EXCEEDED',
+      `Attempt ${i + 1} must throw VOICE_STT_QUOTA_EXCEEDED`,
+    );
+  }
+  assert.equal(attempts, 4);
+  assert.equal(adapter.circuitBreaker.getState(), 'CLOSED', 'Circuit must remain CLOSED after quota errors');
+});
+
+test('HIGH-R1-02: synchronous stream.write or stream.end error maps to stable error and completes permit', async () => {
+  const stream = new FakeStream();
+  // Override write to throw synchronously with gRPC code 8
+  stream.write = () => {
+    const err = new Error('Resource exhausted');
+    (err as any).code = 8;
+    throw err;
+  };
+
+  const adapter = createAdapter(stream);
+  // initial config write in open() throws synchronously
+  assert.throws(
+    () => adapter.open({ onResult: () => undefined }),
+    (err: any) => err instanceof StreamingSttError && err.code === 'VOICE_STT_QUOTA_EXCEEDED',
+  );
+  assert.equal(adapter.circuitBreaker.getState(), 'CLOSED');
+});
+
+test('HIGH-R1-04: premature stream end before finishRequested fails with VOICE_STT_UNAVAILABLE', async () => {
+  const stream = new FakeStream();
+  const adapter = createAdapter(stream);
+  const session = adapter.open({ onResult: () => undefined });
+
+  // Provider ends stream prematurely without client finish()
+  stream.emit('end');
+
+  await assert.rejects(
+    session.finish(),
+    (err: any) => err instanceof StreamingSttError && err.code === 'VOICE_STT_UNAVAILABLE',
+  );
+});

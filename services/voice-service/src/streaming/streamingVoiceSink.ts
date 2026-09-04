@@ -14,6 +14,7 @@ import {
 } from './googleStreamingStt.js';
 import type { SpeechAdaptationProvider } from './speechAdaptation.js';
 import type { StreamingSttOutcome, VoiceStreamingMetrics } from '../voiceMetrics.js';
+import { getResilienceObserver } from '../resilience.js';
 
 export interface FinalTranscriptPipeline {
   enqueueTranscript(input: {
@@ -71,6 +72,9 @@ export class StreamingVoiceSinkFactory implements VoicePcmStreamSinkFactory {
     const emitProviderFailure = async (error: unknown) => {
       const code = error instanceof StreamingSttError ? error.code : 'VOICE_STT_UNAVAILABLE';
       recordStt(code === 'VOICE_CANCELLED' ? 'cancelled' : code === 'VOICE_STT_TIMEOUT' ? 'timeout' : 'unavailable');
+      if (code === 'VOICE_STT_QUOTA_EXCEEDED') {
+        getResilienceObserver()?.recordQuotaRejection('google_stt');
+      }
       if (code === 'VOICE_CANCELLED') {
         await emitTerminal({
           ...base,
@@ -82,15 +86,18 @@ export class StreamingVoiceSinkFactory implements VoicePcmStreamSinkFactory {
         });
         return;
       }
+      const isQuota = code === 'VOICE_STT_QUOTA_EXCEEDED';
       await emitTerminal({
         ...base,
         kind: 'terminal',
         state: 'FAILED',
         code,
-        message: code === 'VOICE_STT_TIMEOUT'
+        message: isQuota
+          ? 'Dịch vụ nhận diện giọng nói trực tiếp đã vượt quá hạn mức sử dụng.'
+          : code === 'VOICE_STT_TIMEOUT'
           ? 'Nhận diện giọng nói trực tiếp quá thời gian chờ.'
           : 'Dịch vụ nhận diện giọng nói trực tiếp tạm thời không khả dụng.',
-        retryable: true,
+        retryable: !isQuota,
       });
     };
 

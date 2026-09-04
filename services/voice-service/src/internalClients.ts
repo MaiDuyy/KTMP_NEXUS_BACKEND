@@ -8,7 +8,7 @@ import { parseMeetingAiStreamEvent } from '@ott/shared';
 
 export class InternalServiceError extends Error {
   public constructor(
-    public readonly code: 'VOICE_CANCELLED' | 'VOICE_AI_TIMEOUT' | 'VOICE_AI_UNAVAILABLE' | 'VOICE_INTERNAL_ERROR',
+    public readonly code: 'VOICE_CANCELLED' | 'VOICE_AI_TIMEOUT' | 'VOICE_AI_UNAVAILABLE' | 'VOICE_AI_QUOTA_EXCEEDED' | 'VOICE_INTERNAL_ERROR',
   ) {
     super(code);
   }
@@ -105,6 +105,7 @@ async function requestJson<T>(options: {
   signal?: AbortSignal;
   timeoutCode: InternalServiceError['code'];
   unavailableCode: InternalServiceError['code'];
+  quotaCode?: InternalServiceError['code'];
 }): Promise<T> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort('timeout'), options.timeoutMs);
@@ -120,6 +121,9 @@ async function requestJson<T>(options: {
       body: JSON.stringify(options.body),
       signal: controller.signal,
     });
+    if (response.status === 429 && options.quotaCode) {
+      throw new InternalServiceError(options.quotaCode);
+    }
     if (response.status === 409) {
       throw new InternalServiceError('VOICE_CANCELLED');
     }
@@ -185,48 +189,104 @@ export class VoiceControlClient {
   }
 }
 
+import {
+  CircuitBreaker,
+  CircuitPermit,
+  ProviderResilienceConfig,
+  Resilience,
+  getResilienceObserver,
+} from './resilience.js';
+
 export class MeetingAiClient {
+  public readonly bufferedCircuitBreaker: CircuitBreaker;
+  public readonly streamingCircuitBreaker: CircuitBreaker;
+
   public constructor(
     private readonly url: string,
     private readonly serviceKey: string,
     private readonly timeoutMs: number,
     private readonly firstEventTimeoutMs: number = 10_000,
     private readonly idleEventTimeoutMs: number = 20_000,
-  ) {}
+    resilienceConfig?: ProviderResilienceConfig,
+  ) {
+    this.bufferedCircuitBreaker = new CircuitBreaker('meeting_ai/buffered', {
+      failureThreshold: resilienceConfig?.circuitBreakerFailureThreshold ?? 3,
+      openDurationMs: resilienceConfig?.circuitBreakerOpenDurationMs ?? 15_000,
+      halfOpenProbeLimit: resilienceConfig?.circuitBreakerHalfOpenProbeLimit ?? 1,
+      failureWindowMs: resilienceConfig?.circuitBreakerFailureWindowMs ?? 60_000,
+    });
+    this.streamingCircuitBreaker = new CircuitBreaker('meeting_ai/streaming', {
+      failureThreshold: resilienceConfig?.circuitBreakerFailureThreshold ?? 3,
+      openDurationMs: resilienceConfig?.circuitBreakerOpenDurationMs ?? 15_000,
+      halfOpenProbeLimit: resilienceConfig?.circuitBreakerHalfOpenProbeLimit ?? 1,
+      failureWindowMs: resilienceConfig?.circuitBreakerFailureWindowMs ?? 60_000,
+    });
+  }
 
-  public answer(request: MeetingAiRequest, signal?: AbortSignal): Promise<MeetingAiResponse> {
-    return requestJson({
-      url: this.url,
-      serviceKeyHeader: 'x-meeting-ai-service-key',
-      serviceKey: this.serviceKey,
-      body: request,
-      timeoutMs: this.timeoutMs,
+  public async answer(request: MeetingAiRequest, signal?: AbortSignal): Promise<MeetingAiResponse> {
+    return Resilience.execute({
+      operation: async () => {
+        return requestJson({
+          url: this.url,
+          serviceKeyHeader: 'x-meeting-ai-service-key',
+          serviceKey: this.serviceKey,
+          body: request,
+          timeoutMs: this.timeoutMs,
+          signal,
+          timeoutCode: 'VOICE_AI_TIMEOUT',
+          unavailableCode: 'VOICE_AI_UNAVAILABLE',
+          quotaCode: 'VOICE_AI_QUOTA_EXCEEDED',
+        });
+      },
+      operationName: 'meeting_ai/buffered',
+      circuitBreaker: this.bufferedCircuitBreaker,
+      retry: {
+        maxAttempts: 1, // Do not retry after dispatch per policy
+        baseBackoffMs: 200,
+        maxBackoffMs: 2000,
+      },
       signal,
-      timeoutCode: 'VOICE_AI_TIMEOUT',
-      unavailableCode: 'VOICE_AI_UNAVAILABLE',
+      isTransientError: (err: any) => err instanceof InternalServiceError && (err.code === 'VOICE_AI_TIMEOUT' || err.code === 'VOICE_AI_UNAVAILABLE'),
+      mapError: (err: any, circuitOpen: boolean) => {
+        if (circuitOpen) return new InternalServiceError('VOICE_AI_UNAVAILABLE');
+        if (err instanceof InternalServiceError) return err;
+        return new InternalServiceError('VOICE_AI_UNAVAILABLE');
+      }
     });
   }
 
   public async *stream(request: MeetingAiRequest, signal?: AbortSignal): AsyncGenerator<MeetingAiStreamEvent> {
+    if (signal?.aborted) throw new InternalServiceError('VOICE_CANCELLED');
+
+    let permit: CircuitPermit;
+    try {
+      permit = this.streamingCircuitBreaker.acquire();
+    } catch (err) {
+      throw new InternalServiceError('VOICE_AI_UNAVAILABLE');
+    }
+
     const controller = new AbortController();
     const onAbort = () => controller.abort('cancelled');
     const totalTimer = setTimeout(() => controller.abort('timeout'), this.timeoutMs);
     let eventTimer: ReturnType<typeof setTimeout> | null = null;
     let hasReceivedEvent = false;
+
     const armEventTimer = (): void => {
       if (eventTimer) clearTimeout(eventTimer);
       const delay = hasReceivedEvent ? this.idleEventTimeoutMs : this.firstEventTimeoutMs;
       eventTimer = setTimeout(() => controller.abort(hasReceivedEvent ? 'idle-timeout' : 'first-event-timeout'), delay);
     };
+
     const clearTimers = (): void => {
       clearTimeout(totalTimer);
       if (eventTimer) clearTimeout(eventTimer);
       signal?.removeEventListener('abort', onAbort);
     };
 
-    signal?.addEventListener('abort', onAbort, { once: true });
-    armEventTimer();
     try {
+      signal?.addEventListener('abort', onAbort, { once: true });
+      armEventTimer();
+
       const streamUrl = new URL(this.url);
       streamUrl.pathname = `${streamUrl.pathname.replace(/\/$/, '')}/stream`;
       const response = await fetch(streamUrl, {
@@ -239,11 +299,20 @@ export class MeetingAiClient {
         body: JSON.stringify(request),
         signal: controller.signal,
       });
-      if (response.status === 409) throw new InternalServiceError('VOICE_CANCELLED');
-      if (!response.ok || !response.headers.get('content-type')?.toLowerCase().includes('text/event-stream')) {
+
+      if (response.status === 429) {
+        throw new InternalServiceError('VOICE_AI_QUOTA_EXCEEDED');
+      }
+      if (response.status === 409) {
+        throw new InternalServiceError('VOICE_CANCELLED');
+      }
+      if (!response.ok || !response.body) {
         throw new InternalServiceError('VOICE_AI_UNAVAILABLE');
       }
-      if (!response.body) throw new InternalServiceError('VOICE_AI_UNAVAILABLE');
+      const contentType = response.headers.get('content-type')?.toLowerCase() ?? '';
+      if (!contentType.includes('text/event-stream')) {
+        throw new InternalServiceError('VOICE_AI_UNAVAILABLE');
+      }
 
       const decoder = new SseEventDecoder();
       const expectedSequences = new Map<string, number>([
@@ -278,15 +347,36 @@ export class MeetingAiClient {
         reader.releaseLock();
       }
       if (!done) throw new InternalServiceError('VOICE_AI_UNAVAILABLE');
+      permit.recordSuccess();
+      return;
     } catch (error) {
-      if (error instanceof InternalServiceError) throw error;
-      if (signal?.aborted || controller.signal.reason === 'cancelled') {
-        throw new InternalServiceError('VOICE_CANCELLED');
+      let mappedError = error;
+      if (!(error instanceof InternalServiceError)) {
+        if (signal?.aborted || controller.signal.reason === 'cancelled') {
+          mappedError = new InternalServiceError('VOICE_CANCELLED');
+        } else if (controller.signal.aborted) {
+          mappedError = new InternalServiceError('VOICE_AI_TIMEOUT');
+        } else {
+          mappedError = new InternalServiceError('VOICE_AI_UNAVAILABLE');
+        }
       }
-      if (controller.signal.aborted) throw new InternalServiceError('VOICE_AI_TIMEOUT');
-      throw new InternalServiceError('VOICE_AI_UNAVAILABLE');
+
+      const err = mappedError as InternalServiceError;
+      const isTransient = err.code === 'VOICE_AI_TIMEOUT' || err.code === 'VOICE_AI_UNAVAILABLE';
+
+      if (err.code === 'VOICE_AI_QUOTA_EXCEEDED') {
+        getResilienceObserver()?.recordQuotaRejection('meeting_ai');
+        permit.release();
+      } else if (isTransient) {
+        permit.recordFailure();
+      } else {
+        permit.release();
+      }
+
+      throw err;
     } finally {
       clearTimers();
+      permit.release();
     }
   }
 
