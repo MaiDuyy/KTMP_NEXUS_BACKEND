@@ -1,0 +1,173 @@
+services:
+  ai-postgres:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_DB: ai_knowledge
+      POSTGRES_USER: p4c_ai
+      POSTGRES_PASSWORD: p4c_ai
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U p4c_ai -d ai_knowledge"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    networks: [backend]
+
+  ai-mongo:
+    image: mongo:7
+    healthcheck:
+      test: ["CMD-SHELL", "mongosh --quiet --eval 'db.adminCommand(\"ping\").ok' | grep 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    networks: [backend]
+
+  ai-redis:
+    image: redis:7-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    networks: [backend]
+
+  ai-nats:
+    image: nats:2-alpine
+    command: ["-js"]
+    networks: [backend]
+
+  api-gateway:
+    build:
+      context: ../../../..
+      dockerfile: services/api-gateway/Dockerfile
+    ports:
+      - "3100:3000"
+    environment:
+      NODE_ENV: development
+      PORT: "3000"
+      CORS_ORIGIN: http://localhost:3002
+      JWT_SECRET: ${P4C_JWT_SECRET}
+      REDIS_URL: redis://ott-redis:6379
+      NATS_URL: nats://ott-nats:4222
+      IDENTITY_SERVICE_URL: http://ott-identity-service:3010
+      MESSAGING_SERVICE_URL: http://ott-messaging-service:3020
+      FILE_SERVICE_URL: http://ott-file-service:3014
+      NOTIFICATION_SERVICE_URL: http://ott-notification-service:3019
+      IDENTITY_GRPC_HOST: ott-identity-service
+      IDENTITY_GRPC_PORT: "50051"
+      MESSAGING_GRPC_HOST: ott-messaging-service
+      MESSAGING_GRPC_PORT: "50052"
+      SPRING_AI_URL: http://ai-knowledge:8080
+      VOICE_SERVICE_URL: http://voice-service:3035
+    networks: [backend]
+
+  ws-gateway:
+    build:
+      context: ../../../..
+      dockerfile: services/ws-gateway/Dockerfile
+    ports:
+      - "3101:3001"
+    environment:
+      NODE_ENV: development
+      PORT: "3001"
+      CORS_ORIGIN: http://localhost:3002
+      JWT_SECRET: ${P4C_JWT_SECRET}
+      REDIS_URL: redis://ott-redis:6379
+      NATS_URL: nats://ott-nats:4222
+      MESSAGING_SERVICE_URL: http://ott-messaging-service:3020
+      MESSAGING_GRPC_HOST: ott-messaging-service
+      MESSAGING_GRPC_PORT: "50052"
+      IDENTITY_GRPC_HOST: ott-identity-service
+      IDENTITY_GRPC_PORT: "50051"
+      SPRING_AI_URL: http://ai-knowledge:8080
+      LIVEKIT_URL: ${P4C_LIVEKIT_URL}
+      LIVEKIT_API_KEY: ${P4C_LIVEKIT_API_KEY}
+      LIVEKIT_API_SECRET: ${P4C_LIVEKIT_API_SECRET}
+      MEETING_VOICE_ENABLED: "true"
+      VOICE_METRICS_ENABLED: "true"
+      VOICE_TURN_TOKEN_SECRET: ${P4C_VOICE_TURN_TOKEN_SECRET}
+      VOICE_INTERNAL_SERVICE_KEY: ${P4C_VOICE_INTERNAL_SERVICE_KEY}
+      VOICE_SERVICE_INTERNAL_URL: http://voice-service:3035/internal/voice
+      VOICE_PUBLIC_API_URL: http://host.docker.internal:3100/api
+      VOICE_PUBLIC_STREAM_URL: ws://host.docker.internal:3035/v1/voice
+    networks: [backend]
+
+  voice-service:
+    build:
+      context: ../../../..
+      dockerfile: services/voice-service/Dockerfile
+    ports:
+      - "3035:3035"
+    environment:
+      NODE_ENV: development
+      VOICE_SERVICE_PORT: "3035"
+      MEETING_VOICE_ENABLED: "true"
+      VOICE_METRICS_ENABLED: "true"
+      VOICE_STREAMING_ENABLED: "true"
+      VOICE_STREAM_ALLOWED_ORIGINS: http://localhost:3002
+      VOICE_STREAMING_TTS_ENABLED: "true"
+      VOICE_STREAMING_OUTPUT_ENABLED: "true"
+      REDIS_URL: redis://ott-redis:6379
+      VOICE_TURN_TOKEN_SECRET: ${P4C_VOICE_TURN_TOKEN_SECRET}
+      VOICE_INTERNAL_SERVICE_KEY: ${P4C_VOICE_INTERNAL_SERVICE_KEY}
+      VOICE_CONTROL_INTERNAL_URL: http://ws-gateway:3001/internal/voice
+      MEETING_AI_INTERNAL_URL: http://ai-knowledge:8080/internal/meeting-ai
+      MEETING_AI_INTERNAL_SERVICE_KEY: ${P4C_MEETING_AI_INTERNAL_SERVICE_KEY}
+      GOOGLE_CLOUD_PROJECT: ${P4C_GOOGLE_CLOUD_PROJECT}
+      GOOGLE_CLOUD_LOCATION: ${P4C_GOOGLE_CLOUD_LOCATION}
+      GOOGLE_STT_MODEL: ${P4C_GOOGLE_STT_MODEL}
+      GOOGLE_STT_LANGUAGE: ${P4C_GOOGLE_STT_LANGUAGE}
+      GOOGLE_TTS_VOICE: ${P4C_GOOGLE_TTS_VOICE}
+      GOOGLE_TTS_AUDIO_ENCODING: ${P4C_GOOGLE_TTS_AUDIO_ENCODING}
+      LIVEKIT_URL: ${P4C_LIVEKIT_URL}
+      LIVEKIT_API_KEY: ${P4C_LIVEKIT_API_KEY}
+      LIVEKIT_API_SECRET: ${P4C_LIVEKIT_API_SECRET}
+    volumes:
+      - ${P4C_GCLOUD_CONFIG_DIR}:/home/voice/.config/gcloud:ro
+    networks: [backend]
+
+  ai-knowledge:
+    build:
+      context: ../../../../../ai-knowledge
+      dockerfile: Dockerfile
+    ports:
+      - "8080:8080"
+    environment:
+      # P4-C must not bootstrap or migrate the persistent AI Knowledge containers.
+      SPRING_DATASOURCE_URL: jdbc:postgresql://ai-postgres:5432/ai_knowledge
+      SPRING_DATASOURCE_USERNAME: p4c_ai
+      SPRING_DATASOURCE_PASSWORD: p4c_ai
+      SPRING_AI_EMBEDDING_TRANSFORMER_ONNX_MODEL_URI: classpath:/onnx/multilingual-e5-base/model.onnx
+      SPRING_AI_EMBEDDING_TRANSFORMER_TOKENIZER_URI: classpath:/onnx/multilingual-e5-base/tokenizer.json
+      SPRING_DATA_MONGODB_URI: mongodb://ai-mongo:27017/ai_knowledge
+      SPRING_DATA_REDIS_HOST: ai-redis
+      SPRING_DATA_REDIS_PORT: "6379"
+      NATS_URL: nats://ai-nats:4222
+      MESSAGING_SERVICE_URL: http://ott-messaging-service:3020
+      GEMINI_API_KEY: ${P4C_GEMINI_API_KEY}
+      MEETING_AI_INTERNAL_SERVICE_KEY: ${P4C_MEETING_AI_INTERNAL_SERVICE_KEY}
+      DATABASE_MIGRATION_BOOTSTRAP_ENABLED: "false"
+      JAVA_TOOL_OPTIONS: -Xms512m -Xmx4g
+      # Required by legacy mail auto-configuration; P4-C does not send email.
+      EMAIL_HOST: localhost
+      EMAIL_PORT: "2525"
+      EMAIL_ID: p4c@localhost
+      EMAIL_PASSWORD: p4c-not-used
+    depends_on:
+      ai-postgres:
+        condition: service_healthy
+      ai-mongo:
+        condition: service_healthy
+      ai-redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget --quiet --tries=1 --spider http://localhost:8080/healthz || exit 1"]
+      interval: 15s
+      timeout: 5s
+      start_period: 90s
+      retries: 5
+    networks: [backend]
+
+networks:
+  backend:
+    external: true
+    name: ${P4C_BACKEND_NETWORK:-ktmp_nexus_backend_ott-network}
