@@ -197,6 +197,9 @@ export function roleMiddleware(...allowedRoles: string[]) {
       expandedRoles.add(workspaceRole);
       // Workspace OWNER/ADMIN implies WORKSPACE_MEMBER
       if (workspaceRole === 'WORKSPACE_OWNER' || workspaceRole === 'WORKSPACE_ADMIN') {
+        if (workspaceRole === 'WORKSPACE_OWNER') {
+          expandedRoles.add('WORKSPACE_ADMIN');
+        }
         expandedRoles.add('WORKSPACE_MEMBER');
       }
     }

@@ -39,6 +39,7 @@ $env:P4C_BACKEND_NETWORK = 'ktmp_nexus_backend_ott-network'
 $env:P4C_VOICE_TURN_TOKEN_SECRET = [guid]::NewGuid().ToString('N') + [guid]::NewGuid().ToString('N')
 $env:P4C_VOICE_INTERNAL_SERVICE_KEY = [guid]::NewGuid().ToString('N')
 $env:P4C_MEETING_AI_INTERNAL_SERVICE_KEY = [guid]::NewGuid().ToString('N')
+$env:P4C_GATEWAY_SHARED_KEY = [guid]::NewGuid().ToString('N')
 
 $composeArgs = @('-p', 'p4c', '-f', $composeFile)
 switch ($Command) {

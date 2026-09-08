@@ -5,6 +5,8 @@ services:
       POSTGRES_DB: ai_knowledge
       POSTGRES_USER: p4c_ai
       POSTGRES_PASSWORD: p4c_ai
+    volumes:
+      - ./init/ai-postgres:/docker-entrypoint-initdb.d:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U p4c_ai -d ai_knowledge"]
       interval: 5s
@@ -46,6 +48,7 @@ services:
       PORT: "3000"
       CORS_ORIGIN: http://localhost:3002
       JWT_SECRET: ${P4C_JWT_SECRET}
+      GATEWAY_SHARED_KEY: ${P4C_GATEWAY_SHARED_KEY}
       REDIS_URL: redis://ott-redis:6379
       NATS_URL: nats://ott-nats:4222
       IDENTITY_SERVICE_URL: http://ott-identity-service:3010
@@ -139,11 +142,11 @@ services:
       SPRING_AI_EMBEDDING_TRANSFORMER_ONNX_MODEL_URI: classpath:/onnx/multilingual-e5-base/model.onnx
       SPRING_AI_EMBEDDING_TRANSFORMER_TOKENIZER_URI: classpath:/onnx/multilingual-e5-base/tokenizer.json
       SPRING_DATA_MONGODB_URI: mongodb://ai-mongo:27017/ai_knowledge
-      SPRING_DATA_REDIS_HOST: ai-redis
-      SPRING_DATA_REDIS_PORT: "6379"
+      REDIS_URL: redis://ai-redis:6379
       NATS_URL: nats://ai-nats:4222
       MESSAGING_SERVICE_URL: http://ott-messaging-service:3020
       GEMINI_API_KEY: ${P4C_GEMINI_API_KEY}
+      GATEWAY_SHARED_KEY: ${P4C_GATEWAY_SHARED_KEY}
       MEETING_AI_INTERNAL_SERVICE_KEY: ${P4C_MEETING_AI_INTERNAL_SERVICE_KEY}
       DATABASE_MIGRATION_BOOTSTRAP_ENABLED: "false"
       JAVA_TOOL_OPTIONS: -Xms512m -Xmx4g
