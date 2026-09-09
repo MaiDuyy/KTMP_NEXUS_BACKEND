@@ -123,6 +123,11 @@ if (user) {
       headers['x-correlation-id'] = (req as any).correlationId;
     }
 
+    const gatewaySharedKey = process.env.GATEWAY_SHARED_KEY;
+    if (gatewaySharedKey) {
+      headers['x-internal-gateway-key'] = gatewaySharedKey;
+    }
+
     const forwardedFor = req.headers['x-forwarded-for'] as string || req.ip || req.socket.remoteAddress || '';
     if (forwardedFor) {
       headers['x-forwarded-for'] = forwardedFor;
@@ -239,6 +244,11 @@ async function forwardMultipartRequest(
     if (user) {
       headers['x-user-id'] = user.id;
       headers['x-user-role'] = user.role || '';
+    }
+
+    const gatewaySharedKey = process.env.GATEWAY_SHARED_KEY;
+    if (gatewaySharedKey) {
+      headers['x-internal-gateway-key'] = gatewaySharedKey;
     }
 
     const wsId = req.headers['x-workspace-id'] as string;
