@@ -139,8 +139,10 @@ services:
       SPRING_DATASOURCE_URL: jdbc:postgresql://ai-postgres:5432/ai_knowledge
       SPRING_DATASOURCE_USERNAME: p4c_ai
       SPRING_DATASOURCE_PASSWORD: p4c_ai
-      SPRING_AI_EMBEDDING_TRANSFORMER_ONNX_MODEL_URI: classpath:/onnx/multilingual-e5-base/model.onnx
-      SPRING_AI_EMBEDDING_TRANSFORMER_TOKENIZER_URI: classpath:/onnx/multilingual-e5-base/tokenizer.json
+      SPRING_AI_MODEL_EMBEDDING_TEXT: google-genai
+      SPRING_AI_GOOGLE_GENAI_EMBEDDING_TEXT_OPTIONS_MODEL: gemini-embedding-001
+      SPRING_AI_GOOGLE_GENAI_EMBEDDING_TEXT_OPTIONS_TASK_TYPE: RETRIEVAL_DOCUMENT
+      SPRING_AI_GOOGLE_GENAI_EMBEDDING_TEXT_OPTIONS_DIMENSIONS: "768"
       SPRING_DATA_MONGODB_URI: mongodb://ai-mongo:27017/ai_knowledge
       REDIS_URL: redis://ai-redis:6379
       NATS_URL: nats://ai-nats:4222
