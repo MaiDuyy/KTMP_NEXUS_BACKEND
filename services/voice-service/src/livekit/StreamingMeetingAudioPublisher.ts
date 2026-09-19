@@ -1,6 +1,6 @@
 import type { VoiceErrorCode } from '@ott/shared';
 import type { VoiceServiceConfig } from '../config.js';
-import type { StreamingPcmChunk } from '../streaming/googleStreamingTts.js';
+import type { StreamingPcmChunk } from '../providers/contracts.js';
 import {
   LIVEKIT_SAMPLE_RATE_HERTZ,
   Pcm48kResampler,

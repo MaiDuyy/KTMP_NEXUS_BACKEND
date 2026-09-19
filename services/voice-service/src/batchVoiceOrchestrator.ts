@@ -1,8 +1,13 @@
 import type { VoiceErrorCode, VoicePipelineEvent } from '@ott/shared';
 import type { BatchAudioUpload } from './audioUpload.js';
 import type { VerifiedVoiceTurnToken } from './turnTokenVerifier.js';
-import { BatchSttError, type BatchSttResult } from './batchStt.js';
-import { BatchTtsError, type BatchTtsResult } from './batchTts.js';
+import {
+  BatchSttError,
+  BatchTtsError,
+  type BatchSttProvider,
+  type BatchTtsProvider,
+  type BatchTtsResult,
+} from './providers/contracts.js';
 import { InternalServiceError, type MeetingAiRequest, type MeetingAiResponse } from './internalClients.js';
 import type { MeetingAiStreamEvent } from '@ott/shared';
 import {
@@ -18,14 +23,6 @@ import type {
   VoiceStageOutcome,
   VoiceStreamingMetrics,
 } from './voiceMetrics.js';
-
-export interface BatchSttProvider {
-  transcribe(audio: Buffer, mimeType: string, signal?: AbortSignal): Promise<BatchSttResult>;
-}
-
-export interface BatchTtsProvider {
-  synthesize(text: string, signal?: AbortSignal): Promise<BatchTtsResult>;
-}
 
 export interface VoiceControlProvider {
   getContext(request: {

@@ -12,6 +12,9 @@ test('voice service metrics use bounded stage, outcome and error-code labels', a
   metrics.recordStreamingOutputLatency('ai_start_to_first_frame', 0.75);
   metrics.recordStreamingOutputVolume('frame_count', 42);
   metrics.recordLifecycleCleanup('streaming_livekit', 'failed');
+  metrics.recordCircuitTransition('elevenlabs_stt/streaming', 'OPEN');
+  metrics.recordRetryAttempt('elevenlabs_tts/batch');
+  metrics.recordQuotaRejection('elevenlabs_tts');
   const output = await metrics.render();
 
   assert.match(output, /meeting_voice_pipeline_total\{outcome="failed",code="VOICE_STT_TIMEOUT"\} 1/);
@@ -22,5 +25,8 @@ test('voice service metrics use bounded stage, outcome and error-code labels', a
   assert.match(output, /meeting_voice_streaming_output_latency_seconds_count\{stage="ai_start_to_first_frame"\} 1/);
   assert.match(output, /meeting_voice_streaming_output_volume_count\{kind="frame_count"\} 1/);
   assert.match(output, /meeting_voice_lifecycle_cleanup_total\{resource="streaming_livekit",outcome="failed"\} 1/);
+  assert.match(output, /meeting_voice_circuit_breaker_transitions_total\{name="elevenlabs_stt\/streaming",state="OPEN"\} 1/);
+  assert.match(output, /meeting_voice_retry_attempts_total\{operation="elevenlabs_tts\/batch"\} 1/);
+  assert.match(output, /meeting_voice_quota_rejections_total\{provider="elevenlabs_tts"\} 1/);
   assert.doesNotMatch(output, /meetingSessionId|turnId|workspaceId|userId|transcript/);
 });

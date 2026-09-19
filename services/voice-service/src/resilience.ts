@@ -3,18 +3,30 @@ export type CircuitState = 'CLOSED' | 'OPEN' | 'HALF_OPEN';
 export type ResilienceCircuitKey =
   | 'google_stt/batch'
   | 'google_stt/streaming'
+  | 'elevenlabs_stt/batch'
+  | 'elevenlabs_stt/streaming'
   | 'meeting_ai/buffered'
   | 'meeting_ai/streaming'
   | 'google_tts/batch'
   | 'google_tts/streaming'
+  | 'elevenlabs_tts/batch'
+  | 'elevenlabs_tts/streaming'
   | 'livekit/connect'
   | 'livekit/publish';
 
-export type ResilienceProvider = 'google_stt' | 'google_tts' | 'meeting_ai' | 'livekit';
+export type ResilienceProvider =
+  | 'google_stt'
+  | 'google_tts'
+  | 'elevenlabs_stt'
+  | 'elevenlabs_tts'
+  | 'meeting_ai'
+  | 'livekit';
 
 export function circuitKeyToProvider(key: ResilienceCircuitKey): ResilienceProvider {
   if (key.startsWith('google_stt')) return 'google_stt';
   if (key.startsWith('google_tts')) return 'google_tts';
+  if (key.startsWith('elevenlabs_stt')) return 'elevenlabs_stt';
+  if (key.startsWith('elevenlabs_tts')) return 'elevenlabs_tts';
   if (key.startsWith('meeting_ai')) return 'meeting_ai';
   return 'livekit';
 }

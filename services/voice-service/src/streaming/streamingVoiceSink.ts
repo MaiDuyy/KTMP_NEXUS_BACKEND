@@ -8,13 +8,13 @@ import type {
 } from './voiceWebSocketServer.js';
 import {
   StreamingSttError,
-  type GoogleStreamingSttAdapter,
   type StreamingSttResult,
   type StreamingSttSession,
-} from './googleStreamingStt.js';
+  type StreamingSttProvider,
+} from '../providers/contracts.js';
 import type { SpeechAdaptationProvider } from './speechAdaptation.js';
 import type { StreamingSttOutcome, VoiceStreamingMetrics } from '../voiceMetrics.js';
-import { getResilienceObserver } from '../resilience.js';
+import { getResilienceObserver, type ResilienceProvider } from '../resilience.js';
 
 export interface FinalTranscriptPipeline {
   enqueueTranscript(input: {
@@ -34,11 +34,12 @@ export class StreamingVoiceSinkFactory implements VoicePcmStreamSinkFactory {
   private readonly activeByMeeting = new Map<string, Map<string, VoicePcmStreamSink>>();
 
   public constructor(private readonly dependencies: {
-    stt: GoogleStreamingSttAdapter;
+    stt: StreamingSttProvider;
     control: VoiceControlProvider;
     pipeline: FinalTranscriptPipeline;
     adaptation?: SpeechAdaptationProvider;
     metrics?: Pick<VoiceStreamingMetrics, 'recordStreamingStt'>;
+    resilienceProvider?: Extract<ResilienceProvider, 'google_stt' | 'elevenlabs_stt'>;
   }) {}
 
   public async open(token: VerifiedVoiceTurnToken, signal: AbortSignal): Promise<VoicePcmStreamSink> {
@@ -73,7 +74,7 @@ export class StreamingVoiceSinkFactory implements VoicePcmStreamSinkFactory {
       const code = error instanceof StreamingSttError ? error.code : 'VOICE_STT_UNAVAILABLE';
       recordStt(code === 'VOICE_CANCELLED' ? 'cancelled' : code === 'VOICE_STT_TIMEOUT' ? 'timeout' : 'unavailable');
       if (code === 'VOICE_STT_QUOTA_EXCEEDED') {
-        getResilienceObserver()?.recordQuotaRejection('google_stt');
+        getResilienceObserver()?.recordQuotaRejection(this.dependencies.resilienceProvider ?? 'google_stt');
       }
       if (code === 'VOICE_CANCELLED') {
         await emitTerminal({

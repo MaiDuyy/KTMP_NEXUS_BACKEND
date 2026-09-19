@@ -1,6 +1,20 @@
 import { v2 } from '@google-cloud/speech';
 import type { CancellableStream } from 'google-gax';
 import { normalizeSpeechPhrases } from './speechAdaptation.js';
+import {
+  StreamingSttError,
+  type StreamingSttCallbacks,
+  type StreamingSttProvider,
+  type StreamingSttResult,
+  type StreamingSttSession,
+} from '../providers/contracts.js';
+
+export { StreamingSttError } from '../providers/contracts.js';
+export type {
+  StreamingSttCallbacks,
+  StreamingSttResult,
+  StreamingSttSession,
+} from '../providers/contracts.js';
 
 export interface StreamingSttConfig {
   projectId: string;
@@ -11,26 +25,8 @@ export interface StreamingSttConfig {
   phrases?: readonly string[];
 }
 
-export interface StreamingSttResult {
-  text: string;
-  isFinal: boolean;
-  stability: number | null;
-  confidence: number | null;
-  resultEndOffset: string;
-}
-
-export interface StreamingSttCallbacks {
-  onResult(result: StreamingSttResult): void;
-}
-
 export interface StreamingSpeechClient {
   _streamingRecognize(options?: { timeout?: number }): CancellableStream;
-}
-
-export interface StreamingSttSession {
-  write(pcm: Buffer): Promise<void>;
-  finish(): Promise<void>;
-  cancel(): void;
 }
 
 import {
@@ -40,16 +36,6 @@ import {
   ProviderResilienceConfig,
   getResilienceObserver,
 } from '../resilience.js';
-
-export class StreamingSttError extends Error {
-  public constructor(
-    public readonly code: 'VOICE_STT_TIMEOUT' | 'VOICE_STT_UNAVAILABLE' | 'VOICE_STT_QUOTA_EXCEEDED' | 'VOICE_CANCELLED',
-    public readonly providerCode: string | number | null = null,
-    public readonly providerMessage: string | null = null,
-  ) {
-    super(code);
-  }
-}
 
 function durationKey(duration: { seconds?: number | string | { toString(): string }; nanos?: number } | null | undefined): string {
   const seconds = duration?.seconds?.toString() ?? '0';
@@ -81,7 +67,7 @@ function mapProviderError(error: unknown): StreamingSttError {
   );
 }
 
-export class GoogleStreamingSttAdapter {
+export class GoogleStreamingSttAdapter implements StreamingSttProvider {
   public readonly circuitBreaker: CircuitBreaker;
   private readonly client: StreamingSpeechClient;
   private readonly resilienceConfig?: ProviderResilienceConfig;

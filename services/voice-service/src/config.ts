@@ -1,3 +1,5 @@
+import type { VoiceProviderId } from './providers/contracts.js';
+
 export interface VoiceServiceConfig {
   meetingVoiceEnabled: boolean;
   voiceMetricsEnabled: boolean;
@@ -14,6 +16,8 @@ export interface VoiceServiceConfig {
   nodeEnv: string;
   redisUrl: string;
   voiceTurnTokenSecret: string | null;
+  voiceSttProvider: VoiceProviderId;
+  voiceTtsProvider: VoiceProviderId;
   googleCloudProject: string | null;
   googleCloudLocation: string;
   googleSttModel: string;
@@ -36,6 +40,21 @@ export interface VoiceServiceConfig {
   googleStreamingTtsIdleAudioTimeoutMs: number;
   googleStreamingTtsTotalTimeoutMs: number;
   googleStreamingTtsMaxQueuedBytes: number;
+  elevenLabsApiKey: string | null;
+  elevenLabsSttModel: string;
+  elevenLabsStreamingSttModel: string;
+  elevenLabsTtsModel: string;
+  elevenLabsTtsVoiceId: string | null;
+  elevenLabsLanguage: string;
+  elevenLabsApiBaseUrl: string;
+  elevenLabsStreamingSttUrl: string;
+  elevenLabsStreamingTtsUrl: string;
+  elevenLabsRequestTimeoutMs: number;
+  elevenLabsFirstAudioTimeoutMs: number;
+  elevenLabsIdleAudioTimeoutMs: number;
+  elevenLabsTotalTimeoutMs: number;
+  elevenLabsMaxQueuedBytes: number;
+  elevenLabsOutputFormat: string;
   voiceStreamingTtsSentenceMinimumChars: number;
   voiceStreamingTtsSentenceTargetChars: number;
   voiceStreamingTtsSentenceMaximumChars: number;
@@ -153,6 +172,45 @@ function readNonEmptyString(value: string | undefined, fallback: string, variabl
   return resolved;
 }
 
+function readVoiceProvider(value: string | undefined, variableName: string): VoiceProviderId {
+  const provider = (value ?? 'google').trim().toLowerCase();
+  if (provider !== 'google' && provider !== 'elevenlabs') {
+    throw new Error(`${variableName} must be google or elevenlabs`);
+  }
+  return provider;
+}
+
+function readOptionalTrimmedString(value: string | undefined): string | null {
+  const trimmed = value?.trim() ?? '';
+  return trimmed.length > 0 ? trimmed : null;
+}
+
+function readProviderUrl(
+  value: string | undefined,
+  fallback: string,
+  variableName: string,
+  nodeEnv: string,
+  transport: 'http' | 'websocket',
+): string {
+  const resolved = readNonEmptyString(value, fallback, variableName).trim();
+  const url = new URL(resolved);
+  const allowed = transport === 'http'
+    ? (nodeEnv === 'production' ? ['https:'] : ['http:', 'https:'])
+    : (nodeEnv === 'production' ? ['wss:'] : ['ws:', 'wss:']);
+  if (!allowed.includes(url.protocol)) {
+    throw new Error(`${variableName} must use ${allowed.join(' or ')}`);
+  }
+  return url.toString().replace(/\/$/, '');
+}
+
+function readElevenLabsOutputFormat(value: string | undefined): string {
+  const format = readNonEmptyString(value, 'pcm_24000', 'ELEVENLABS_OUTPUT_FORMAT').trim();
+  if (!/^pcm_(16000|22050|24000|44100)$/.test(format)) {
+    throw new Error('ELEVENLABS_OUTPUT_FORMAT must be pcm_16000, pcm_22050, pcm_24000, or pcm_44100');
+  }
+  return format;
+}
+
 function readOptionalVoiceTurnTokenSecret(value: string | undefined, nodeEnv: string): string | null {
   if (value === undefined || value === "") {
     if (nodeEnv === "production") {
@@ -243,6 +301,17 @@ export function loadVoiceServiceConfig(env: NodeJS.ProcessEnv = process.env): Vo
   const nodeEnv = readNonEmptyString(env.NODE_ENV, "development", "NODE_ENV");
   const lkCredentials = readLiveKitCredentials(env, nodeEnv);
   const voiceStreamingEnabled = readBoolean(env.VOICE_STREAMING_ENABLED, false, 'VOICE_STREAMING_ENABLED');
+  const voiceSttProvider = readVoiceProvider(env.VOICE_STT_PROVIDER, 'VOICE_STT_PROVIDER');
+  const voiceTtsProvider = readVoiceProvider(env.VOICE_TTS_PROVIDER, 'VOICE_TTS_PROVIDER');
+  const elevenLabsApiKey = readOptionalTrimmedString(env.ELEVENLABS_API_KEY);
+  const elevenLabsTtsVoiceId = readOptionalTrimmedString(env.ELEVENLABS_TTS_VOICE_ID);
+
+  if ((voiceSttProvider === 'elevenlabs' || voiceTtsProvider === 'elevenlabs') && !elevenLabsApiKey) {
+    throw new Error('ELEVENLABS_API_KEY is required when an ElevenLabs provider is selected');
+  }
+  if (voiceTtsProvider === 'elevenlabs' && !elevenLabsTtsVoiceId) {
+    throw new Error('ELEVENLABS_TTS_VOICE_ID is required when ElevenLabs TTS is selected');
+  }
 
   const config: VoiceServiceConfig = {
     meetingVoiceEnabled: readBoolean(env.MEETING_VOICE_ENABLED, nodeEnv !== 'production', 'MEETING_VOICE_ENABLED'),
@@ -269,6 +338,8 @@ export function loadVoiceServiceConfig(env: NodeJS.ProcessEnv = process.env): Vo
     nodeEnv,
     redisUrl: readNonEmptyString(env.REDIS_URL, "redis://localhost:6379", "REDIS_URL"),
     voiceTurnTokenSecret: readOptionalVoiceTurnTokenSecret(env.VOICE_TURN_TOKEN_SECRET, nodeEnv),
+    voiceSttProvider,
+    voiceTtsProvider,
     googleCloudProject: env.GOOGLE_CLOUD_PROJECT || null,
     googleCloudLocation: readNonEmptyString(env.GOOGLE_CLOUD_LOCATION, "asia-southeast1", "GOOGLE_CLOUD_LOCATION"),
     googleSttModel: readNonEmptyString(env.GOOGLE_STT_MODEL, "chirp_3", "GOOGLE_STT_MODEL"),
@@ -325,6 +396,72 @@ export function loadVoiceServiceConfig(env: NodeJS.ProcessEnv = process.env): Vo
       512 * 1024,
       'GOOGLE_STREAMING_TTS_MAX_QUEUED_BYTES',
     ),
+    elevenLabsApiKey,
+    elevenLabsSttModel: readNonEmptyString(env.ELEVENLABS_STT_MODEL, 'scribe_v2', 'ELEVENLABS_STT_MODEL').trim(),
+    elevenLabsStreamingSttModel: readNonEmptyString(
+      env.ELEVENLABS_STREAMING_STT_MODEL,
+      'scribe_v2_realtime',
+      'ELEVENLABS_STREAMING_STT_MODEL',
+    ).trim(),
+    elevenLabsTtsModel: readNonEmptyString(env.ELEVENLABS_TTS_MODEL, 'eleven_flash_v2_5', 'ELEVENLABS_TTS_MODEL').trim(),
+    elevenLabsTtsVoiceId,
+    elevenLabsLanguage: readNonEmptyString(env.ELEVENLABS_LANGUAGE, 'vi', 'ELEVENLABS_LANGUAGE').trim(),
+    elevenLabsApiBaseUrl: readProviderUrl(
+      env.ELEVENLABS_API_BASE_URL,
+      'https://api.elevenlabs.io',
+      'ELEVENLABS_API_BASE_URL',
+      nodeEnv,
+      'http',
+    ),
+    elevenLabsStreamingSttUrl: readProviderUrl(
+      env.ELEVENLABS_STREAMING_STT_URL,
+      'wss://api.elevenlabs.io/v1/speech-to-text/realtime',
+      'ELEVENLABS_STREAMING_STT_URL',
+      nodeEnv,
+      'websocket',
+    ),
+    elevenLabsStreamingTtsUrl: readProviderUrl(
+      env.ELEVENLABS_STREAMING_TTS_URL,
+      'wss://api.elevenlabs.io/v1/text-to-speech',
+      'ELEVENLABS_STREAMING_TTS_URL',
+      nodeEnv,
+      'websocket',
+    ),
+    elevenLabsRequestTimeoutMs: readRangedPositiveInteger(
+      env.ELEVENLABS_REQUEST_TIMEOUT_MS,
+      15_000,
+      'ELEVENLABS_REQUEST_TIMEOUT_MS',
+      1_000,
+      120_000,
+    ),
+    elevenLabsFirstAudioTimeoutMs: readRangedPositiveInteger(
+      env.ELEVENLABS_FIRST_AUDIO_TIMEOUT_MS,
+      10_000,
+      'ELEVENLABS_FIRST_AUDIO_TIMEOUT_MS',
+      1_000,
+      60_000,
+    ),
+    elevenLabsIdleAudioTimeoutMs: readRangedPositiveInteger(
+      env.ELEVENLABS_IDLE_AUDIO_TIMEOUT_MS,
+      15_000,
+      'ELEVENLABS_IDLE_AUDIO_TIMEOUT_MS',
+      1_000,
+      60_000,
+    ),
+    elevenLabsTotalTimeoutMs: readRangedPositiveInteger(
+      env.ELEVENLABS_TOTAL_TIMEOUT_MS,
+      60_000,
+      'ELEVENLABS_TOTAL_TIMEOUT_MS',
+      5_000,
+      180_000,
+    ),
+    elevenLabsMaxQueuedBytes: readBoundedPositiveInteger(
+      env.ELEVENLABS_MAX_QUEUED_BYTES,
+      512 * 1024,
+      'ELEVENLABS_MAX_QUEUED_BYTES',
+      8 * 1024 * 1024,
+    ),
+    elevenLabsOutputFormat: readElevenLabsOutputFormat(env.ELEVENLABS_OUTPUT_FORMAT),
     voiceStreamingTtsSentenceMinimumChars: readPositiveInteger(
       env.VOICE_STREAMING_TTS_SENTENCE_MINIMUM_CHARS,
       24,

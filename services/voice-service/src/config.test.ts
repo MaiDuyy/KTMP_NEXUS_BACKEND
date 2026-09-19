@@ -16,6 +16,8 @@ test("uses safe defaults without provider credentials", () => {
   assert.equal(config.logLevel, "info");
   assert.equal(config.redisUrl, "redis://localhost:6379");
   assert.equal(config.voiceTurnTokenSecret, null);
+  assert.equal(config.voiceSttProvider, 'google');
+  assert.equal(config.voiceTtsProvider, 'google');
   assert.equal(config.googleCloudLocation, "asia-southeast1");
   assert.equal(config.googleSttLanguage, "vi-VN");
   assert.equal(config.googleSttModel, 'chirp_3');
@@ -30,6 +32,10 @@ test("uses safe defaults without provider credentials", () => {
   assert.equal(config.googleStreamingTtsLocation, 'asia-southeast1');
   assert.equal(config.googleStreamingTtsSampleRateHertz, 24_000);
   assert.equal(config.voiceStreamingTtsSentenceTargetChars, 160);
+  assert.equal(config.elevenLabsApiKey, null);
+  assert.equal(config.elevenLabsStreamingSttModel, 'scribe_v2_realtime');
+  assert.equal(config.elevenLabsTtsModel, 'eleven_flash_v2_5');
+  assert.equal(config.elevenLabsOutputFormat, 'pcm_24000');
 
   assert.equal(config.livekitUrl, null);
   assert.equal(config.livekitApiKey, null);
@@ -44,6 +50,86 @@ test("uses safe defaults without provider credentials", () => {
   assert.equal(config.providerMaxRetryAttempts, 2);
   assert.equal(config.providerRetryBaseBackoffMs, 200);
   assert.equal(config.providerRetryMaxBackoffMs, 2_000);
+});
+
+test('validates independent Google, ElevenLabs, and mixed provider selection', () => {
+  const elevenLabs = loadVoiceServiceConfig({
+    NODE_ENV: 'test',
+    VOICE_STT_PROVIDER: 'elevenlabs',
+    VOICE_TTS_PROVIDER: 'elevenlabs',
+    ELEVENLABS_API_KEY: '  test-key  ',
+    ELEVENLABS_TTS_VOICE_ID: '  voice-id  ',
+  });
+  assert.equal(elevenLabs.voiceSttProvider, 'elevenlabs');
+  assert.equal(elevenLabs.voiceTtsProvider, 'elevenlabs');
+  assert.equal(elevenLabs.elevenLabsApiKey, 'test-key');
+  assert.equal(elevenLabs.elevenLabsTtsVoiceId, 'voice-id');
+  assert.equal(elevenLabs.googleCloudProject, null);
+
+  const mixed = loadVoiceServiceConfig({
+    NODE_ENV: 'test',
+    VOICE_STT_PROVIDER: 'elevenlabs',
+    VOICE_TTS_PROVIDER: 'google',
+    ELEVENLABS_API_KEY: 'test-key',
+  });
+  assert.equal(mixed.voiceSttProvider, 'elevenlabs');
+  assert.equal(mixed.voiceTtsProvider, 'google');
+  assert.equal(mixed.elevenLabsTtsVoiceId, null);
+
+  assert.throws(
+    () => loadVoiceServiceConfig({ VOICE_STT_PROVIDER: 'unknown' }),
+    /VOICE_STT_PROVIDER must be google or elevenlabs/,
+  );
+  assert.throws(
+    () => loadVoiceServiceConfig({ VOICE_STT_PROVIDER: 'elevenlabs' }),
+    /ELEVENLABS_API_KEY is required/,
+  );
+  assert.throws(
+    () => loadVoiceServiceConfig({
+      VOICE_TTS_PROVIDER: 'elevenlabs',
+      ELEVENLABS_API_KEY: 'test-key',
+    }),
+    /ELEVENLABS_TTS_VOICE_ID is required/,
+  );
+});
+
+test('validates ElevenLabs endpoint schemes, bounds, and output format', () => {
+  const local = loadVoiceServiceConfig({
+    NODE_ENV: 'test',
+    ELEVENLABS_API_BASE_URL: 'http://127.0.0.1:9000',
+    ELEVENLABS_STREAMING_STT_URL: 'ws://127.0.0.1:9001/stt',
+    ELEVENLABS_STREAMING_TTS_URL: 'ws://127.0.0.1:9001/tts',
+  });
+  assert.equal(local.elevenLabsApiBaseUrl, 'http://127.0.0.1:9000');
+  assert.equal(local.elevenLabsStreamingSttUrl, 'ws://127.0.0.1:9001/stt');
+
+  const productionBase = {
+    NODE_ENV: 'production',
+    VOICE_TURN_TOKEN_SECRET: '12345678901234567890123456789012',
+    VOICE_INTERNAL_SERVICE_KEY: '12345678901234567890123456789012',
+    MEETING_AI_INTERNAL_SERVICE_KEY: '12345678901234567890123456789012',
+    VOICE_CONTROL_INTERNAL_URL: 'https://voice-control.test',
+    MEETING_AI_INTERNAL_URL: 'https://meeting-ai.test',
+    LIVEKIT_URL: 'wss://livekit.test',
+    LIVEKIT_API_KEY: 'key',
+    LIVEKIT_API_SECRET: 'secret',
+  };
+  assert.throws(
+    () => loadVoiceServiceConfig({ ...productionBase, ELEVENLABS_API_BASE_URL: 'http://provider.test' }),
+    /ELEVENLABS_API_BASE_URL must use https:/,
+  );
+  assert.throws(
+    () => loadVoiceServiceConfig({ ...productionBase, ELEVENLABS_STREAMING_STT_URL: 'ws:\/\/provider.test\/stt' }),
+    /ELEVENLABS_STREAMING_STT_URL must use wss:/,
+  );
+  assert.throws(
+    () => loadVoiceServiceConfig({ ELEVENLABS_REQUEST_TIMEOUT_MS: '999' }),
+    /ELEVENLABS_REQUEST_TIMEOUT_MS must be between 1000 and 120000/,
+  );
+  assert.throws(
+    () => loadVoiceServiceConfig({ ELEVENLABS_OUTPUT_FORMAT: 'mp3_44100_128' }),
+    /ELEVENLABS_OUTPUT_FORMAT must be/,
+  );
 });
 
 test('validates resilience config ranges and rejects invalid values', () => {
