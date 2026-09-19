@@ -24,6 +24,11 @@ import { StreamingOutputOrchestrator } from './streaming/streamingOutputOrchestr
 import { StreamingMeetingAudioPublisher } from './livekit/StreamingMeetingAudioPublisher.js';
 import { setResilienceObserver, type ProviderResilienceConfig } from './resilience.js';
 import { createSelectedVoiceProviders } from './providers/providerFactory.js';
+import { ElevenLabsBatchSttAdapter } from './providers/elevenlabs/elevenLabsBatchStt.js';
+import { ElevenLabsBatchTtsAdapter } from './providers/elevenlabs/elevenLabsBatchTts.js';
+import { ElevenLabsStreamingSttAdapter } from './providers/elevenlabs/elevenLabsStreamingStt.js';
+import { ElevenLabsStreamingTtsAdapter } from './providers/elevenlabs/elevenLabsStreamingTts.js';
+import { MAX_BATCH_AUDIO_BYTES } from './audioUpload.js';
 
 export interface VoiceServiceInstance {
   config: VoiceServiceConfig;
@@ -125,6 +130,50 @@ export function createVoiceService(
               idleAudioTimeoutMs: config.googleStreamingTtsIdleAudioTimeoutMs,
               totalTimeoutMs: config.googleStreamingTtsTotalTimeoutMs,
               maximumQueuedBytes: config.googleStreamingTtsMaxQueuedBytes,
+            }, resilienceConfig),
+          }),
+        },
+        elevenlabs: {
+          createStt: () => ({
+            batch: new ElevenLabsBatchSttAdapter({
+              apiKey: config.elevenLabsApiKey!,
+              apiBaseUrl: config.elevenLabsApiBaseUrl,
+              model: config.elevenLabsSttModel,
+              languageCode: config.elevenLabsLanguage,
+              timeoutMs: config.elevenLabsRequestTimeoutMs,
+              maximumInputBytes: MAX_BATCH_AUDIO_BYTES,
+            }, resilienceConfig),
+            streaming: new ElevenLabsStreamingSttAdapter({
+              apiKey: config.elevenLabsApiKey!,
+              endpoint: config.elevenLabsStreamingSttUrl,
+              model: config.elevenLabsStreamingSttModel,
+              languageCode: config.elevenLabsLanguage,
+              timeoutMs: config.elevenLabsTotalTimeoutMs,
+              maximumQueuedBytes: config.voiceStreamMaxQueuedBytes,
+            }, resilienceConfig),
+          }),
+          createTts: () => ({
+            batch: new ElevenLabsBatchTtsAdapter({
+              apiKey: config.elevenLabsApiKey!,
+              apiBaseUrl: config.elevenLabsApiBaseUrl,
+              voiceId: config.elevenLabsTtsVoiceId!,
+              model: config.elevenLabsTtsModel,
+              languageCode: config.elevenLabsLanguage,
+              outputFormat: config.elevenLabsOutputFormat,
+              timeoutMs: config.elevenLabsRequestTimeoutMs,
+              maximumOutputBytes: config.voiceStreamingOutputMaxTotalPcmBytes,
+            }, resilienceConfig),
+            streaming: new ElevenLabsStreamingTtsAdapter({
+              apiKey: config.elevenLabsApiKey!,
+              endpoint: config.elevenLabsStreamingTtsUrl,
+              voiceId: config.elevenLabsTtsVoiceId!,
+              model: config.elevenLabsTtsModel,
+              languageCode: config.elevenLabsLanguage,
+              outputFormat: config.elevenLabsOutputFormat,
+              firstAudioTimeoutMs: config.elevenLabsFirstAudioTimeoutMs,
+              idleAudioTimeoutMs: config.elevenLabsIdleAudioTimeoutMs,
+              totalTimeoutMs: config.elevenLabsTotalTimeoutMs,
+              maximumQueuedBytes: config.elevenLabsMaxQueuedBytes,
             }, resilienceConfig),
           }),
         },
