@@ -24,8 +24,8 @@ test("uses safe defaults without provider credentials", () => {
   assert.equal(config.googleStreamingSttLocation, 'us');
   assert.equal(config.googleStreamingSttModel, 'chirp_3');
   assert.deepEqual(config.googleStreamingSttPhrases, []);
-  assert.equal(config.meetingAiStreamFirstEventTimeoutMs, 10_000);
-  assert.equal(config.meetingAiStreamIdleEventTimeoutMs, 20_000);
+  assert.equal(config.meetingAiStreamFirstEventTimeoutMs, 30_000);
+  assert.equal(config.meetingAiStreamIdleEventTimeoutMs, 30_000);
   assert.equal(config.voiceStreamingTtsEnabled, false);
   assert.equal(config.voiceStreamingOutputEnabled, false);
   assert.equal(config.voiceStreamingOutputMaxTotalPcmBytes, 8 * 1024 * 1024);
@@ -36,6 +36,7 @@ test("uses safe defaults without provider credentials", () => {
   assert.equal(config.elevenLabsStreamingSttModel, 'scribe_v2_realtime');
   assert.equal(config.elevenLabsTtsModel, 'eleven_flash_v2_5');
   assert.equal(config.elevenLabsOutputFormat, 'pcm_24000');
+  assert.equal(config.elevenLabsMaxQueuedBytes, 8 * 1024 * 1024);
 
   assert.equal(config.livekitUrl, null);
   assert.equal(config.livekitApiKey, null);

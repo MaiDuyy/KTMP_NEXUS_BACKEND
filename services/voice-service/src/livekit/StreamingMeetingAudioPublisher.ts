@@ -98,6 +98,20 @@ async function raceWithAbort<T>(operation: Promise<T>, timeoutMs: number, signal
   });
 }
 
+async function settleCleanup(operation: Promise<unknown>, timeoutMs: number): Promise<void> {
+  await new Promise<void>((resolve) => {
+    let settled = false;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve();
+    };
+    const timer = setTimeout(finish, timeoutMs);
+    operation.then(finish, finish);
+  });
+}
+
 /** Incremental 48 kHz LiveKit publisher. It is intentionally separate from the Phase 1 WAV batch publisher. */
 export class StreamingMeetingAudioPublisher {
   private readonly participants = new Map<string, ParticipantSession>();
@@ -194,12 +208,18 @@ export class StreamingMeetingAudioPublisher {
     if (!participant) return;
     participant.closing = true;
     this.participants.delete(meetingSessionId);
-    await Promise.allSettled([
-      participant.source.close(),
-      participant.track.close(false),
-      participant.published ? participant.room.unpublishTrack(participant.track) : Promise.resolve(),
-      participant.room.disconnect(),
-    ]);
+    try {
+      participant.source.clearQueue();
+    } catch {
+      // Continue cleanup when the native source was already released.
+    }
+    const timeoutMs = this.config.livekitConnectTimeoutMs;
+    if (participant.published) {
+      await settleCleanup(participant.room.unpublishTrack(participant.track), timeoutMs);
+    }
+    await settleCleanup(participant.room.disconnect(), timeoutMs);
+    await settleCleanup(participant.track.close(false), timeoutMs);
+    await settleCleanup(participant.source.close(), timeoutMs);
   }
 
   public async closeAll(): Promise<void> {

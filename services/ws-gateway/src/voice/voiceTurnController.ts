@@ -122,9 +122,15 @@ function getVoicePublicUrl(baseUrl: string, turnId: string, suffix: 'audio'): st
   return url.toString();
 }
 
-function getVoiceStreamUrl(baseUrl: string, turnId: string): string {
+export function getVoiceStreamUrl(baseUrl: string, turnId: string): string {
   const url = new URL(baseUrl);
-  url.pathname = `${url.pathname.replace(/\/$/, '')}/v1/voice/turns/${encodeURIComponent(turnId)}/stream`;
+  const configuredPath = url.pathname.replace(/\/+$/, '');
+  const voicePath = configuredPath.endsWith('/v1/voice')
+    ? configuredPath
+    : `${configuredPath}/v1/voice`;
+  url.pathname = `${voicePath}/turns/${encodeURIComponent(turnId)}/stream`;
+  url.search = '';
+  url.hash = '';
   return url.toString();
 }
 

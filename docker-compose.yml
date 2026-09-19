@@ -1,17 +1,16 @@
-version: "3.8"
+name: ktmp_nexus_backend
 
 services:
   # ============= Infrastructure =============
   
   postgres:
     image: pgvector/pgvector:pg16
-    container_name: ott-postgres
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-ott_user}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-ott_password}
       POSTGRES_DB: ${POSTGRES_DB:-ott_chat}
     ports:
-      - "5432:5432"
+      - "5434:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     networks:
@@ -24,7 +23,6 @@ services:
 
   redis:
     image: redis:7-alpine
-    container_name: ott-redis
     ports:
       - "6379:6379"
     volumes:
@@ -40,7 +38,6 @@ services:
 
   nats:
     image: nats:2.10-alpine
-    container_name: ott-nats
     ports:
       - "4222:4222"   # Client connections
       - "8222:8222"   # HTTP monitoring
@@ -54,7 +51,6 @@ services:
     build:
       context: .
       dockerfile: services/api-gateway/Dockerfile
-    container_name: ott-api-gateway
     ports:
       - "${API_GATEWAY_PORT:-3000}:3000"
     environment:
@@ -74,8 +70,11 @@ services:
       - MESSAGING_GRPC_HOST=${MESSAGING_GRPC_HOST:-messaging-service}
       - MESSAGING_GRPC_PORT=${MESSAGING_GRPC_PORT:-50052}
       - IDENTITY_GRPC_HOST=${IDENTITY_GRPC_HOST:-identity-service}
+      - SEED_ON_STARTUP=${SEED_ON_STARTUP:-false}
       - IDENTITY_GRPC_PORT=${IDENTITY_GRPC_PORT:-50051}
-      - SPRING_AI_URL=${SPRING_AI_URL:-http://host.docker.internal:8080}
+      - SPRING_AI_URL=${SPRING_AI_URL:-http://ai-knowledge:8080}
+      - VOICE_SERVICE_URL=http://voice-service:3035
+      - GATEWAY_SHARED_KEY=${GATEWAY_SHARED_KEY}
     depends_on:
       redis:
         condition: service_healthy
@@ -88,7 +87,6 @@ services:
     build:
       context: .
       dockerfile: services/ws-gateway/Dockerfile
-    container_name: ott-ws-gateway
     ports:
       - "${WS_GATEWAY_PORT:-3001}:3001"
     environment:
@@ -106,7 +104,14 @@ services:
       - MESSAGING_GRPC_PORT=${MESSAGING_GRPC_PORT:-50052}
       - IDENTITY_GRPC_HOST=${IDENTITY_GRPC_HOST:-identity-service}
       - IDENTITY_GRPC_PORT=${IDENTITY_GRPC_PORT:-50051}
-      - SPRING_AI_URL=${SPRING_AI_URL:-http://host.docker.internal:8080}
+      - SPRING_AI_URL=${SPRING_AI_URL:-http://ai-knowledge:8080}
+      - MEETING_VOICE_ENABLED=true
+      - VOICE_METRICS_ENABLED=true
+      - VOICE_TURN_TOKEN_SECRET=${VOICE_TURN_TOKEN_SECRET}
+      - VOICE_INTERNAL_SERVICE_KEY=${VOICE_INTERNAL_SERVICE_KEY}
+      - VOICE_SERVICE_INTERNAL_URL=http://voice-service:3035/internal/voice
+      - VOICE_PUBLIC_API_URL=http://localhost:${API_GATEWAY_PORT:-3000}/api
+      - VOICE_PUBLIC_STREAM_URL=ws://localhost:${VOICE_SERVICE_PORT:-3035}
       # - INTERNAL_SERVICE_SECRET=${INTERNAL_SERVICE_SECRET:-dev-internal-secret-change-in-production}
       - LIVEKIT_API_KEY=${LIVEKIT_API_KEY}
       - LIVEKIT_API_SECRET=${LIVEKIT_API_SECRET}
@@ -126,12 +131,11 @@ services:
     build:
       context: .
       dockerfile: services/identity-service/Dockerfile
-    container_name: ott-identity-service
     ports:
       - "${IDENTITY_SERVICE_PORT:-3010}:3010"
       - "${IDENTITY_GRPC_PORT:-50051}:50051"
     environment:
-      - NODE_ENV=${NODE_ENV-development}
+      - NODE_ENV=${NODE_ENV:-development}
       - PORT=${IDENTITY_SERVICE_PORT:-3010}
       - IDENTITY_GRPC_PORT=${IDENTITY_GRPC_PORT:-50051}
       - AUTH_DATABASE_URL=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_PORT}/${POSTGRES_DB}?schema=auth
@@ -157,7 +161,8 @@ services:
         condition: service_started
     networks:
       - ott-network
-    command: sh -c "npx prisma db push --schema=prisma/auth.prisma --accept-data-loss && npx prisma db push --schema=prisma/userorg.prisma --accept-data-loss && npx prisma db push --schema=prisma/rbac.prisma --accept-data-loss && npm run prisma:seed && node dist/index.js"
+    restart: unless-stopped
+    command: sh -c "npx prisma db push --schema=prisma/auth.prisma --accept-data-loss && npx prisma db push --schema=prisma/userorg.prisma --accept-data-loss && npx prisma db push --schema=prisma/rbac.prisma --accept-data-loss && if [ \"$$SEED_ON_STARTUP\" = \"true\" ]; then npm run prisma:seed; fi && node dist/index.js"
 
   # DEPRECATED: auth-service, userorg-service (replaced by identity-service above)
 
@@ -219,7 +224,6 @@ services:
     build:
       context: .
       dockerfile: services/messaging-service/Dockerfile
-    container_name: ott-messaging-service
     ports:
       - "${MESSAGING_SERVICE_PORT:-3020}:3020"
       - "${MESSAGING_GRPC_PORT:-50052}:50052"
@@ -251,7 +255,6 @@ services:
     build:
       context: .
       dockerfile: services/file-service/Dockerfile
-    container_name: ott-file-service
     ports:
       - "${FILE_SERVICE_PORT:-3014}:3014"
     environment:
@@ -346,11 +349,63 @@ services:
   #   networks:
   #     - ott-network
 
+  # ============= AI Voice Runtime =============
+
+  voice-service:
+    build:
+      context: .
+      dockerfile: services/voice-service/Dockerfile
+    ports:
+      - "${VOICE_SERVICE_PORT:-3035}:3035"
+    environment:
+      - NODE_ENV=${NODE_ENV:-development}
+      - VOICE_SERVICE_PORT=3035
+      - MEETING_VOICE_ENABLED=true
+      - VOICE_METRICS_ENABLED=true
+      - VOICE_STREAMING_ENABLED=true
+      - VOICE_STREAM_ALLOWED_ORIGINS=${VOICE_STREAM_ALLOWED_ORIGINS:-http://localhost:3002}
+      - VOICE_STREAMING_TTS_ENABLED=true
+      - VOICE_STREAMING_OUTPUT_ENABLED=true
+      - REDIS_URL=redis://redis:6379
+      - VOICE_TURN_TOKEN_SECRET=${VOICE_TURN_TOKEN_SECRET}
+      - VOICE_INTERNAL_SERVICE_KEY=${VOICE_INTERNAL_SERVICE_KEY}
+      - VOICE_CONTROL_INTERNAL_URL=http://ws-gateway:3001/internal/voice
+      - MEETING_AI_INTERNAL_URL=http://ai-knowledge:8080/internal/meeting-ai
+      - MEETING_AI_INTERNAL_SERVICE_KEY=${MEETING_AI_INTERNAL_SERVICE_KEY}
+      - MEETING_AI_STREAM_FIRST_EVENT_TIMEOUT_MS=${MEETING_AI_STREAM_FIRST_EVENT_TIMEOUT_MS:-30000}
+      - MEETING_AI_STREAM_IDLE_EVENT_TIMEOUT_MS=${MEETING_AI_STREAM_IDLE_EVENT_TIMEOUT_MS:-30000}
+      - VOICE_STT_PROVIDER=${VOICE_STT_PROVIDER:-google}
+      - VOICE_TTS_PROVIDER=${VOICE_TTS_PROVIDER:-google}
+      - GOOGLE_CLOUD_PROJECT=${GOOGLE_CLOUD_PROJECT}
+      - GOOGLE_CLOUD_LOCATION=${GOOGLE_CLOUD_LOCATION:-global}
+      - GOOGLE_STT_MODEL=${GOOGLE_STT_MODEL:-chirp_2}
+      - GOOGLE_STT_LANGUAGE=${GOOGLE_STT_LANGUAGE:-vi-VN}
+      - GOOGLE_TTS_VOICE=${GOOGLE_TTS_VOICE:-vi-VN-Chirp3-HD-Charon}
+      - GOOGLE_TTS_AUDIO_ENCODING=${GOOGLE_TTS_AUDIO_ENCODING:-LINEAR16}
+      - ELEVENLABS_API_KEY=${ELEVENLABS_API_KEY:-}
+      - ELEVENLABS_STT_MODEL=${ELEVENLABS_STT_MODEL:-scribe_v2}
+      - ELEVENLABS_STREAMING_STT_MODEL=${ELEVENLABS_STREAMING_STT_MODEL:-scribe_v2_realtime}
+      - ELEVENLABS_MAX_QUEUED_BYTES=${ELEVENLABS_MAX_QUEUED_BYTES:-8388608}
+      - ELEVENLABS_TTS_MODEL=${ELEVENLABS_TTS_MODEL:-eleven_flash_v2_5}
+      - ELEVENLABS_TTS_VOICE_ID=${ELEVENLABS_TTS_VOICE_ID:-}
+      - ELEVENLABS_LANGUAGE=${ELEVENLABS_LANGUAGE:-vi}
+      - ELEVENLABS_OUTPUT_FORMAT=${ELEVENLABS_OUTPUT_FORMAT:-pcm_24000}
+      - LIVEKIT_URL=${LIVEKIT_URL}
+      - LIVEKIT_API_KEY=${LIVEKIT_API_KEY}
+      - LIVEKIT_API_SECRET=${LIVEKIT_API_SECRET}
+    volumes:
+      - ${APPDATA}/gcloud:/home/voice/.config/gcloud:ro
+    depends_on:
+      redis:
+        condition: service_healthy
+    networks:
+      - ott-network
+    restart: unless-stopped
+
   notification-service:
     build:
       context: .
       dockerfile: services/notification-service/Dockerfile
-    container_name: ott-notification-service
     ports:
       - "${NOTIFICATION_SERVICE_PORT:-3019}:3019"
     environment:
@@ -377,6 +432,7 @@ services:
 
 networks:
   ott-network:
+    name: ktmp_nexus_backend_ott-network
     driver: bridge
 
 volumes:

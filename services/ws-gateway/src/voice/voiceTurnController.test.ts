@@ -8,7 +8,12 @@ import {
   VOICE_TURN_TOKEN_ISSUER,
   VoiceTurnTokenIssuer,
 } from './turnTokenService.js';
-import { VoiceTurnController, type VoiceRoomBroadcaster, type VoiceSocket } from './voiceTurnController.js';
+import {
+  getVoiceStreamUrl,
+  VoiceTurnController,
+  type VoiceRoomBroadcaster,
+  type VoiceSocket,
+} from './voiceTurnController.js';
 import type { VoiceActiveTurn, VoiceHistoryMessage, VoicePipelineEvent, VoiceTurnState } from '@ott/shared';
 import type { VoiceSessionStore } from './voiceSessionStore.js';
 
@@ -25,6 +30,17 @@ class FakeSocket implements VoiceSocket {
     this.rooms.add(room);
   }
 }
+
+test('getVoiceStreamUrl does not duplicate an existing voice API prefix', () => {
+  assert.equal(
+    getVoiceStreamUrl('ws://localhost:3035/v1/voice', 'turn-1'),
+    'ws://localhost:3035/v1/voice/turns/turn-1/stream',
+  );
+  assert.equal(
+    getVoiceStreamUrl('wss://voice.example.test/', 'turn/with spaces'),
+    'wss://voice.example.test/v1/voice/turns/turn%2Fwith%20spaces/stream',
+  );
+});
 
 class FakeBroadcaster implements VoiceRoomBroadcaster {
   public readonly events: Array<{ room: string; event: string; payload: any }> = [];

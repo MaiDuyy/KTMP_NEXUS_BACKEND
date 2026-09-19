@@ -97,7 +97,8 @@ function failure(error: unknown): { code: VoiceErrorCode; message: string; retry
   const code = error instanceof BatchSttError ||
     error instanceof BatchTtsError ||
     error instanceof VoiceError ||
-    error instanceof InternalServiceError
+    error instanceof InternalServiceError ||
+    error instanceof StreamingOutputError
     ? error.code
     : 'VOICE_INTERNAL_ERROR';
 
