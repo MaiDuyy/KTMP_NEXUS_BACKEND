@@ -1,4 +1,4 @@
-import type { MeetingAiStreamEvent } from '@ott/shared';
+import type { MeetingAiStreamEvent, VoiceErrorCode } from '@ott/shared';
 import type { StreamingMeetingAudioSession, StreamingPublishSummary } from '../livekit/StreamingMeetingAudioPublisher.js';
 import { SentenceBoundaryBuffer, type SpeechSegment } from './sentenceBoundaryBuffer.js';
 import type { StreamingPcmChunk, StreamingTtsProvider } from '../providers/contracts.js';
@@ -43,7 +43,15 @@ export class StreamingOutputError extends Error {
     public readonly aiDone: boolean,
     public readonly firstFramePublished: boolean,
     public readonly fallbackSpeechText: string,
-  ) { super('VOICE_STREAMING_OUTPUT_FAILED'); }
+    public readonly code: VoiceErrorCode = 'VOICE_INTERNAL_ERROR',
+  ) { super(code); }
+}
+
+function streamingFailureCode(error: unknown): VoiceErrorCode {
+  const code = error && typeof error === 'object' ? (error as { code?: unknown }).code : null;
+  return typeof code === 'string' && code.startsWith('VOICE_')
+    ? code as VoiceErrorCode
+    : 'VOICE_INTERNAL_ERROR';
 }
 
 /**
@@ -130,12 +138,17 @@ export class StreamingOutputOrchestrator {
           publishSession.cancel(),
           this.publisher.closeMeeting?.(input.meetingSessionId) ?? Promise.resolve(),
         ]);
-        throw new StreamingOutputError(done, firstFramePublished, fallbackSpeechText.trim());
+        throw new StreamingOutputError(
+          done,
+          firstFramePublished,
+          fallbackSpeechText.trim(),
+          streamingFailureCode(streamingFailure),
+        );
       }
       ttsDoneAtMonotonicMs = performance.now();
       const audio = await publishSession.finish();
       if (!firstFramePublished) {
-        throw new StreamingOutputError(done, false, fallbackSpeechText.trim());
+        throw new StreamingOutputError(done, false, fallbackSpeechText.trim(), 'VOICE_LIVEKIT_PUBLISH_FAILED');
       }
       const playoutCompletedAtMonotonicMs = performance.now();
       return { speechDeltaCount, audioChunkCount, audio, startedAtMonotonicMs, firstAudioAtMonotonicMs, firstFrameAtMonotonicMs, aiDoneAtMonotonicMs, ttsDoneAtMonotonicMs, playoutCompletedAtMonotonicMs };
@@ -149,7 +162,12 @@ export class StreamingOutputOrchestrator {
       ]);
       if (error instanceof StreamingOutputError) throw error;
       if (input.signal?.aborted || (error instanceof Error && error.message === 'VOICE_CANCELLED')) throw error;
-      throw new StreamingOutputError(done, firstFramePublished, fallbackSpeechText.trim());
+      throw new StreamingOutputError(
+        done,
+        firstFramePublished,
+        fallbackSpeechText.trim(),
+        streamingFailureCode(error),
+      );
     }
   }
 }

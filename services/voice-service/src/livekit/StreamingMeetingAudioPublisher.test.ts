@@ -7,12 +7,16 @@ import type { ILivekitAdapter, ILivekitAudioFrame, ILivekitAudioSource, ILivekit
 import { LivekitTokenService } from './LivekitTokenService.js';
 import { StreamingMeetingAudioPublisher, StreamingPublishError } from './StreamingMeetingAudioPublisher.js';
 
-class FakeTrack implements ILivekitLocalAudioTrack { async close(): Promise<void> {} }
+class FakeTrack implements ILivekitLocalAudioTrack {
+  public closeCalls = 0;
+  public async close(): Promise<void> { this.closeCalls += 1; }
+}
 class FakeSource extends EventEmitter implements ILivekitAudioSource {
   public readonly frames: ILivekitAudioFrame[] = [];
   public clearQueueCalls = 0;
   public holdPlayout = false;
   public captureError: Error | null = null;
+  public closeCalls = 0;
   private resolvePlayout: (() => void) | null = null;
   public async captureFrame(frame: ILivekitAudioFrame): Promise<void> {
     if (this.captureError) throw this.captureError;
@@ -23,24 +27,31 @@ class FakeSource extends EventEmitter implements ILivekitAudioSource {
     await new Promise<void>((resolve) => { this.resolvePlayout = resolve; });
   }
   public clearQueue(): void { this.clearQueueCalls += 1; this.resolvePlayout?.(); }
-  public getTrack(): ILivekitLocalAudioTrack { return new FakeTrack(); }
-  public async close(): Promise<void> {}
+  public readonly track = new FakeTrack();
+  public getTrack(): ILivekitLocalAudioTrack { return this.track; }
+  public async close(): Promise<void> { this.closeCalls += 1; }
 }
 class FakeRoom implements ILivekitRoom {
   public connectCalls = 0;
   public publishCalls = 0;
   public connectError: Error | null = null;
   public publishError: Error | null = null;
+  public disconnectCalls = 0;
+  public unpublishCalls = 0;
+  public hangUnpublish = false;
   public async connect(): Promise<void> {
     this.connectCalls += 1;
     if (this.connectError) throw this.connectError;
   }
-  public async disconnect(): Promise<void> {}
+  public async disconnect(): Promise<void> { this.disconnectCalls += 1; }
   public async publishTrack(): Promise<void> {
     this.publishCalls += 1;
     if (this.publishError) throw this.publishError;
   }
-  public async unpublishTrack(): Promise<void> {}
+  public async unpublishTrack(): Promise<void> {
+    this.unpublishCalls += 1;
+    if (this.hangUnpublish) await new Promise<void>(() => undefined);
+  }
 }
 class FakeAdapter implements ILivekitAdapter {
   public readonly source = new FakeSource();
@@ -138,4 +149,20 @@ test('records native frame failures against the publish circuit', async () => {
   await session.write(pcm(0, Array.from({ length: 480 }, () => 1)));
   await assert.rejects(session.write(pcm(1, Array.from({ length: 480 }, () => 1))));
   assert.equal((publisher as any).publishCircuitBreaker.getState(), 'OPEN');
+});
+
+test('bounds native cleanup and continues releasing later resources', async () => {
+  const adapter = new FakeAdapter();
+  adapter.room.hangUnpublish = true;
+  const boundedConfig = { ...config(), livekitConnectTimeoutMs: 10 };
+  const publisher = new StreamingMeetingAudioPublisher(boundedConfig, new LivekitTokenService(boundedConfig), adapter);
+  const session = await publisher.start({ meetingSessionId: 'meeting-cleanup', roomName: 'room-cleanup', turnId: 'turn-1' });
+  await session.cancel();
+
+  await publisher.closeAll();
+
+  assert.equal(adapter.room.unpublishCalls, 1);
+  assert.equal(adapter.room.disconnectCalls, 1);
+  assert.equal(adapter.source.track.closeCalls, 1);
+  assert.equal(adapter.source.closeCalls, 1);
 });
