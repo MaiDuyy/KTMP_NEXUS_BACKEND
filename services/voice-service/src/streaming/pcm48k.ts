@@ -1,4 +1,4 @@
-import type { StreamingPcmChunk } from './googleStreamingTts.js';
+import type { StreamingPcmChunk } from '../providers/contracts.js';
 
 export const LIVEKIT_SAMPLE_RATE_HERTZ = 48_000;
 export const LIVEKIT_SAMPLES_PER_20MS_FRAME = 960;

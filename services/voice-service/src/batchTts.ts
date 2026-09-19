@@ -1,16 +1,12 @@
 import { TextToSpeechClient } from "@google-cloud/text-to-speech";
+import {
+  BatchTtsError,
+  type BatchTtsProvider,
+  type BatchTtsResult,
+} from './providers/contracts.js';
 
-export interface BatchTtsResult {
-  audio: Buffer;
-  contentType: string;
-  encoding: string;
-  sampleRateHertz: number;
-  channelCount: number;
-}
-
-export interface TtsProvider {
-  synthesize(text: string, signal?: AbortSignal): Promise<BatchTtsResult>;
-}
+export { BatchTtsError } from './providers/contracts.js';
+export type { BatchTtsResult, BatchTtsProvider as TtsProvider } from './providers/contracts.js';
 
 export interface GoogleBatchTtsConfig {
   projectId: string;
@@ -20,21 +16,13 @@ export interface GoogleBatchTtsConfig {
   timeoutMs: number;
 }
 
-export class BatchTtsError extends Error {
-  public constructor(
-    public readonly code: "VOICE_TTS_TIMEOUT" | "VOICE_TTS_UNAVAILABLE" | "VOICE_TTS_QUOTA_EXCEEDED" | "VOICE_CANCELLED" | "VOICE_NO_SPEECH" | "VOICE_SPEECH_TOO_LONG"
-  ) {
-    super(code);
-  }
-}
-
 export interface TextToSpeechSynthesizerClient {
   synthesizeSpeech(request: any, options: { timeout: number }): Promise<[any]>;
 }
 
 import { CircuitBreaker, ProviderResilienceConfig, Resilience } from './resilience.js';
 
-export class GoogleBatchTtsAdapter implements TtsProvider {
+export class GoogleBatchTtsAdapter implements BatchTtsProvider {
   public readonly circuitBreaker: CircuitBreaker;
   private readonly client: TextToSpeechSynthesizerClient;
   private readonly resilienceConfig?: ProviderResilienceConfig;

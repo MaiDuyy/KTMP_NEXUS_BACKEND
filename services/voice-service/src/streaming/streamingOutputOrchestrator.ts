@@ -1,7 +1,7 @@
 import type { MeetingAiStreamEvent } from '@ott/shared';
 import type { StreamingMeetingAudioSession, StreamingPublishSummary } from '../livekit/StreamingMeetingAudioPublisher.js';
 import { SentenceBoundaryBuffer, type SpeechSegment } from './sentenceBoundaryBuffer.js';
-import type { StreamingPcmChunk, StreamingTtsSession } from './googleStreamingTts.js';
+import type { StreamingPcmChunk, StreamingTtsProvider } from '../providers/contracts.js';
 
 export interface StreamingOutputPublisher {
   start(input: {
@@ -14,9 +14,7 @@ export interface StreamingOutputPublisher {
   closeMeeting?(meetingSessionId: string): Promise<void>;
 }
 
-export interface StreamingOutputTtsProvider {
-  open(signal?: AbortSignal): StreamingTtsSession;
-}
+export type StreamingOutputTtsProvider = StreamingTtsProvider;
 
 export interface StreamingOutputInput {
   meetingSessionId: string;

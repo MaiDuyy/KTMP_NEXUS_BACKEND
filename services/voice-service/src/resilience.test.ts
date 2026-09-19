@@ -8,7 +8,15 @@ import {
   cancellableSleep,
   setResilienceObserver,
   ResilienceObserver,
+  circuitKeyToProvider,
 } from './resilience.js';
+
+it('maps ElevenLabs circuit keys to finite provider labels', () => {
+  assert.equal(circuitKeyToProvider('elevenlabs_stt/batch'), 'elevenlabs_stt');
+  assert.equal(circuitKeyToProvider('elevenlabs_stt/streaming'), 'elevenlabs_stt');
+  assert.equal(circuitKeyToProvider('elevenlabs_tts/batch'), 'elevenlabs_tts');
+  assert.equal(circuitKeyToProvider('elevenlabs_tts/streaming'), 'elevenlabs_tts');
+});
 
 describe('CircuitBreaker', () => {
   let clockTime = 1000;

@@ -1,10 +1,15 @@
 import { v2 } from "@google-cloud/speech";
+import {
+  BatchSttError,
+  type BatchSttProvider,
+  type BatchSttResult,
+} from './providers/contracts.js';
+
+export { BatchSttError } from './providers/contracts.js';
+export type { BatchSttResult } from './providers/contracts.js';
 
 export interface BatchSttConfig { projectId: string; location: string; model: string; languageCode: string; timeoutMs: number; }
-export interface BatchSttResult { transcript: string; confidence: number | null; }
 export interface SpeechRecognizerClient { recognize(request: unknown, options: { timeout: number }): Promise<[any]>; }
-
-export class BatchSttError extends Error { public constructor(public readonly code: "VOICE_NO_SPEECH" | "VOICE_STT_TIMEOUT" | "VOICE_STT_UNAVAILABLE" | "VOICE_STT_QUOTA_EXCEEDED" | "VOICE_CANCELLED") { super(code); } }
 
 function withAbort<T>(operation: Promise<T>, signal?: AbortSignal): Promise<T> {
   if (!signal) return operation;
@@ -18,7 +23,7 @@ function withAbort<T>(operation: Promise<T>, signal?: AbortSignal): Promise<T> {
 
 import { CircuitBreaker, ProviderResilienceConfig, Resilience } from './resilience.js';
 
-export class GoogleBatchSttAdapter {
+export class GoogleBatchSttAdapter implements BatchSttProvider {
   public readonly circuitBreaker: CircuitBreaker;
   private readonly client: SpeechRecognizerClient;
   private readonly resilienceConfig?: ProviderResilienceConfig;

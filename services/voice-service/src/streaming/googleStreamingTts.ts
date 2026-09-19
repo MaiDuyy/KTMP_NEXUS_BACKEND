@@ -1,6 +1,20 @@
 import { TextToSpeechClient } from '@google-cloud/text-to-speech';
 import type { CancellableStream } from 'google-gax';
 import {
+  StreamingTtsError,
+  type StreamingPcmChunk,
+  type StreamingTtsProvider,
+  type StreamingTtsSegmentState,
+  type StreamingTtsSession,
+} from '../providers/contracts.js';
+export { StreamingTtsError } from '../providers/contracts.js';
+export type {
+  StreamingPcmChunk,
+  StreamingTtsSegmentLedgerEntry,
+  StreamingTtsSegmentState,
+  StreamingTtsSession,
+} from '../providers/contracts.js';
+import {
   CircuitBreaker,
   CircuitBreakerError,
   CircuitPermit,
@@ -19,42 +33,8 @@ export interface StreamingTtsConfig {
   maximumQueuedBytes: number;
 }
 
-export interface StreamingPcmChunk {
-  segmentSequence: number;
-  audio: Buffer;
-  encoding: 'PCM16LE';
-  sampleRateHertz: number;
-  channelCount: 1;
-  receivedAtMs: number;
-}
-
-export type StreamingTtsSegmentState = 'SENT_TO_TTS' | 'AUDIO_STARTED' | 'AUDIO_COMPLETED' | 'CANCELLED' | 'FAILED';
-
-export interface StreamingTtsSegmentLedgerEntry {
-  segmentSequence: number;
-  state: StreamingTtsSegmentState;
-}
-
-export interface StreamingTtsSession {
-  writeSegment(segmentSequence: number, text: string): Promise<void>;
-  finish(): Promise<void>;
-  cancel(): Promise<void>;
-  audio: AsyncIterable<StreamingPcmChunk>;
-  getSegmentLedger(): readonly StreamingTtsSegmentLedgerEntry[];
-}
-
 export interface StreamingTextToSpeechClient {
   streamingSynthesize(): CancellableStream;
-}
-
-export class StreamingTtsError extends Error {
-  public constructor(
-    public readonly code: 'VOICE_TTS_TIMEOUT' | 'VOICE_TTS_UNAVAILABLE' | 'VOICE_TTS_QUOTA_EXCEEDED' | 'VOICE_CANCELLED' | 'VOICE_NO_SPEECH' | 'VOICE_SPEECH_TOO_LONG',
-    public readonly providerCode: string | number | null = null,
-    public readonly providerMessage: string | null = null,
-  ) {
-    super(code);
-  }
 }
 
 class AsyncAudioQueue implements AsyncIterable<StreamingPcmChunk> {
@@ -127,7 +107,7 @@ function toAudioBuffer(value: unknown): Buffer | null {
   return null;
 }
 
-export class GoogleStreamingTtsAdapter {
+export class GoogleStreamingTtsAdapter implements StreamingTtsProvider {
   public readonly circuitBreaker: CircuitBreaker;
   private readonly client: StreamingTextToSpeechClient;
   private readonly resilienceConfig?: ProviderResilienceConfig;
