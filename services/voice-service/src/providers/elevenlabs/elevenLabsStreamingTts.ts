@@ -217,7 +217,7 @@ export class ElevenLabsStreamingTtsAdapter implements StreamingTtsProvider {
             receivedAtMs: Date.now(),
           });
         }
-        if (message.is_final === true) {
+        if (message.isFinal === true || message.is_final === true) {
           if (!finishRequested) throw new ElevenLabsProtocolError('unexpected_final');
           succeed();
         }

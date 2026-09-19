@@ -190,7 +190,7 @@ test('streaming TTS emits ordered PCM, flushes and completes ledger', async () =
       if (typeof frame.text === 'string' && frame.text.trim().length > 0) {
         socket.send(JSON.stringify({ audio: Buffer.alloc(960, 3).toString('base64'), is_final: false }));
       }
-      if (frame.text === '') socket.send(JSON.stringify({ is_final: true }));
+      if (frame.text === '') socket.send(JSON.stringify({ isFinal: true }));
     });
   });
   try {
